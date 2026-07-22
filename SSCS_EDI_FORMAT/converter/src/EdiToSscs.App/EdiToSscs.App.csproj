@@ -1,0 +1,58 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EdiToSscs.App</RootNamespace>
+    <AssemblyName>EDI-to-SSCS-Converter</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <AssemblyTitle>EDI to SSCS Converter</AssemblyTitle>
+    <Product>EDI to SSCS Converter</Product>
+    <Description>Converts fixed-width EDI and EDI13 invoice files to SSCS text files.</Description>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!-- Portable single-file publish: everything (managed + native) lives inside one EXE. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtraction>true</IncludeNativeLibrariesForSelfExtraction>
+    <IncludeAllContentForSelfExtraction>true</IncludeAllContentForSelfExtraction>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EdiToSscs.Core\EdiToSscs.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\best-stop-logo.png" />
+  </ItemGroup>
+
+  <!--
+    The WindowsDesktop runtime pack ships WPF-only native libraries that are marked
+    ExcludeFromSingleFile, which would leave loose DLLs next to the published EXE.
+    This is a WinForms-only application (UseWPF is false), so none of them are ever
+    loaded; removing them yields a genuinely single portable EXE.
+  -->
+  <Target Name="StripUnusedWpfNativeLibraries" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)' == 'wpfgfx_cor3'
+                or '%(Filename)' == 'PresentationNative_cor3'
+                or '%(Filename)' == 'PenImc_cor3'
+                or '%(Filename)' == 'D3DCompiler_47_cor3'
+                or '%(Filename)' == 'vcruntime140_cor3'
+                or '%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

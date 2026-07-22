@@ -1,0 +1,9 @@
+﻿**/bin/
+**/obj/
+**/.vs/
+*.user
+*.suo
+*.old-running
+converter/publish/
+*.exe
+!**/Fixtures/**
