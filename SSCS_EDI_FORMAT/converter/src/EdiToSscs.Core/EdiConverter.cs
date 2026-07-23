@@ -11,6 +11,12 @@ public enum EdiFormat
     Edi13,
     /// <summary>EDI13 Ruby Red variant (64-byte header, 79-byte B records with a fixed 10-byte zero suffix).</summary>
     Edi13RubyRed,
+    /// <summary>
+    /// "STRP/Alp"-style standard EDI: 75-byte product rows (the 76-byte SSCS layout minus its trailing
+    /// pad) paired with an 8-digit MMDDYYYY header date. Rows are padded to 76 and the date is shortened
+    /// to MMDDYY. Verified end-to-end against SSCS ingestion of Invoice_RT006 (see FORMAT_SPEC.md).
+    /// </summary>
+    StandardEdi75,
 }
 
 /// <summary>Line-ending kind of a single record.</summary>
@@ -23,7 +29,8 @@ public static class ReasonCodes
     public const string BinaryContent = "BINARY_CONTENT";
     public const string LoneCarriageReturn = "LONE_CARRIAGE_RETURN";
     public const string InvalidHeader = "INVALID_HEADER";
-    public const string VendorTooLong = "VENDOR_TOO_LONG";
+    public const string VendorTruncated = "VENDOR_TRUNCATED";
+    public const string HeaderDateReformatted = "HEADER_DATE_REFORMATTED";
     public const string BlankLine = "BLANK_LINE";
     public const string UnsupportedRecordType = "UNSUPPORTED_RECORD_TYPE";
     public const string UnsupportedRecordLength = "UNSUPPORTED_RECORD_LENGTH";
@@ -131,6 +138,10 @@ public static class EdiConverter
                 format = EdiFormat.Edi13;
             else if (firstBWidth == 76)
                 format = EdiFormat.StandardEdi;
+            else if (firstBWidth == 75 && IsStrpEightDigitDateHeader(input, header))
+                // STRP/Alp-style: a standard-style row one byte short of 76 (it omits the trailing pad)
+                // paired with an 8-digit MMDDYYYY header date. Verified via SSCS ingestion (Invoice_RT006).
+                format = EdiFormat.StandardEdi75;
             else if (firstBWidth < 0)
                 format = vendorToken.EndsWith("13", StringComparison.Ordinal) ? EdiFormat.Edi13 : EdiFormat.StandardEdi;
             else
@@ -142,23 +153,47 @@ public static class EdiConverter
             if (vendorToken.EndsWith("13", StringComparison.Ordinal) && vendorToken.Length > 2)
                 vendorToken = vendorToken[..^2];
 
-            if (vendorToken.Length > 6)
-                throw new EdiConversionException(
-                    ReasonCodes.VendorTooLong,
-                    $"The vendor name '{vendorToken}' is too long to fit the SSCS header field.", 1);
+            // Verified rule (fixture EDI_FRITOLAY-48690739): a vendor token that fills the whole
+            // 7-char EDI vendor field is truncated to the 6-char SSCS field, not rejected. The
+            // authoritative output for 'FRITOLA...' is 'AFRITOL...'. Truncation drops a character,
+            // so it is surfaced as a warning rather than done silently.
+            string outVendor = vendorToken;
+            if (outVendor.Length > 6)
+            {
+                outVendor = outVendor[..6];
+                warnings.Add(new ConversionWarning(1, ReasonCodes.VendorTruncated,
+                    $"The vendor name '{vendorToken}' was shortened to '{outVendor}' to fit the 6-character SSCS header field."));
+            }
 
-            // Verified rule: output header = 'A' + vendor padded to 6 + input bytes [7..], total length preserved.
-            newHeader = new byte[header.Length];
-            newHeader[0] = (byte)'A';
-            for (int i = 0; i < 6; i++)
-                newHeader[1 + i] = i < vendorToken.Length ? (byte)vendorToken[i] : Space;
-            Buffer.BlockCopy(input, header.Offset + 7, newHeader, 7, header.Length - 7);
+            if (format == EdiFormat.StandardEdi75)
+            {
+                // Shorten the 8-digit MMDDYYYY header date to the canonical 6-digit MMDDYY so the header
+                // becomes the standard 33 bytes. Records a HEADER_DATE_REFORMATTED warning.
+                newHeader = BuildShortenedDateHeader(input, header, outVendor, warnings);
+            }
+            else
+            {
+                // Verified rule: output header = 'A' + vendor padded to 6 + input bytes [7..], length preserved.
+                newHeader = new byte[header.Length];
+                newHeader[0] = (byte)'A';
+                for (int i = 0; i < 6; i++)
+                    newHeader[1 + i] = i < outVendor.Length ? (byte)outVendor[i] : Space;
+                Buffer.BlockCopy(input, header.Offset + 7, newHeader, 7, header.Length - 7);
+
+                // Verified rule (fixture EDI_FRITOLAY-48690739): when the header's numeric payload is
+                // the 26-char invoice(10)+date(6)+amount(10) layout and the 6-digit date is written
+                // as YYMMDD, it is rewritten as MMDDYY. Applied only when the first two digits exceed
+                // 12 so they cannot be a month, which makes the YYMMDD form unambiguous. GHRA/PEPSI
+                // dates are already MMDDYY (month <= 12) and are therefore never altered.
+                MaybeReformatHeaderDate(newHeader, header.Length, warnings);
+            }
         }
 
         // ---- Records ----
         int expectedBWidth = format switch
         {
             EdiFormat.StandardEdi => 76,
+            EdiFormat.StandardEdi75 => 75,
             EdiFormat.Edi13 => 78,
             _ => 79,
         };
@@ -324,6 +359,85 @@ public static class EdiConverter
         "Line 1 is not a recognized EDI header record. This file does not look like a supported EDI or EDI13 invoice.",
         lineNumber);
 
+    /// <summary>
+    /// Rewrites an unambiguous YYMMDD header date to MMDDYY in place. The date occupies the six
+    /// bytes after the 10-digit invoice number in a vendor-style header whose numeric payload is
+    /// exactly 26 bytes (invoice 10 + date 6 + amount 10). It is only rewritten when the first two
+    /// digits form a value greater than 12: those cannot be a month, so the field can only be
+    /// YYMMDD. This reproduces the authoritative SSCS output for FRITOLAY invoices while leaving
+    /// the GHRA/PEPSI fixtures (whose dates are already MMDDYY, month &lt;= 12) untouched.
+    /// Derived from the EDI_FRITOLAY-48690739 reference pair; see FORMAT_SPEC.md.
+    /// </summary>
+    private static void MaybeReformatHeaderDate(byte[] header, int headerLength, List<ConversionWarning> warnings)
+    {
+        const int payloadStart = 7;
+        if (headerLength - payloadStart != 26) return; // only the invoice+date+amount payload carries a date here
+
+        int d = payloadStart + 10; // date field begins right after the 10-digit invoice number
+        for (int i = 0; i < 6; i++)
+            if (!IsDigit(header[d + i])) return;
+
+        int leading = (header[d] - '0') * 10 + (header[d + 1] - '0');
+        if (leading <= 12) return; // could be a real month -> ambiguous, leave the field unchanged
+
+        Span<byte> date = header.AsSpan(d, 6);
+        string before = Encoding.ASCII.GetString(date);
+        byte y0 = date[0], y1 = date[1];      // YY
+        date[0] = date[2]; date[1] = date[3]; // MM
+        date[2] = date[4]; date[3] = date[5]; // DD
+        date[4] = y0;      date[5] = y1;      // YY moved to the end -> MMDDYY
+        string after = Encoding.ASCII.GetString(date);
+
+        warnings.Add(new ConversionWarning(1, ReasonCodes.HeaderDateReformatted,
+            $"The header date '{before}' (YYMMDD) was reformatted to '{after}' (MMDDYY) to match the SSCS date format."));
+    }
+
+    /// <summary>
+    /// Structural test for the STRP/Alp-style header: a vendor-style header whose numeric payload is
+    /// 28 bytes = invoice(10) + an 8-digit MMDDYYYY date + amount(10). Paired by the caller with
+    /// 75-byte product rows. Verified via SSCS ingestion of Invoice_RT006.
+    /// </summary>
+    private static bool IsStrpEightDigitDateHeader(byte[] input, Line header)
+    {
+        if (header.Length - 7 != 28) return false;
+        ReadOnlySpan<byte> h = input.AsSpan(header.Offset, header.Length);
+        int d = 7 + 10; // date begins after the 7-char vendor field and 10-digit invoice number
+        for (int i = 0; i < 8; i++)
+            if (!IsDigit(h[d + i])) return false;
+        int mm = (h[d] - '0') * 10 + (h[d + 1] - '0');
+        int dd = (h[d + 2] - '0') * 10 + (h[d + 3] - '0');
+        return mm is >= 1 and <= 12 && dd is >= 1 and <= 31;
+    }
+
+    /// <summary>
+    /// Builds the SSCS header for a StandardEdi75 (STRP/Alp) file by shortening the 8-digit MMDDYYYY
+    /// header date to the canonical 6-digit MMDDYY (dropping the century), so the header is the standard
+    /// 33 bytes: 'A' + vendor(6) + invoice(10) + MMDDYY(6) + amount(10). Records a HEADER_DATE_REFORMATTED
+    /// warning. Verified via SSCS ingestion of Invoice_RT006 (date read back as 7/21/2026).
+    /// </summary>
+    private static byte[] BuildShortenedDateHeader(byte[] input, Line header, string outVendor, List<ConversionWarning> warnings)
+    {
+        ReadOnlySpan<byte> h = input.AsSpan(header.Offset, header.Length);
+        ReadOnlySpan<byte> invoice = h.Slice(7, 10);
+        ReadOnlySpan<byte> date8 = h.Slice(17, 8);   // MMDDYYYY
+        ReadOnlySpan<byte> amount = h.Slice(25, 10);
+
+        var nh = new byte[33];
+        nh[0] = (byte)'A';
+        for (int i = 0; i < 6; i++)
+            nh[1 + i] = i < outVendor.Length ? (byte)outVendor[i] : Space;
+        invoice.CopyTo(nh.AsSpan(7, 10));
+        nh[17] = date8[0]; nh[18] = date8[1]; nh[19] = date8[2]; nh[20] = date8[3]; // MMDD
+        nh[21] = date8[6]; nh[22] = date8[7];                                       // last two digits of the year
+        amount.CopyTo(nh.AsSpan(23, 10));
+
+        string d8 = Encoding.ASCII.GetString(date8);
+        string d6 = Encoding.ASCII.GetString(nh, 17, 6);
+        warnings.Add(new ConversionWarning(1, ReasonCodes.HeaderDateReformatted,
+            $"The header date '{d8}' (MMDDYYYY) was shortened to '{d6}' (MMDDYY) to match the SSCS date format."));
+        return nh;
+    }
+
     private static int FirstProductRecordWidth(byte[] input, List<Line> lines)
     {
         for (int i = 1; i < lines.Count; i++)
@@ -355,6 +469,17 @@ public static class EdiConverter
         {
             // Verified: B + 11-char code field + remainder preserved verbatim (bytes 12..75).
             var outRec = rec.ToArray();
+            ApplyUpcERule(outRec.AsSpan(1, 11), lineNumber, warnings, ref expanded, ref blanked);
+            return outRec;
+        }
+
+        if (format == EdiFormat.StandardEdi75)
+        {
+            // A 75-byte record is the 76-byte SSCS layout missing its trailing pad byte (column 75).
+            // Restore the pad; handle the 11-char code field exactly like standard EDI.
+            var outRec = new byte[76];
+            rec.CopyTo(outRec);
+            outRec[75] = Space;
             ApplyUpcERule(outRec.AsSpan(1, 11), lineNumber, warnings, ref expanded, ref blanked);
             return outRec;
         }

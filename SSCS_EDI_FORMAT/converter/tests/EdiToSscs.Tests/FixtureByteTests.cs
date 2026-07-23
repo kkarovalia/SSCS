@@ -77,6 +77,37 @@ public class FixtureByteTests
         AssertBytesEqual(Fixture(@"SSCS\SSCS_GHRA_118955.txt"), result.OutputBytes);
     }
 
+    /// <summary>
+    /// FRITOLAY invoice: a real non-GHRA vendor. Proves two rules the GHRA/PEPSI set never
+    /// exercised — a 7-char vendor field truncates to 6 ('FRITOLA' -> 'FRITOL'), and a YYMMDD
+    /// header date is rewritten as MMDDYY ('240206' -> '020624'). Body records are standard
+    /// 76-byte EDI and pass through byte-for-byte.
+    /// </summary>
+    [Fact]
+    public void FritoLayEdi_To_FritoLaySscs_ByteForByte()
+    {
+        byte[] input = Fixture(@"EDI\EDI_FRITOLAY-48690739.txt");
+        var result = EdiConverter.Convert(input);
+        Assert.Equal(EdiFormat.StandardEdi, result.Format);
+        AssertBytesEqual(Fixture(@"SSCS\SSCS_FRITOLAY-48690739.txt"), result.OutputBytes);
+        Assert.Contains(result.Warnings, w => w.ReasonCode == ReasonCodes.VendorTruncated);
+        Assert.Contains(result.Warnings, w => w.ReasonCode == ReasonCodes.HeaderDateReformatted);
+    }
+
+    /// <summary>
+    /// Real STRP/Alp invoice (Invoice_RT006). Golden master: the reference is the converter output that
+    /// SSCS ingested correctly (invoice #6, 7/21/2026, $136.50, all 7 line items verified in the SSCS
+    /// UI), so this locks the confirmed behavior byte-for-byte against regressions.
+    /// </summary>
+    [Fact]
+    public void RealStrpInvoice_ConvertsByteForByte()
+    {
+        byte[] input = Fixture(@"EDI\Invoice_RT006_EDI.txt");
+        var result = EdiConverter.Convert(input);
+        Assert.Equal(EdiFormat.StandardEdi75, result.Format);
+        AssertBytesEqual(Fixture(@"SSCS\SSCS_Invoice_RT006_EDI.txt"), result.OutputBytes);
+    }
+
     [Fact]
     public void ConversionStats_AreReported()
     {

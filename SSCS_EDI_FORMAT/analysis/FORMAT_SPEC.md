@@ -10,9 +10,9 @@ any non-ASCII byte that is not at a verified transformation position.
 
 ## File-level structure
 
-| Property        | Standard EDI (GHRA/PEPSI) | EDI13 (GHRA13)     | EDI13 Ruby Red variant |
-|-----------------|---------------------------|--------------------|------------------------|
-| Header length   | 33 (GHRA), 27 (PEPSI)     | 33                 | 64                     |
+| Property        | Standard EDI (GHRA/PEPSI/FRITOLAY) | EDI13 (GHRA13)     | EDI13 Ruby Red variant |
+|-----------------|------------------------------------|--------------------|------------------------|
+| Header length   | 33 (GHRA/FRITOLAY), 27 (PEPSI)     | 33                 | 64                     |
 | B record length | 76                        | 78                 | 79                     |
 | C record length | 29 (preserved verbatim)   | 29                 | (none in fixture)      |
 | Line endings    | CRLF                      | CRLF               | LF                     |
@@ -33,18 +33,40 @@ Input layout: `[0..6]` = 7-char vendor field (vendor token left-aligned, space p
 `[7..]` = numeric payload (digits and `-`; e.g. GHRA: invoice 10 + date 6 + amount 10;
 PEPSI: invoice 10 + amount 10). Fixture `EDI_GHRA_118955` proves amounts may contain `-`.
 
-Output layout: `A` + 6-char vendor field + input bytes `[7..]` unchanged.
+Output layout: `A` + 6-char vendor field + input bytes `[7..]` (with the date rule below).
 Total length is preserved.
 
 - `GHRA   0000131454…` → `AGHRA  0000131454…`
 - `PEPSI  0080471906…` → `APEPSI 0080471906…`
+- `FRITOLA0048690739…` → `AFRITOL0048690739…`
 - A `13` suffix on the vendor token is removed **regardless of detected record width**:
   `GHRA13 0000131454…` → `AGHRA  0000131454…`. Hidden fixture 810738 proves this also
   applies when a `GHRA13`-headed file carries standard 76-byte records (the file
   converts as standard EDI, but the header still becomes `AGHRA  `).
 
-A vendor token longer than 6 characters cannot be represented in the output field and is
-rejected (never truncated silently).
+**Vendor token longer than 6 characters → truncated to 6** (a character is dropped, and a
+`VENDOR_TRUNCATED` warning is recorded). Fixture `EDI_FRITOLAY-48690739` proves this: the
+7-char EDI vendor field `FRITOLA` becomes the 6-char SSCS field `FRITOL` (output `AFRITOL…`).
+The EDI vendor field is fixed at 7 bytes, so 7→6 is the only truncation that can occur.
+(This supersedes the earlier GHRA/PEPSI-only assumption that over-long vendors were rejected;
+those fixtures simply never had a vendor wider than 6.)
+
+### Header date reformat (`YYMMDD` → `MMDDYY`)
+
+When the numeric payload is the 26-char `invoice(10) + date(6) + amount(10)` layout, the
+6-digit date field (payload bytes `[10..16)`) is rewritten from `YYMMDD` to `MMDDYY` **only
+when its first two digits are greater than 12** — a value that cannot be a month, so the field
+is unambiguously `YYMMDD`. A `HEADER_DATE_REFORMATTED` warning is recorded.
+
+- Fixture `EDI_FRITOLAY-48690739`: `…0048690739` **`240206`** `0000017899` → `…0048690739` **`020624`** `0000017899` (Feb 6 2024).
+- GHRA/PEPSI are untouched: every GHRA date is already `MMDDYY` (month `01`–`12`, so the
+  first two digits are `≤ 12`), and PEPSI's payload is 20 chars (no date field). Verified
+  against all 16 original + 19 hidden fixture pairs (still byte-for-byte identical).
+
+This rule is derived from a single reference pair. A date whose first two digits are `≤ 12`
+is genuinely ambiguous (e.g. `110206` could be Nov 2 2006 **or** Feb 6 2011) and is therefore
+left **unchanged**; distinguishing those requires a per-vendor convention we do not yet have a
+fixture for.
 
 ### Ruby Red header (EDI13 variant)
 
@@ -118,6 +140,29 @@ Codes that do not match the 8-digit+3-space pattern (e.g. `7777777778 `, 10 digi
 
 Preserved byte-for-byte, including all trailing spaces
 (`CSERSERVICE CHARGE           `, 29 bytes in every fixture).
+
+## STRP / Alp 75-byte standard EDI (`StandardEdi75`)
+
+Example input: `Invoice_RT006_EDI.txt` (vendor `STRP`). Detected structurally: a vendor-style
+header whose payload is **28** bytes = invoice(10) + **8-digit `MMDDYYYY`** date + amount(10),
+paired with **75-byte** `B` records. Both differences are resolved by the same normalization
+principle the GHRA set proves (EDI13's 78-byte rows normalize to 76; the header is always 33):
+
+- **Header:** shorten the 8-digit `MMDDYYYY` date to 6-digit `MMDDYY` (drop the century), giving
+  the canonical 33-byte header `A` + vendor(6) + invoice(10) + `MMDDYY`(6) + amount(10).
+  Example: `STRP   0000000006`**`07212026`**`0000013650` → `ASTRP  0000000006`**`072126`**`0000013650`.
+  Records a `HEADER_DATE_REFORMATTED` warning.
+- **B records:** column analysis of 7,054 real SSCS rows shows the 76-byte layout ends in a
+  trailing pad (column 75 is a space in 99.7% of rows). A 75-byte STRP row aligns with that
+  schema through column 74, so it is normalized by **appending one trailing space** (→ 76).
+  The 11-char code field is handled exactly like standard EDI (UPC-E rule applies).
+
+**Verification:** derived from the GHRA gold-standard normalization principle (this format had no
+byte-reference of its own), then **confirmed end-to-end by SSCS**: the converted `Invoice_RT006`
+was ingested by the live SSCS system, which read back invoice #6, date **7/21/2026** (confirming
+the `MMDDYYYY`→`MMDDYY` shortening), total **$136.50**, and all seven line items (qty 5, ea list
+$6.99, ext cost $19.50, 44.21% margin each; 7 × $19.50 = $136.50). The confirmed output is locked
+as a golden-master fixture (`SSCS_Invoice_RT006_EDI.txt`).
 
 ## Rejection rules (validated before any output is written)
 

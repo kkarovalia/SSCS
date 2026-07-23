@@ -392,11 +392,67 @@ public class FormatTests
     // ------------------------------------------------ header edge cases
 
     [Fact]
-    public void VendorNameTooLong_IsRejected_NotTruncated()
+    public void VendorNameLongerThanSix_IsTruncatedToSix_AndWarns()
     {
-        string header = "ABCDEFG" + "0000131454"; // 7-char vendor cannot fit 'A' + 6 chars
-        var ex = Assert.Throws<EdiConversionException>(() => EdiConverter.Convert(CrlfFile(header, B("04799585508"))));
-        Assert.Equal(ReasonCodes.VendorTooLong, ex.ReasonCode);
+        // Fixture EDI_FRITOLAY-48690739 proves a vendor filling the 7-char EDI field is
+        // truncated to the 6-char SSCS field, not rejected ('FRITOLA...' -> 'AFRITOL...').
+        string header = "ABCDEFG" + "0000131454"; // 7-char vendor -> 'A' + first 6 chars
+        var result = EdiConverter.Convert(CrlfFile(header, B("04799585508")));
+        Assert.StartsWith("AABCDEF", Text(result.OutputBytes));
+        var warning = Assert.Single(result.Warnings, w => w.ReasonCode == ReasonCodes.VendorTruncated);
+        Assert.Equal(1, warning.LineNumber);
+    }
+
+    [Fact]
+    public void YymmddHeaderDate_IsReformattedToMmddyy_WhenUnambiguous()
+    {
+        // Fixture EDI_FRITOLAY-48690739: a header date whose first two digits exceed 12 can only
+        // be YYMMDD and is rewritten to MMDDYY (invoice 0048690739 + 240206 + amount 0000017899).
+        string header = "FRITOLA" + "0048690739" + "240206" + "0000017899"; // 33 bytes, 7-char vendor
+        var result = EdiConverter.Convert(CrlfFile(header, B("04799585508")));
+        Assert.Equal("AFRITOL00486907390206240000017899", Text(result.OutputBytes).Split("\r\n")[0]);
+        Assert.Contains(result.Warnings, w => w.ReasonCode == ReasonCodes.HeaderDateReformatted);
+    }
+
+    [Fact]
+    public void MmddyyHeaderDate_IsLeftUnchanged()
+    {
+        // GHRA-style dates (month <= 12) are already MMDDYY and must never be reordered.
+        var result = EdiConverter.Convert(CrlfFile(GhraHeader, B("04799585508")));
+        Assert.Equal("AGHRA  00001314540813180000950902", Text(result.OutputBytes).Split("\r\n")[0]);
+        Assert.DoesNotContain(result.Warnings, w => w.ReasonCode == ReasonCodes.HeaderDateReformatted);
+    }
+
+    // ------------------------------------------------ STRP/Alp 75-byte format (verified via SSCS ingestion)
+
+    [Fact]
+    public void Strp75Format_IsConverted_PaddingRows_AndShorteningDate()
+    {
+        // Verified end-to-end against SSCS ingestion of Invoice_RT006. 75-byte rows are the 76-byte
+        // layout minus the trailing pad, and the 8-digit MMDDYYYY header date is shortened to MMDDYY.
+        string header = "STRP   " + "0000000006" + "07212026" + "0000013650"; // 35 bytes
+        string row = "B84015861637ALP MOUNTAIN WINTERGREEN 61637 001950  000005000010069900061637"; // 75 bytes
+        Assert.Equal(35, header.Length);
+        Assert.Equal(75, row.Length);
+
+        var result = EdiConverter.Convert(CrlfFile(header, row));
+        Assert.Equal(EdiFormat.StandardEdi75, result.Format);
+        string[] lines = Text(result.OutputBytes).Split("\r\n");
+        Assert.Equal("ASTRP  00000000060721260000013650", lines[0]); // date 07212026 -> 072126 (SSCS reads 7/21/2026)
+        Assert.Equal(33, lines[0].Length);
+        Assert.Equal(row + " ", lines[1]);                            // exactly one trailing pad byte added
+        Assert.Equal(76, lines[1].Length);
+        Assert.Contains(result.Warnings, w => w.ReasonCode == ReasonCodes.HeaderDateReformatted);
+    }
+
+    [Fact]
+    public void ShortRow_WithoutStrpHeaderShape_IsStillRejected()
+    {
+        // A 75-byte row under an ordinary 33-byte (26-char-payload) header is NOT the STRP shape and
+        // must still be rejected — the inferred path only triggers on the 28-char 8-digit-date header.
+        var ex = Assert.Throws<EdiConversionException>(() =>
+            EdiConverter.Convert(CrlfFile(GhraHeader, B("04799585508")[..75])));
+        Assert.Equal(ReasonCodes.UnsupportedRecordLength, ex.ReasonCode);
     }
 
     [Fact]
