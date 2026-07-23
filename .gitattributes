@@ -1,0 +1,8 @@
+# EDI / EDI13 / SSCS invoice fixtures are BYTE-EXACT: never normalize line endings.
+# The converter preserves CRLF/LF exactly and the tests compare byte-for-byte, so these files
+# must be stored and checked out with their exact bytes on every platform (Windows autocrlf,
+# Linux/CI, etc.). Source and docs keep the repo's normal line-ending handling.
+SSCS_EDI_FORMAT/EDI/** -text
+SSCS_EDI_FORMAT/EDI13/** -text
+"SSCS_EDI_FORMAT/SSCS (REAL)/**" -text
+SSCS_EDI_FORMAT/converter/tests/EdiToSscs.Tests/Fixtures/** -text
