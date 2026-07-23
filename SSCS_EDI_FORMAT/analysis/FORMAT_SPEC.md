@@ -81,6 +81,27 @@ with the fixed zero suffix described below.
 
 ## B (product) records
 
+### Field meanings (observed from the SSCS Line Items UI)
+
+The converter treats the record body as **opaque** — it copies bytes verbatim and only ever
+transforms the 11-char code field (UPC-E) and, for EDI13/Ruby Red/STRP, the record width. The
+meanings below were read back from the live SSCS UI for `Invoice_RT006` and are recorded only to
+help a human or tool that needs to **build** a record from scratch (e.g. from a PDF invoice).
+They are **not** used by conversion, and exact sub-field widths / decimal scaling are approximate:
+
+- `B` — record type
+- code field (1..11) — **PLU / UPC / barcode** (the "ID/PLU" SSCS matches products on)
+- description text — **product name**
+- a numeric **vendor item # / SKU** (also echoed near the end of the row)
+- **extended cost** = qty × unit cost (e.g. `001950` → $19.50)
+- **quantity** (e.g. `000005` → 5)
+- **each list / retail price** (e.g. → $6.99)
+- trailing space **pad** in the final column (col 75)
+
+SSCS **derives** each-cost (extended cost ÷ qty) and margin % — they are not stored in the file.
+So the minimum a source document must provide per line is: UPC, description, quantity, a cost
+(unit or extended), and the retail/list price; plus header invoice #, vendor, date, and total.
+
 ### Standard EDI (76 bytes)
 
 `B`(0) + product-code field(1..11, 11 chars) + remainder(12..75) preserved verbatim.

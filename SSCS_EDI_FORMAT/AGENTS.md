@@ -52,17 +52,37 @@ Detect format from **contents**, not filenames.
 
 | Format | Header | B width | Notes |
 |--------|--------|---------|-------|
-| Standard EDI | vendor field 7 chars | 76 | UPC-E may expand in 11-char code field |
+| Standard EDI | vendor field 7 chars | 76 | UPC-E may expand in 11-char code field. Vendors: GHRA, PEPSI, **FRITOLAY** |
 | EDI13 | same; strip vendor `13` suffix | 78 | Keep first **11** of 13-char code field (alphanumeric OK) |
 | Ruby Red | 64-byte `GHRA13`+company… | 79 | Drop verified suffix `00000000  `; output B = 67 |
+| **STRP/Alp** (`StandardEdi75`) | vendor + **8-digit `MMDDYYYY`** date (28-char payload) | **75 → padded to 76** | Append the trailing pad byte; shorten date to `MMDDYY`. SSCS-verified (Invoice_RT006) |
 
 Header out: `A` + 6-char vendor + rest (`GHRA`/`PEPSI`/`GHRA13`→`GHRA`). Strip vendor `13` **even if** B records are standard width (e.g. 810738).
+
+- **Vendor >6 chars → truncate to 6** (not rejected), with a `VENDOR_TRUNCATED` warning. Proven by `FRITOLA`→`FRITOL` (fixture `EDI_FRITOLAY-48690739`). The EDI vendor field is fixed at 7 bytes, so 7→6 is the only truncation possible.
+- **Header date normalized to 6-digit `MMDDYY`** (all SSCS headers use this), with a `HEADER_DATE_REFORMATTED` warning: FritoLay's `YYMMDD`→`MMDDYY` (only when first two digits >12, so unambiguous), and STRP's `MMDDYYYY`→`MMDDYY` (drop century). GHRA/PEPSI dates are already `MMDDYY` and left untouched.
 
 **UPC-E:** only when the 11-char field is exactly 8 digits + 3 spaces. Expand with official rules; validate check digit. NS must be `0` or `1`. Unsupported NS → **blank field + warning** (fixture-proven). Bad check digit → **reject file**.
 
 **C records:** preserve byte-for-byte. Unknown record types → reject with line number.
 
 Preserve input line endings (CRLF/LF) and final-newline presence/absence.
+
+## Verifying a new vendor (there is usually no reference file)
+
+SSCS (Computerized Daily Book, `sunrayasp.com`) is the **consuming** system — it ingests these
+files, it does **not** produce reference outputs. The `SSCS (REAL)/` fixtures are known-good
+*converted* files, so a brand-new vendor won't have one. Do **not** stall waiting for a reference:
+
+1. Derive the mapping from the **GHRA gold-standard normalization principle** — SSCS wants one
+   canonical shape (33-byte header, 76-byte rows) and the converter normalizes any dialect to it
+   (EDI13 78→76 by trimming the code field; short rows padded to 76; headers trimmed/expanded to 33).
+2. Convert, then have the user load/email the output into their live SSCS and confirm the
+   **Paidout** tab (invoice #, vendor, date, total) and **Line Items** tab (qty, ea cost/list,
+   ext cost, margin %, descriptions, item #s) read back correctly.
+3. Once confirmed, lock that exact output as a golden-master byte fixture in `SSCS (REAL)/` plus a
+   `FixtureByteTests` case, and drop any "inferred" flagging. STRP/Alp (`StandardEdi75`) was
+   verified this way (Invoice_RT006).
 
 ## Output naming
 
