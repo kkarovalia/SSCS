@@ -108,6 +108,19 @@ public class FixtureByteTests
         AssertBytesEqual(Fixture(@"SSCS\SSCS_Invoice_RT006_EDI.txt"), result.OutputBytes);
     }
 
+    /// <summary>
+    /// Real already-SSCS file (VM Novelties, a Ruby-Red-style SSCS output that is misleadingly named
+    /// "EDI-..."). Converting it must report ALREADY_SSCS, not the generic "unrecognized header" error.
+    /// </summary>
+    [Fact]
+    public void RealAlreadySscsFile_IsDetected_WithFriendlyMessage()
+    {
+        var ex = Assert.Throws<EdiConversionException>(() =>
+            EdiConverter.Convert(Fixture(@"SSCS\SSCS_VMNOVELTIESLLC.txt")));
+        Assert.Equal(ReasonCodes.AlreadySscs, ex.ReasonCode);
+        Assert.Contains("already in SSCS format", ex.UserMessage);
+    }
+
     [Fact]
     public void ConversionStats_AreReported()
     {

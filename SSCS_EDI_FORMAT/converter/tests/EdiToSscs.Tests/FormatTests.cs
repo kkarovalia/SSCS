@@ -445,6 +445,33 @@ public class FormatTests
         Assert.Contains(result.Warnings, w => w.ReasonCode == ReasonCodes.HeaderDateReformatted);
     }
 
+    // ------------------------------------------------ already-SSCS detection
+
+    [Fact]
+    public void AlreadySscsFile_RubyRedStyle_GivesFriendlyMessage()
+    {
+        // A file already in SSCS output form (59-byte 'A' header, 67-byte rows) must not be
+        // re-converted; it should report a plain "already in SSCS format" message.
+        string header = "A" + "VM NOVELTIES LLC".PadRight(30) + "IN-99".PadRight(10) + "20260714" + "0000393221";
+        string row = "B" + "60060910027" + new string('X', 55); // 67 bytes
+        Assert.Equal(59, header.Length);
+        Assert.Equal(67, row.Length);
+
+        var ex = Assert.Throws<EdiConversionException>(() => EdiConverter.Convert(CrlfFile(header, row)));
+        Assert.Equal(ReasonCodes.AlreadySscs, ex.ReasonCode);
+        Assert.Contains("already in SSCS format", ex.UserMessage);
+    }
+
+    [Fact]
+    public void EdiVendorStartingWithA_StillConverts_NotMistakenForSscs()
+    {
+        // False-positive guard: a genuine EDI input whose vendor code begins with 'A' must still
+        // convert normally (its 33-byte header and 76-byte rows are not SSCS-output signatures).
+        var result = EdiConverter.Convert(CrlfFile("ACME   00001314540813180000950902", B("04799585508")));
+        Assert.Equal(EdiFormat.StandardEdi, result.Format);
+        Assert.StartsWith("AACME  ", Text(result.OutputBytes));
+    }
+
     [Fact]
     public void ShortRow_WithoutStrpHeaderShape_IsStillRejected()
     {

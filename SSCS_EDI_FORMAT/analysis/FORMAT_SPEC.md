@@ -187,6 +187,13 @@ as a golden-master fixture (`SSCS_Invoice_RT006_EDI.txt`).
 
 ## Rejection rules (validated before any output is written)
 
+- File is **already in SSCS output format** → rejected with a plain "already in SSCS format,
+  does not need to be converted" message (reason `ALREADY_SSCS`), not the generic invalid-header
+  error. Detected by unambiguous SSCS-output signatures that no input can have: a 67-byte `B`
+  record, or a 59-byte `A`-led Ruby-Red-style header whose company/reference region holds text.
+  (Files often arrive misleadingly named `EDI-*` while their contents are already SSCS — e.g.
+  `SSCS_VMNOVELTIESLLC.txt`.) Standard 33-byte SSCS output is **not** detected, as it is
+  indistinguishable from an EDI input whose vendor code begins with `A`.
 - First line not a valid vendor-style or Ruby Red header → missing/invalid header.
 - Record after line 1 not starting with `B` or `C` → unsupported record type
   (reported with line number; covers duplicate headers and blank lines).

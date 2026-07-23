@@ -29,6 +29,7 @@ public static class ReasonCodes
     public const string BinaryContent = "BINARY_CONTENT";
     public const string LoneCarriageReturn = "LONE_CARRIAGE_RETURN";
     public const string InvalidHeader = "INVALID_HEADER";
+    public const string AlreadySscs = "ALREADY_SSCS";
     public const string VendorTruncated = "VENDOR_TRUNCATED";
     public const string HeaderDateReformatted = "HEADER_DATE_REFORMATTED";
     public const string BlankLine = "BLANK_LINE";
@@ -118,6 +119,13 @@ public static class EdiConverter
         var header = lines[0];
         if (header.Length == 0)
             throw new EdiConversionException(ReasonCodes.BlankLine, "Line 1 is blank. The file must start with a header record.", 1);
+
+        // A file that is already SSCS output must not be converted again. Caught here so the user gets a
+        // plain "already converted" message instead of a confusing "not a recognized EDI header" error.
+        if (LooksLikeAlreadySscs(input, header, lines))
+            throw new EdiConversionException(
+                ReasonCodes.AlreadySscs,
+                "This file is already in SSCS format, so it does not need to be converted. You can use it as-is.", 1);
 
         EdiFormat format;
         byte[] newHeader;
@@ -328,6 +336,37 @@ public static class EdiConverter
         for (int i = 54; i < 64; i++)
             if (!IsDigit(h[i]) && h[i] != (byte)'-') return false;
         return true;
+    }
+
+    /// <summary>
+    /// Detects a file that is ALREADY SSCS output (so it must not be converted again). Uses only
+    /// signatures no EDI/EDI13 input can have:
+    ///   * a 67-byte 'B' record — unique to SSCS Ruby-Red output (inputs are 75/76/78/79); or
+    ///   * a 59-byte 'A'-led header (SSCS Ruby-Red output = 'A' + company(30) + ref(10) + 8-digit
+    ///     date + 10-digit amount) whose company/reference region holds text, not an all-digit payload.
+    /// Standard 33-byte SSCS output is intentionally NOT matched: it is indistinguishable from an EDI
+    /// input whose vendor code merely begins with 'A' (e.g. ACME), so flagging it would risk refusing
+    /// a genuine invoice. Re-feeding standard SSCS output remains an unhandled edge (documented).
+    /// </summary>
+    private static bool LooksLikeAlreadySscs(byte[] input, Line header, List<Line> lines)
+    {
+        if (input[header.Offset] != (byte)'A') return false;
+
+        if (FirstProductRecordWidth(input, lines) == 67) return true;
+
+        if (header.Length == 59)
+        {
+            ReadOnlySpan<byte> h = input.AsSpan(header.Offset, header.Length);
+            // Bytes 7..41 are company/reference text in SSCS output but an all-digit payload in any EDI
+            // input, so a space or letter there is a reliable "already SSCS" signal.
+            for (int i = 7; i < 41; i++)
+            {
+                byte b = h[i];
+                bool isLetter = (b >= (byte)'A' && b <= (byte)'Z') || (b >= (byte)'a' && b <= (byte)'z');
+                if (b == Space || isLetter) return true;
+            }
+        }
+        return false;
     }
 
     private static (string VendorToken, int PayloadOffset) ParseVendorHeader(byte[] input, Line header)
