@@ -109,16 +109,35 @@ public class FixtureByteTests
     }
 
     /// <summary>
-    /// Real already-SSCS file (VM Novelties, a Ruby-Red-style SSCS output that is misleadingly named
-    /// "EDI-..."). Converting it must report ALREADY_SSCS, not the generic "unrecognized header" error.
+    /// Ruby-Red-style SSCS files (67-byte rows / 59-byte 'A' header) are unambiguously already-SSCS
+    /// and must be detected — reporting ALREADY_SSCS, not the generic "unrecognized header" error.
+    /// Covers the two such files in the repo (VM Novelties, misleadingly named "EDI-...", and the
+    /// Ruby Red example).
     /// </summary>
-    [Fact]
-    public void RealAlreadySscsFile_IsDetected_WithFriendlyMessage()
+    [Theory]
+    [InlineData(@"SSCS\SSCS_VMNOVELTIESLLC.txt")]
+    [InlineData(@"SSCS\EDI-RubyRedSalesServices (SSCS EXAMPLE).txt")]
+    public void RubyRedStyleSscsFiles_AreDetectedAsAlreadySscs(string fixture)
     {
-        var ex = Assert.Throws<EdiConversionException>(() =>
-            EdiConverter.Convert(Fixture(@"SSCS\SSCS_VMNOVELTIESLLC.txt")));
+        var ex = Assert.Throws<EdiConversionException>(() => EdiConverter.Convert(Fixture(fixture)));
         Assert.Equal(ReasonCodes.AlreadySscs, ex.ReasonCode);
         Assert.Contains("already in SSCS format", ex.UserMessage);
+    }
+
+    /// <summary>
+    /// Documents a deliberate limitation: STANDARD SSCS output (33-byte 'A' header, 76-byte rows) is
+    /// byte-structurally identical to an EDI input whose vendor code begins with 'A', so it CANNOT be
+    /// safely detected as already-SSCS — forcing detection would refuse genuine invoices from A-vendors.
+    /// Re-feeding such a file therefore re-converts it (prepending a second 'A'). This is the reason
+    /// only 2 of the repo's SSCS files report ALREADY_SSCS while the other 76 (GHRA/PEPSI/FritoLay/STRP)
+    /// re-convert. If this ever becomes desirable to block, it needs a signal beyond the header alone.
+    /// </summary>
+    [Fact]
+    public void StandardSscsOutput_IsNotDetectedAsAlreadySscs_KnownLimitation()
+    {
+        var result = EdiConverter.Convert(Fixture(@"SSCS\SSCS_GHRA_131454.txt")); // does NOT throw
+        Assert.Equal(EdiFormat.StandardEdi, result.Format);
+        Assert.StartsWith("AAGHRA", Text(result.OutputBytes)); // doubled 'A' proves it re-converted
     }
 
     [Fact]
