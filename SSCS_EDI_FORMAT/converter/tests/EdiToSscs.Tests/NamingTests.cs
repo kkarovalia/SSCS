@@ -7,27 +7,27 @@ namespace EdiToSscs.Tests;
 public class NamingTests
 {
     [Theory]
-    [InlineData("EDI_GHRA_131454.txt", "SSCS_GHRA_131454.txt")]
-    [InlineData("EDI_PEPSI-80471906.txt", "SSCS_PEPSI-80471906.txt")]
-    [InlineData("EDI13-RubyRedSalesServices.txt", "SSCS_RubyRedSalesServices.txt")]
-    [InlineData("PEPSI.txt", "SSCS_PEPSI.txt")]
-    [InlineData("PEPSI-80471906.txt", "SSCS_PEPSI-80471906.txt")]
-    [InlineData("edi pepsi.txt", "SSCS_pepsi.txt")]
-    [InlineData("EDI13_GHRA.txt", "SSCS_GHRA.txt")]
-    [InlineData("EDI13-GHRA.txt", "SSCS_GHRA.txt")]
-    [InlineData("SSCS_GHRA.txt", "SSCS_GHRA.txt")]
-    [InlineData("SSCS_SSCS_GHRA.txt", "SSCS_GHRA.txt")] // never more than one leading SSCS_
-    [InlineData("EDI.txt", "SSCS_Converted.txt")]
-    [InlineData("EDI13.txt", "SSCS_Converted.txt")]
-    [InlineData("edi13 ghra invoice.txt", "SSCS_ghra invoice.txt")]
-    [InlineData("EDI_PEPSI-80471906 (1).txt", "SSCS_PEPSI-80471906 (1).txt")] // browser-added suffix
-    [InlineData("EDI_a.b.c.txt", "SSCS_a.b.c.txt")]                           // multiple periods
-    [InlineData("EDI GHRA WEEKLY ORDER.txt", "SSCS_GHRA WEEKLY ORDER.txt")]   // spaces
-    [InlineData("EDI_Fakturę_zażółć.txt", "SSCS_Fakturę_zażółć.txt")]         // Unicode preserved
-    [InlineData("EDI_GHRA.edi", "SSCS_GHRA.txt")]                             // .edi extension
-    [InlineData("EDI13_GHRA.edi13", "SSCS_GHRA.txt")]                         // .edi13 extension
-    [InlineData("EDINBURGH.txt", "SSCS_EDINBURGH.txt")]  // token requires a separator boundary
-    [InlineData("MY EDI FILE.txt", "SSCS_MY EDI FILE.txt")] // token only stripped at the start
+    [InlineData("EDI_GHRA_131454.txt", "SSCS_GHRA_131454.xml")]
+    [InlineData("EDI_PEPSI-80471906.txt", "SSCS_PEPSI-80471906.xml")]
+    [InlineData("EDI13-RubyRedSalesServices.txt", "SSCS_RubyRedSalesServices.xml")]
+    [InlineData("PEPSI.txt", "SSCS_PEPSI.xml")]
+    [InlineData("PEPSI-80471906.txt", "SSCS_PEPSI-80471906.xml")]
+    [InlineData("edi pepsi.txt", "SSCS_pepsi.xml")]
+    [InlineData("EDI13_GHRA.txt", "SSCS_GHRA.xml")]
+    [InlineData("EDI13-GHRA.txt", "SSCS_GHRA.xml")]
+    [InlineData("SSCS_GHRA.txt", "SSCS_GHRA.xml")]
+    [InlineData("SSCS_SSCS_GHRA.txt", "SSCS_GHRA.xml")] // never more than one leading SSCS_
+    [InlineData("EDI.txt", "SSCS_Converted.xml")]
+    [InlineData("EDI13.txt", "SSCS_Converted.xml")]
+    [InlineData("edi13 ghra invoice.txt", "SSCS_ghra invoice.xml")]
+    [InlineData("EDI_PEPSI-80471906 (1).txt", "SSCS_PEPSI-80471906 (1).xml")] // browser-added suffix
+    [InlineData("EDI_a.b.c.txt", "SSCS_a.b.c.xml")]                           // multiple periods
+    [InlineData("EDI GHRA WEEKLY ORDER.txt", "SSCS_GHRA WEEKLY ORDER.xml")]   // spaces
+    [InlineData("EDI_Fakturę_zażółć.txt", "SSCS_Fakturę_zażółć.xml")]         // Unicode preserved
+    [InlineData("EDI_GHRA.edi", "SSCS_GHRA.xml")]                             // .edi extension
+    [InlineData("EDI13_GHRA.edi13", "SSCS_GHRA.xml")]                         // .edi13 extension
+    [InlineData("EDINBURGH.txt", "SSCS_EDINBURGH.xml")]  // token requires a separator boundary
+    [InlineData("MY EDI FILE.txt", "SSCS_MY EDI FILE.xml")] // token only stripped at the start
     public void BuildOutputFileName_ProducesCanonicalNames(string input, string expected) =>
         Assert.Equal(expected, OutputNaming.BuildOutputFileName(input));
 
@@ -44,23 +44,23 @@ public class NamingTests
             string result = OutputNaming.BuildOutputFileName(input);
             Assert.StartsWith("SSCS_", result);
             Assert.DoesNotContain("SSCS_SSCS", result, StringComparison.OrdinalIgnoreCase);
-            Assert.EndsWith(".txt", result);
+            Assert.EndsWith(".xml", result);
         }
     }
 
     [Fact]
     public void EmptyAfterStripping_UsesSafeFallback()
     {
-        Assert.Equal("SSCS_Converted.txt", OutputNaming.BuildOutputFileName("EDI13.txt"));
-        Assert.Equal("SSCS_Converted.txt", OutputNaming.BuildOutputFileName("SSCS_.txt"));
-        Assert.Equal("SSCS_Converted.txt", OutputNaming.BuildOutputFileName("edi -_ .txt"));
+        Assert.Equal("SSCS_Converted.xml", OutputNaming.BuildOutputFileName("EDI13.txt"));
+        Assert.Equal("SSCS_Converted.xml", OutputNaming.BuildOutputFileName("SSCS_.txt"));
+        Assert.Equal("SSCS_Converted.xml", OutputNaming.BuildOutputFileName("edi -_ .txt"));
     }
 
     [Fact]
     public void OnlyWindowsForbiddenCharacters_AreSanitized()
     {
         // ':' and '?' are forbidden; parentheses, plus, comma, accents are not and must survive.
-        Assert.Equal("SSCS_a_b_ (c)+,é.txt", OutputNaming.BuildOutputFileName("EDI_a:b? (c)+,é.txt"));
+        Assert.Equal("SSCS_a_b_ (c)+,é.xml", OutputNaming.BuildOutputFileName("EDI_a:b? (c)+,é.txt"));
     }
 
     [Fact]
@@ -68,13 +68,13 @@ public class NamingTests
     {
         string longStem = new string('N', 180);
         string result = OutputNaming.BuildOutputFileName("EDI_" + longStem + ".txt");
-        Assert.Equal("SSCS_" + longStem + ".txt", result);
+        Assert.Equal("SSCS_" + longStem + ".xml", result);
     }
 
     [Theory]
-    [InlineData("SSCS_PEPSI.txt", 0, "SSCS_PEPSI.txt")]
-    [InlineData("SSCS_PEPSI.txt", 1, "SSCS_PEPSI (1).txt")]
-    [InlineData("SSCS_PEPSI.txt", 2, "SSCS_PEPSI (2).txt")]
+    [InlineData("SSCS_PEPSI.xml", 0, "SSCS_PEPSI.xml")]
+    [InlineData("SSCS_PEPSI.xml", 1, "SSCS_PEPSI (1).xml")]
+    [InlineData("SSCS_PEPSI.xml", 2, "SSCS_PEPSI (2).xml")]
     public void CandidateNames_FollowTheDocumentedPattern(string name, int attempt, string expected) =>
         Assert.Equal(expected, OutputNaming.CandidateName(name, attempt));
 
@@ -85,8 +85,8 @@ public class NamingTests
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
-        File.WriteAllText(Path.Combine(dest, "SSCS_GHRA_131454.txt"), "existing");
-        File.WriteAllText(Path.Combine(dest, "SSCS_GHRA_131454 (1).txt"), "existing");
+        File.WriteAllText(Path.Combine(dest, "SSCS_GHRA_131454.xml"), "existing");
+        File.WriteAllText(Path.Combine(dest, "SSCS_GHRA_131454 (1).xml"), "existing");
 
         string input = Path.Combine(tmp.Path, "EDI_GHRA_131454.txt");
         File.WriteAllBytes(input, Fixture(@"EDI\EDI_GHRA_131454.txt"));
@@ -95,9 +95,9 @@ public class NamingTests
         var outcome = service.ConvertFile(input, dest);
 
         Assert.True(outcome.Success);
-        Assert.Equal("SSCS_GHRA_131454 (2).txt", Path.GetFileName(outcome.FinalOutputPath));
-        Assert.Contains("SSCS_GHRA_131454 (2).txt", outcome.UserMessage); // actual final name is displayed
-        Assert.Equal("existing", File.ReadAllText(Path.Combine(dest, "SSCS_GHRA_131454.txt"))); // untouched
+        Assert.Equal("SSCS_GHRA_131454 (2).xml", Path.GetFileName(outcome.FinalOutputPath));
+        Assert.Contains("SSCS_GHRA_131454 (2).xml", outcome.UserMessage); // actual final name is displayed
+        Assert.Equal("existing", File.ReadAllText(Path.Combine(dest, "SSCS_GHRA_131454.xml"))); // untouched
     }
 
     [Fact]
@@ -126,7 +126,8 @@ public class NamingTests
         Assert.Equal(parallel, names.Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.All(names, n => Assert.StartsWith("SSCS_GHRA_131454", n));
         Assert.Empty(Directory.GetFiles(dest, "*.tmp")); // no temp files left behind
-        byte[] expected = Fixture(@"SSCS\SSCS_GHRA_131454.txt");
+        // Every copy must be the same complete XML document, not a partial write.
+        byte[] expected = EdiConverter.Convert(fixture).OutputBytes;
         foreach (string n in names)
             AssertBytesEqual(expected, File.ReadAllBytes(Path.Combine(dest, n)));
     }

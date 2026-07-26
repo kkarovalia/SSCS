@@ -157,7 +157,7 @@ public class LoggingTests
 
         string logText = File.ReadAllText(Directory.GetFiles(logs, "*.log").Single());
         Assert.Contains("EDI_GHRA_131454.txt", logText);
-        Assert.Contains("SSCS_GHRA_131454.txt", logText);
+        Assert.Contains("SSCS_GHRA_131454.xml", logText);
         Assert.Contains("StandardEdi", logText);
         Assert.Contains("\"recordsProcessed\":233", logText);
         Assert.Contains("\"upcERecordsExpanded\":39", logText);

@@ -1,205 +1,300 @@
-# EDI / EDI13 → SSCS Format Specification (verified from fixtures)
+# Format specification — vendor invoices in, NAXML out
 
-All facts below were derived from raw-byte comparison of every supplied input/output pair
-(16 pairs total) and proven by a prototype that reproduces every expected SSCS file
-**byte-for-byte** (see `prototype.ps1`, PASS=16 FAIL=0).
+The converter reads a vendor's fixed-width EDI file (or a vendor PDF) and writes an
+**NAXML-BusDoc 1.5 invoice**, which is what SSCS ingests. It no longer produces the fixed-width
+"SSCS EDI" text file; that output was retired on 2026-07-25 and the reasoning is at the bottom of
+this document.
 
-All positions are 0-based byte offsets within a record (line without its EOL bytes).
-All files are ASCII in the fixtures; the converter operates on raw bytes and preserves
-any non-ASCII byte that is not at a verified transformation position.
+Everything below was verified against real files and, where it says so, against live SSCS.
 
-## File-level structure
+---
 
-| Property        | Standard EDI (GHRA/PEPSI/FRITOLAY) | EDI13 (GHRA13)     | EDI13 Ruby Red variant |
-|-----------------|------------------------------------|--------------------|------------------------|
-| Header length   | 33 (GHRA/FRITOLAY), 27 (PEPSI)     | 33                 | 64                     |
-| B record length | 76                        | 78                 | 79                     |
-| C record length | 29 (preserved verbatim)   | 29                 | (none in fixture)      |
-| Line endings    | CRLF                      | CRLF               | LF                     |
-| Final newline   | absent                    | absent             | present                |
+## Part 1 — the output: NAXML
 
-Output line endings and final-newline behavior always match the input
-(verified: CRLF/no-final-EOL inputs produce CRLF/no-final-EOL outputs; the LF/final-LF
-Ruby Red input produces an LF/final-LF output).
+### Delivery
 
-Record order: line 1 is always the header; every following line is a `B` (product) or
-`C` (charge) record. Any other record type is unsupported.
+**SSCS gives every store its own EDI email address, and routes purely on which address the file
+arrives at.** Verified 2026-07-25: two files whose store fields said store 19491 were emailed to
+store 14's address and both landed in store 14 (`q:\cdbdata\edi\014\`). Nothing inside the file
+selects a store, so `ShipTo` / `Location` are written for human readability only.
 
-## Header records
+### Document shape
 
-### Vendor-style header (standard EDI and GHRA13 EDI13)
+Copied from a file VM Novelties sends SSCS in production, which was read back out of live SSCS
+line by line and matched exactly. It is not inferred from the NAXML standard.
 
-Input layout: `[0..6]` = 7-char vendor field (vendor token left-aligned, space padded),
-`[7..]` = numeric payload (digits and `-`; e.g. GHRA: invoice 10 + date 6 + amount 10;
-PEPSI: invoice 10 + amount 10). Fixture `EDI_GHRA_118955` proves amounts may contain `-`.
+```xml
+<?xml version="1.0" ?>
+<NAXML-BusDoc version="1.5">
+  <Parties>
+    <Supplier><Name identType="CUSTOM" ident="otrack">GHRA</Name></Supplier>
+    <Buyer><Name identType="CUSTOM" ident="sscs1">SSCS</Name></Buyer>
+    <ShipTo><Name ident="0">SSCS</Name></ShipTo>
+  </Parties>
+  <Invoice>
+    <Supplier><Name identType="CUSTOM" ident="otrack">GHRA</Name></Supplier>
+    <Location>… address fields …
+      <OrganizationId identType="Store Number" assignedBy="Seller">0</OrganizationId>
+    </Location>
+    <InvoiceNumber>0000131454</InvoiceNumber>
+    <InvoiceDate>2018-08-13</InvoiceDate>
+    <InvoiceDetail>
+      <LineItem count="1">
+        <InvoiceUnit>
+          <InvoiceUnitId identType="GTIN">012000001574</InvoiceUnitId>
+          <InvoiceUnitDescription>1L PL AQUA WTR 1/15</InvoiceUnitDescription>
+          <InvoiceUnitQty cstoreUOMBasis="EA">30</InvoiceUnitQty>
+          <InvoiceUnitCost>1.1000</InvoiceUnitCost>
+        </InvoiceUnit>
+        <RetailUnitPricing>
+          <RetailUnitId identType="GTIN">012000001574</RetailUnitId>
+          <RetailUnitQty identType="GTIN">1</RetailUnitQty>
+          <RetailPrice>2.49</RetailPrice>
+        </RetailUnitPricing>
+      </LineItem>
+      …
+      <InvoiceSummary><InvoiceTotals>
+        <TotalLineItemNetAmt identType="Debit">9509.02</TotalLineItemNetAmt>
+        <TotalInvoiceDueAmt identType="Debit">9509.02</TotalInvoiceDueAmt>
+      </InvoiceTotals></InvoiceSummary>
+    </InvoiceDetail>
+  </Invoice>
+</NAXML-BusDoc>
+```
 
-Output layout: `A` + 6-char vendor field + input bytes `[7..]` (with the date rule below).
-Total length is preserved.
+ASCII, CRLF line endings, trailing newline. `ident="otrack"` and `ident="sscs1"` are constants
+copied from the working file; they are not per-vendor.
 
-- `GHRA   0000131454…` → `AGHRA  0000131454…`
-- `PEPSI  0080471906…` → `APEPSI 0080471906…`
-- `FRITOLA0048690739…` → `AFRITOL0048690739…`
-- A `13` suffix on the vendor token is removed **regardless of detected record width**:
-  `GHRA13 0000131454…` → `AGHRA  0000131454…`. Hidden fixture 810738 proves this also
-  applies when a `GHRA13`-headed file carries standard 76-byte records (the file
-  converts as standard EDI, but the header still becomes `AGHRA  `).
+### Field rules
 
-**Vendor token longer than 6 characters → truncated to 6** (a character is dropped, and a
-`VENDOR_TRUNCATED` warning is recorded). Fixture `EDI_FRITOLAY-48690739` proves this: the
-7-char EDI vendor field `FRITOLA` becomes the 6-char SSCS field `FRITOL` (output `AFRITOL…`).
-The EDI vendor field is fixed at 7 bytes, so 7→6 is the only truncation that can occur.
-(This supersedes the earlier GHRA/PEPSI-only assumption that over-long vendors were rejected;
-those fixtures simply never had a vendor wider than 6.)
+| Element | Rule |
+|---|---|
+| `Supplier/Name` | The vendor's own 6-character code from its EDI header (`GHRA`, `PEPSI`, `FRITOL`, `GSC`), or `DR PEPPER` for the PDF path. See *Vendor resolution*. |
+| `InvoiceNumber` | Free text — SSCS does not validate it. Letters are fine (`IN-112`). |
+| `InvoiceDate` | ISO `yyyy-MM-dd`. **Omitted entirely** when the vendor's file has no date; SSCS then dates the invoice on the day it imports it (verified 2026-07-25). |
+| `InvoiceUnitId` / `RetailUnitId` | The **whole** barcode, check digit included. See *Barcodes*. |
+| `InvoiceUnitQty` | Individual units, never cases. Negative on a credit line. |
+| `InvoiceUnitCost` | Cost of one unit, 4 decimals. See *Money*. |
+| `RetailUnitQty` | Always `1`. Shows in SSCS as the Pack Size column. |
+| `RetailPrice` | Each-list — what the item **sells** for. See *Each-list*. |
+| `TotalLineItemNetAmt` / `TotalInvoiceDueAmt` | The invoice's own printed total, 2 decimals, negative for a credit invoice. |
 
-### Header date reformat (`YYMMDD` → `MMDDYY`)
+### Barcodes — SSCS drops the last character itself
 
-When the numeric payload is the 26-char `invoice(10) + date(6) + amount(10)` layout, the
-6-digit date field (payload bytes `[10..16)`) is rewritten from `YYMMDD` to `MMDDYY` **only
-when its first two digits are greater than 12** — a value that cannot be a month, so the field
-is unambiguously `YYMMDD`. A `HEADER_DATE_REFORMATTED` warning is recorded.
+**Verified in live SSCS, 2026-07-25.** On import SSCS stores the GTIN it is given **minus its last
+character** as the item's ID/PLU:
 
-- Fixture `EDI_FRITOLAY-48690739`: `…0048690739` **`240206`** `0000017899` → `…0048690739` **`020624`** `0000017899` (Feb 6 2024).
-- GHRA/PEPSI are untouched: every GHRA date is already `MMDDYY` (month `01`–`12`, so the
-  first two digits are `≤ 12`), and PEPSI's payload is 20 chars (no date field). Verified
-  against all 16 original + 19 hidden fixture pairs (still byte-for-byte identical).
+```
+sent 600609100271  (UPC-A, 12 digits)  → ID/PLU 60060910027   (11 chars)
+sent 6917673180912 (EAN-13, 13 digits) → ID/PLU 691767318091  (12 chars)
+```
 
-This rule is derived from a single reference pair. A date whose first two digits are `≤ 12`
-is genuinely ambiguous (e.g. `110206` could be Nov 2 2006 **or** Feb 6 2011) and is therefore
-left **unchanged**; distinguishing those requires a per-vendor convention we do not yet have a
-fixture for.
+Two consequences:
 
-### Ruby Red header (EDI13 variant)
+1. A 12-digit UPC-A lands on **exactly the same 11-character ID** the retired fixed-width output
+   produced, because that output had to drop the check digit itself to fit an 11-character field.
+   So a vendor can be moved from the old path to XML without creating duplicate item records.
+   `XmlConversionTests.EveryBarcodeLandsOnTheSameSscsItem` asserts this against every fixture that
+   has a paired retired-output file.
+2. A 13-digit EAN-13 lands on a 12-character ID, which the old 11-character field could not hold
+   at all. That is the bug this rewrite exists to fix — see *Why the fixed-width output was
+   retired*.
 
-64 bytes: `GHRA13`(0..5) + company name(6..35, 30 chars) + reference(36..45, 10 chars,
-e.g. `IN-3738   `) + date(46..53, 8 digits) + amount(54..63, 10 digits).
+**Never pre-drop a check digit and never strip a leading zero.** Converting a fixed-width input,
+whose code field already had its check digit removed, we compute the check digit back on
+(`Upc.AppendCheckDigit`) so SSCS's drop returns the original code.
 
-Output: `A` + input bytes `[6..63]` unchanged (59 bytes). The record shrinks by 5 bytes.
+### Money — 4-decimal unit costs are safe
 
-Detection is structural, never by filename: header length 64, starts `GHRA13`,
-byte 6 is not a space, date/amount fields numeric, and all B records are 79 bytes wide
-with the fixed zero suffix described below.
+**Verified 16/16 against live SSCS, 2026-07-25.** SSCS rounds `units × unit cost` to the cent
+**per line**, then sums. Errors do not accumulate:
 
-## B (product) records
+```
+96 × 1.3542 = 130.0032  →  SSCS shows 130.00
+24 × 0.7708 =  18.4992  →  SSCS shows  18.50
+12 × 1.7833 =  21.3996  →  SSCS shows  21.40
+```
 
-### Field meanings (observed from the SSCS Line Items UI)
+A Dr Pepper invoice where 14 of 16 lines do not divide evenly still totalled exactly $532.43.
 
-The converter treats the record body as **opaque** — it copies bytes verbatim and only ever
-transforms the 11-char code field (UPC-E) and, for EDI13/Ruby Red/STRP, the record width. The
-meanings below were read back from the live SSCS UI for `Invoice_RT006` and are recorded only to
-help a human or tool that needs to **build** a record from scratch (e.g. from a PDF invoice).
-They are **not** used by conversion, and exact sub-field widths / decimal scaling are approximate:
+A case cost that does not divide evenly into its pack can still leave a cent on the line
+(2 of 772 real rows). The converter records a `TOTAL_MISMATCH` warning naming the difference and
+writes the file anyway — a cent is for the operator to correct in SSCS.
 
-- `B` — record type
-- code field (1..11) — **PLU / UPC / barcode** (the "ID/PLU" SSCS matches products on)
-- description text — **product name**
-- a numeric **vendor item # / SKU** (also echoed near the end of the row)
-- **extended cost** = qty × unit cost (e.g. `001950` → $19.50)
-- **quantity** (e.g. `000005` → 5)
-- **each list / retail price** (e.g. → $6.99)
-- trailing space **pad** in the final column (col 75)
+### Each-list — always sent, never zero if avoidable
 
-SSCS **derives** each-cost (extended cost ÷ qty) and margin % — they are not stored in the file.
-So the minimum a source document must provide per line is: UPC, description, quantity, a cost
-(unit or extended), and the retail/list price; plus header invoice #, vendor, date, and total.
+`RetailPrice` is what the item **sells** for, not what it costs. SSCS holds the store's own selling
+prices and **ignores this field for any item it already knows**, so it only matters as the starting
+price of a brand-new item.
 
-### Standard EDI (76 bytes)
+It is still always populated. A zero would let an unpriced new item ring up free, so a
+vendor-suggested figure is the safer default even when approximate:
 
-`B`(0) + product-code field(1..11, 11 chars) + remainder(12..75) preserved verbatim.
-The only transformation ever applied is UPC-E expansion inside the 11-char code field.
+- **EDI path** — the each-list field on the row.
+- **PDF path** — Dr Pepper's WHSLE column (its list price per case) divided out per unit.
 
-### EDI13 (78 bytes)
+There is no longer a $99.99 cap; the old 4-digit field forced one, XML does not.
 
-`B`(0) + product-code field(1..13, 13 chars) + remainder(14..77).
-Observed field contents: 12-digit code+1 space, 11 digits+2 spaces, 13-digit EAN,
-10 digits+3 spaces, 8-digit UPC-E+5 spaces — and, in the hidden batch fixtures,
-**alphanumeric codes** such as `002ZH7S8J999 ` and `874507008063d`. In every fixture
-pair the SSCS code field equals the **first 11 bytes** of the 13-char field (dropping
-the 2 EDI13-only trailing bytes), with no digits-only restriction; UPC-E expansion then
-applies only if the resulting 11 bytes match the UPC-E pattern (8 digits + 3 spaces).
-Remainder bytes `[14..77]` are preserved verbatim (output width 76).
+### Vendor resolution
 
-### Ruby Red EDI13 (79 bytes)
+SSCS keeps a **Map Supplier to Vendor** table keyed on the `Supplier/Name` text (truncated to
+~30 characters). The retired EDI path fed that same table its 6-character vendor codes, so those
+rows already exist:
 
-`B`(0) + product-code field(1..13) + middle(14..68, 55 bytes) + suffix(69..78, exactly
-`00000000  ` = 8 zeros + 2 spaces). Output (67 bytes): `B` + first 11 bytes of the code
-field (with UPC-E rule) + middle preserved verbatim. The 10-byte suffix is removed only
-after verifying it is exactly `00000000  `.
+```
+DRPEP → DR. PEPPER      FAUSDI → FAUST      GSC → GSC
+FRITOL → …              SEDHOU → SILVER     PEPSI → …
+```
 
-## UPC-E expansion (verified against 40+ fixture records)
+Writing the same 6-character code keeps every existing mapping working with nothing to set up.
+An unrecognised name still imports — SSCS resolved `DR PEPPER BOTTLING COMPANY OF TEXAS` to
+`DR. PEPPER` on its own — and the operator can always pick the vendor from the dropdown.
 
-A code field is a UPC-E candidate iff the 11-char SSCS field content is exactly
-8 digits followed by 3 spaces (`^\d{8}   $`). The 8 digits are: number system `NS`,
-body `D1..D6`, check digit `C`.
+---
 
-Expansion to the 11-digit UPC-A body (without UPC-A check digit):
+## Part 2 — the inputs: fixed-width EDI
 
-| D6      | UPC-A body                     |
-|---------|--------------------------------|
+### File-level structure
+
+| Property | Standard EDI | EDI13 | Ruby Red EDI13 | STRP/Alp |
+|---|---|---|---|---|
+| Header length | 33 (GHRA/FRITOLAY), 27 (PEPSI) | 33 | 64 | 35 |
+| B record length | 76 | 78 | 79 | 75 |
+| Code field width | 11 | 13 | 13 | 11 |
+| Line endings | CRLF | CRLF | LF | CRLF |
+
+Line 1 is always the header; every following line is a `B` (product) or `C` (charge) record.
+Detection is structural, never by filename.
+
+### Headers
+
+**Vendor-style** (standard EDI, EDI13, STRP): `[0..6]` is a 7-character vendor field, left-aligned
+and space padded; `[7..]` is a numeric payload of `invoice(10) + optional date + amount(10)`.
+
+| Payload length | Date field | Example |
+|---|---|---|
+| 26 | 6 digits | GHRA `MMDDYY`; FRITOLAY `YYMMDD` |
+| 20 | none | PEPSI — SSCS dates the invoice on import |
+| 28 | 8 digits `MMDDYYYY` | STRP |
+
+A 6-digit date is read as `MMDDYY` unless its first two digits exceed 12, which cannot be a month
+and therefore means `YYMMDD`. A `13` suffix on the vendor token is a format marker and is stripped.
+A 7-character token is truncated to 6 (`FRITOLA` → `FRITOL`), matching how SSCS already names it.
+
+**Ruby Red** (64 bytes): `GHRA13` + company name(30) + reference(10) + `YYYYMMDD`(8) + amount(10).
+The company name becomes the supplier name and the reference becomes the invoice number
+(`VM NOVELTIES LLC`, `IN-112`).
+
+Amounts carry their sign **inside the zero padding**: `0000-22000` is −$220.00.
+
+### B records — the corrected layout
+
+⚠️ **The field names in earlier revisions of this document were wrong.** They called
+`[base+31..base+37)` the line's extended cost and `[base+39..base+45)` the quantity. That is only
+true when a line happens to be a single case.
+
+With `base = 1 + codeWidth`:
+
+| Bytes | Field |
+|---|---|
+| `[0]` | `B` |
+| `[1 .. base)` | product code |
+| `[base+0 .. base+25)` | description |
+| `[base+25 .. base+31)` | vendor item # / SKU |
+| `[base+31 .. base+37)` | **cost of ONE CASE**, in cents |
+| `[base+37 .. base+39)` | two spaces |
+| `[base+39 .. base+45)` | **pack size** — units in a case |
+| `[base+45 .. base+50)` | **number of cases** (negative on a credit line) |
+| `[base+50 .. base+55)` | each-list / retail, in cents |
+
+So **`units = pack × cases`** and **`unit cost = case cost ÷ pack`**.
+
+Proof the old reading was wrong — totalling the extended-cost interpretation against each file's
+own header amount:
+
+| File | Header | Old reading | Corrected reading |
+|---|---|---|---|
+| FRITOLAY-48690739 | $178.99 | $42.60 ✗ | **$178.99** ✓ |
+| PEPSI-80471906 | $1,348.05 | $1,013.90 ✗ | **$1,348.05** ✓ |
+| GHRA_120511 | $10,032.86 | $4,774.86 ✗ | **$10,032.86** ✓ |
+
+The retired PDF output was unaffected because it always wrote one case per line, which makes both
+readings identical — which is why it verified in SSCS despite the wrong field names.
+
+**One known exception.** Hidden fixture `EDI_GHRA_810738` writes each line's *whole* extended
+amount in the case-cost field; its lines only reach the printed −$262.11 read that way, and doing
+so also yields clean per-unit prices ($4.54, $4.85, $5.34) where the per-case reading yields none.
+`EdiConverter.InterpretMoney` therefore tries the normal reading first and falls back to the
+whole-line reading **only when that reconciles the invoice exactly**, recording a
+`COST_FIELD_IS_WHOLE_LINE` warning. It cannot silently change a file that already balanced.
+
+### Product codes
+
+A code field becomes a GTIN by this one rule, applied to the trimmed content:
+
+| Content | Result |
+|---|---|
+| 8 digits | UPC-E → expand to the 11-digit UPC-A body, then append the check digit |
+| 12 or 13 characters | sent as it stands |
+| 11 digits | append the computed check digit |
+| anything else | append `0`, so SSCS's drop returns the original code |
+
+The last row covers store PLUs and alphanumeric vendor codes (`002ZH7S8J999`), which the hidden
+fixtures prove exist. An empty code field is passed through empty with a `NON_BARCODE_CODE`
+warning — a line with no product id is worth a human look.
+
+#### UPC-E expansion (verified against 40+ fixture records)
+
+The 8 digits are number system `NS`, body `D1..D6`, check digit `C`.
+
+| D6 | UPC-A body |
+|---|---|
 | 0, 1, 2 | `NS D1 D2 D6 0 0 0 0 D3 D4 D5` |
-| 3       | `NS D1 D2 D3 0 0 0 0 0 D4 D5`  |
-| 4       | `NS D1 D2 D3 D4 0 0 0 0 0 D5`  |
-| 5–9     | `NS D1 D2 D3 D4 D5 0 0 0 0 D6` |
+| 3 | `NS D1 D2 D3 0 0 0 0 0 D4 D5` |
+| 4 | `NS D1 D2 D3 D4 0 0 0 0 0 D5` |
+| 5–9 | `NS D1 D2 D3 D4 D5 0 0 0 0 D6` |
 
-Example: `03432004` → `03400000320` (D6=0 rule).
+Example: `03432004` → `03400000320`. `NS` must be 0 or 1. A wrong check digit **stops the whole
+file** — the barcode is mistyped and guessing would put stock against the wrong item. An
+unsupported number system passes the code through with a warning (the retired output blanked the
+field to match a byte fixture; an empty id is worse than an unusual one).
 
-Validation:
-- `NS` must be 0 or 1 (UPC-E is undefined for other number systems).
-- `C` must equal the UPC-A check digit computed over the 11-digit expanded body
-  (odd positions ×3 + even positions, mod 10). All expanded fixture codes validate.
+### C (charge) records
 
-**Fixture-proven exception:** `SSCS_GHRA_129348` line 104 proves the authoritative
-converter handles an unsupported number system (`57026404`, NS=5) by **blanking the
-11-char code field to spaces** and preserving the rest of the record. The converter
-reproduces this and reports the record as a warning. A candidate with a supported
-number system but an invalid check digit has no fixture precedent and causes the file
-to be rejected with the record number and reason.
+**Dropped.** `CSERSERVICE CHARGE` is a 29-byte label with **no amount in it** — FRITOLAY's product
+lines already sum to its $178.99 header total. They are counted, not warned about: nearly every
+file has one, and a warning that fires every time teaches people to ignore warnings.
 
-Codes that do not match the 8-digit+3-space pattern (e.g. `7777777778 `, 10 digits +
-1 space, or an all-space field) are never expanded.
+### Rejections
 
-## C records
+| Reason | Condition |
+|---|---|
+| `EMPTY_FILE` | nothing to convert |
+| `ALREADY_CONVERTED` | the file is already NAXML, or is retired fixed-width output |
+| `INVALID_HEADER` | line 1 is not a recognised header |
+| `NO_PRODUCT_RECORDS` | a header with no `B` records |
+| `UNSUPPORTED_RECORD_TYPE` | a record that is not `B` or `C` |
+| `UNSUPPORTED_RECORD_LENGTH` | a row whose width does not match the detected format |
+| `RUBYRED_SUFFIX_MISMATCH` | a Ruby Red row not ending `00000000  ` |
+| `UPCE_INVALID_CHECK_DIGIT` | a short barcode whose check digit does not compute |
+| `BLANK_LINE`, `BINARY_CONTENT`, `LONE_CARRIAGE_RETURN` | damaged file |
 
-Preserved byte-for-byte, including all trailing spaces
-(`CSERSERVICE CHARGE           `, 29 bytes in every fixture).
+---
 
-## STRP / Alp 75-byte standard EDI (`StandardEdi75`)
+## Why the fixed-width output was retired
 
-Example input: `Invoice_RT006_EDI.txt` (vendor `STRP`). Detected structurally: a vendor-style
-header whose payload is **28** bytes = invoice(10) + **8-digit `MMDDYYYY`** date + amount(10),
-paired with **75-byte** `B` records. Both differences are resolved by the same normalization
-principle the GHRA set proves (EDI13's 78-byte rows normalize to 76; the header is always 33):
+The old output had an **11-character** product-code field. That is enough for a 12-digit UPC-A
+(drop the check digit) but not for a 13-digit EAN-13, which most imported vape and novelty stock
+carries.
 
-- **Header:** shorten the 8-digit `MMDDYYYY` date to 6-digit `MMDDYY` (drop the century), giving
-  the canonical 33-byte header `A` + vendor(6) + invoice(10) + `MMDDYY`(6) + amount(10).
-  Example: `STRP   0000000006`**`07212026`**`0000013650` → `ASTRP  0000000006`**`072126`**`0000013650`.
-  Records a `HEADER_DATE_REFORMATTED` warning.
-- **B records:** column analysis of 7,054 real SSCS rows shows the 76-byte layout ends in a
-  trailing pad (column 75 is a space in 99.7% of rows). A 75-byte STRP row aligns with that
-  schema through column 74, so it is normalized by **appending one trailing space** (→ 76).
-  The 11-char code field is handled exactly like standard EDI (UPC-E rule applies).
+VM Novelties' IN-112 invoice made the cost concrete: 53 of its 72 lines are genuine EAN-13s.
+Truncated to 11 characters, **72 line items collapsed onto 40 distinct IDs** — eight different
+GEEK NEXT flavours all became `69176731657`. SSCS rejected it.
 
-**Verification:** derived from the GHRA gold-standard normalization principle (this format had no
-byte-reference of its own), then **confirmed end-to-end by SSCS**: the converted `Invoice_RT006`
-was ingested by the live SSCS system, which read back invoice #6, date **7/21/2026** (confirming
-the `MMDDYYYY`→`MMDDYY` shortening), total **$136.50**, and all seven line items (qty 5, ea list
-$6.99, ext cost $19.50, 44.21% margin each; 7 × $19.50 = $136.50). The confirmed output is locked
-as a golden-master fixture (`SSCS_Invoice_RT006_EDI.txt`).
+The same file through the NAXML path keeps **all 70 distinct barcodes**, totals $3,649.00 exactly,
+and carries its 4 credit lines as negative quantities.
 
-## Rejection rules (validated before any output is written)
-
-- File is **already in SSCS output format** → rejected with a plain "already in SSCS format,
-  does not need to be converted" message (reason `ALREADY_SSCS`), not the generic invalid-header
-  error. Detected by unambiguous SSCS-output signatures that no input can have: a 67-byte `B`
-  record, or a 59-byte `A`-led Ruby-Red-style header whose company/reference region holds text.
-  (Files often arrive misleadingly named `EDI-*` while their contents are already SSCS — e.g.
-  `SSCS_VMNOVELTIESLLC.txt`.) Standard 33-byte SSCS output is **not** detected, as it is
-  indistinguishable from an EDI input whose vendor code begins with `A`.
-- First line not a valid vendor-style or Ruby Red header → missing/invalid header.
-- Record after line 1 not starting with `B` or `C` → unsupported record type
-  (reported with line number; covers duplicate headers and blank lines).
-- B record width ≠ expected width for the detected format → unsupported record length
-  (reported with line number and actual length).
-- NUL or other control bytes (other than CR/LF) → binary content rejected.
-- Lone CR (not part of CRLF) → rejected.
-- Empty file → rejected.
-- UTF-8 BOM: stripped, conversion continues, warning recorded; output has no BOM.
+Everything else the fixed-width format forced also disappeared: a 6-character vendor code, a
+25-character description limit, a numeric-only invoice number, `MMDDYY` date juggling, a $99.99
+each-list cap, and four separate byte layouts to reverse-engineer. NAXML is a published c-store
+standard that SSCS already accepts from vendors directly.

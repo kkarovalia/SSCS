@@ -5,7 +5,7 @@ namespace EdiToSscs.Core;
 /// <summary>Builds canonical SSCS output filenames from input filenames.</summary>
 public static partial class OutputNaming
 {
-    public const string FallbackName = "SSCS_Converted.txt";
+    public const string FallbackName = "SSCS_Converted.xml";
 
     // One leading EDI13 / EDI / SSCS token followed by separators (space, hyphen, underscore)
     // or the end of the name. EDI13 must be listed before EDI so 'EDI13' never matches as 'EDI' + '13'.
@@ -15,7 +15,7 @@ public static partial class OutputNaming
     /// <summary>
     /// Normalizes an input filename to its canonical SSCS output name:
     /// strips leading EDI13/EDI/SSCS tokens (with following separators), prepends exactly one
-    /// 'SSCS_', sanitizes only Windows-forbidden characters, and forces a '.txt' extension.
+    /// 'SSCS_', sanitizes only Windows-forbidden characters, and forces a '.xml' extension.
     /// </summary>
     public static string BuildOutputFileName(string inputFileName)
     {
@@ -35,7 +35,7 @@ public static partial class OutputNaming
         if (name.Length == 0)
             return FallbackName;
 
-        return "SSCS_" + Sanitize(name) + ".txt";
+        return "SSCS_" + Sanitize(name) + ".xml";
     }
 
     /// <summary>Replaces only characters Windows forbids in filenames; all other characters are preserved.</summary>
@@ -51,7 +51,7 @@ public static partial class OutputNaming
 
     /// <summary>
     /// Produces the sequence of candidate filenames used when the target already exists:
-    /// 'SSCS_X.txt', 'SSCS_X (1).txt', 'SSCS_X (2).txt', ...
+    /// 'SSCS_X.xml', 'SSCS_X (1).xml', 'SSCS_X (2).xml', ...
     /// </summary>
     public static string CandidateName(string outputFileName, int attempt)
     {

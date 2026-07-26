@@ -61,15 +61,17 @@ public class CoordinatorTests
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
         var (coordinator, _, events, summaries) = Setup(tmp, dest);
-        string input = PlaceFixture(tmp, @"EDI\EDI_GHRA_131454.txt", "EDI_GHRA_131454.txt");
+        // Ruby Red is the fixture that converts with nothing to report, so the status lands on
+        // Converted rather than Warning.
+        string input = PlaceFixture(tmp, @"EDI13\EDI13-RubyRedSalesServices.txt", "EDI13-RubyRedSalesServices.txt");
 
         coordinator.Enqueue(new[] { input });
         await coordinator.WhenIdleAsync();
 
-        var sequence = events.Where(e => e.File == "EDI_GHRA_131454.txt").Select(e => e.Status).ToList();
+        var sequence = events.Where(e => e.File == "EDI13-RubyRedSalesServices.txt").Select(e => e.Status).ToList();
         Assert.Equal(new[] { FileStatus.Waiting, FileStatus.Converting, FileStatus.Converted }, sequence);
         string summary = Assert.Single(summaries);
-        Assert.Contains("SSCS_GHRA_131454.txt", summary); // exact output filename
+        Assert.Contains("SSCS_RubyRedSalesServices.xml", summary); // exact output filename
         Assert.Contains(dest, summary);                   // exact output folder
     }
 
@@ -89,10 +91,12 @@ public class CoordinatorTests
         coordinator.Enqueue(inputs);
         await coordinator.WhenIdleAsync();
 
-        Assert.Equal(3, events.Count(e => e.Status == FileStatus.Converted));
-        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_131454.txt")));
-        Assert.True(File.Exists(Path.Combine(dest, "SSCS_PEPSI-80471906.txt")));
-        Assert.True(File.Exists(Path.Combine(dest, "SSCS_RubyRedSalesServices.txt")));
+        // GHRA_131454 has a line with a blank product code and PEPSI's header carries no date, so
+        // those two legitimately finish as Warning; all three still converted.
+        Assert.Equal(3, events.Count(e => e.Status is FileStatus.Converted or FileStatus.Warning));
+        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_131454.xml")));
+        Assert.True(File.Exists(Path.Combine(dest, "SSCS_PEPSI-80471906.xml")));
+        Assert.True(File.Exists(Path.Combine(dest, "SSCS_RubyRedSalesServices.xml")));
         Assert.Contains("3 files converted", Assert.Single(summaries));
     }
 
@@ -142,7 +146,7 @@ public class CoordinatorTests
         Assert.Equal(1, dest.RequestCount);
         Assert.Contains("no longer available", dest.LastReason);
         Assert.Equal(new[] { replacement }, dest.SavedFolders); // replacement persisted
-        Assert.True(File.Exists(Path.Combine(replacement, "SSCS_GHRA_118955.txt")));
+        Assert.True(File.Exists(Path.Combine(replacement, "SSCS_GHRA_118955.xml")));
     }
 
     [Fact]
@@ -231,8 +235,8 @@ public class CoordinatorTests
         // A second Enqueue may race past the first worker's drain; wait for any restarted worker.
         await coordinator.WhenIdleAsync();
 
-        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_120511.txt")));
-        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_129943.txt")));
+        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_120511.xml")));
+        Assert.True(File.Exists(Path.Combine(dest, "SSCS_GHRA_129943.xml")));
         Assert.Equal(FileStatus.Converted, first[0].Status);
         Assert.Equal(FileStatus.Converted, second[0].Status);
     }

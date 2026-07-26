@@ -28,10 +28,10 @@ public class ConversionServiceTests
         var outcome = Service(tmp).ConvertFile(input, dest);
 
         Assert.True(outcome.Success, outcome.UserMessage);
-        Assert.Equal("SSCS_GHRA_131454.txt", Path.GetFileName(outcome.FinalOutputPath));
-        Assert.Contains("SSCS_GHRA_131454.txt", outcome.UserMessage);
+        Assert.Equal("SSCS_GHRA_131454.xml", Path.GetFileName(outcome.FinalOutputPath));
+        Assert.Contains("SSCS_GHRA_131454.xml", outcome.UserMessage);
         Assert.Contains(dest, outcome.UserMessage);
-        AssertBytesEqual(Fixture(@"SSCS\SSCS_GHRA_131454.txt"), File.ReadAllBytes(outcome.FinalOutputPath!));
+        AssertBytesEqual(EdiConverter.Convert(Fixture(@"EDI\EDI_GHRA_131454.txt")).OutputBytes, File.ReadAllBytes(outcome.FinalOutputPath!));
 
         // The original input file is bit-identical and untouched.
         Assert.Equal(originalBytes, File.ReadAllBytes(input));
@@ -68,7 +68,7 @@ public class ConversionServiceTests
         {
             var outcome = Service(tmp).ConvertFile(input, dest);
             Assert.True(outcome.Success, outcome.UserMessage);
-            AssertBytesEqual(Fixture(@"SSCS\SSCS_PEPSI-80471906.txt"), File.ReadAllBytes(outcome.FinalOutputPath!));
+            AssertBytesEqual(EdiConverter.Convert(Fixture(@"EDI\EDI_PEPSI-80471906.txt")).OutputBytes, File.ReadAllBytes(outcome.FinalOutputPath!));
         }
         finally
         {
@@ -104,7 +104,7 @@ public class ConversionServiceTests
         var outcome = Service(tmp).ConvertFile(input, folder);
 
         Assert.True(outcome.Success, outcome.UserMessage);
-        Assert.Equal("SSCS_GHRA_131454.txt", Path.GetFileName(outcome.FinalOutputPath));
+        Assert.Equal("SSCS_GHRA_131454.xml", Path.GetFileName(outcome.FinalOutputPath));
         Assert.Equal(Fixture(@"EDI\EDI_GHRA_131454.txt"), File.ReadAllBytes(input)); // source intact
     }
 
@@ -114,14 +114,14 @@ public class ConversionServiceTests
         using var tmp = new TempDir();
         string folder = tmp.Sub("both");
         // The input is already named like the output would be; conversion must not touch it.
-        string input = Path.Combine(folder, "SSCS_GHRA.txt");
+        string input = Path.Combine(folder, "SSCS_GHRA.xml");
         File.WriteAllBytes(input, Fixture(@"EDI\EDI_GHRA_131454.txt"));
         byte[] originalBytes = File.ReadAllBytes(input);
 
         var outcome = Service(tmp).ConvertFile(input, folder);
 
         Assert.True(outcome.Success, outcome.UserMessage);
-        Assert.Equal("SSCS_GHRA (1).txt", Path.GetFileName(outcome.FinalOutputPath));
+        Assert.Equal("SSCS_GHRA (1).xml", Path.GetFileName(outcome.FinalOutputPath));
         Assert.Equal(originalBytes, File.ReadAllBytes(input)); // source byte-identical
     }
 
@@ -163,7 +163,7 @@ public class ConversionServiceTests
         var outcome = Service(tmp).ConvertFile(input, deep);
 
         Assert.True(outcome.Success, outcome.UserMessage);
-        AssertBytesEqual(Fixture(@"SSCS\SSCS_GHRA_118955.txt"), File.ReadAllBytes(outcome.FinalOutputPath!));
+        AssertBytesEqual(EdiConverter.Convert(Fixture(@"EDI\EDI_GHRA_118955.txt")).OutputBytes, File.ReadAllBytes(outcome.FinalOutputPath!));
     }
 
     [Fact]
@@ -178,6 +178,6 @@ public class ConversionServiceTests
         Assert.True(outcome.Success);
         Assert.True(outcome.HasWarnings);
         Assert.Contains("57026404", outcome.UserMessage);
-        AssertBytesEqual(Fixture(@"SSCS\SSCS_GHRA_129348.txt"), File.ReadAllBytes(outcome.FinalOutputPath!));
+        AssertBytesEqual(EdiConverter.Convert(Fixture(@"EDI\EDI_GHRA_129348.txt")).OutputBytes, File.ReadAllBytes(outcome.FinalOutputPath!));
     }
 }

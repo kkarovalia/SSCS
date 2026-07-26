@@ -31,11 +31,19 @@ public sealed class ConversionService : IFileConverter
         _appVersion = appVersion ?? typeof(ConversionService).Assembly.GetName().Version?.ToString() ?? "unknown";
     }
 
+    /// <summary>Convenience overload for EDI files (used by tests and any single-path caller).</summary>
     public ConversionOutcome ConvertFile(string inputPath, string destinationFolder)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
+        return ConvertFile(new QueuedFile { InputPath = inputPath }, destinationFolder);
+    }
+
+    public ConversionOutcome ConvertFile(QueuedFile file, string destinationFolder)
+    {
+        ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(destinationFolder);
 
+        string inputPath = file.InputPath;
         string inputFileName = Path.GetFileName(inputPath);
         var log = new LogEntry
         {
@@ -57,10 +65,12 @@ public sealed class ConversionService : IFileConverter
 
         log.InputBytes = inputBytes.LongLength;
 
-        ConversionResult result;
+        Converted converted;
         try
         {
-            result = EdiConverter.Convert(inputBytes);
+            converted = file.Kind == ConversionKind.Pdf
+                ? ConvertPdf(inputBytes)
+                : ConvertEdi(inputBytes);
         }
         catch (EdiConversionException ex)
         {
@@ -72,12 +82,12 @@ public sealed class ConversionService : IFileConverter
             return Fail(log, ex, $"Could not convert {inputFileName}.\n\nAn unexpected problem occurred. The original file was not changed.");
         }
 
-        log.DetectedFormat = result.Format.ToString();
-        log.RecordsProcessed = result.RecordCount;
-        log.UpcERecordsExpanded = result.UpcEExpandedCount;
-        log.OutputBytes = result.OutputByteCount;
-        if (result.HasWarnings)
-            log.Warnings = result.Warnings.Select(w => $"line {w.LineNumber} [{w.ReasonCode}]: {w.Message}").ToList();
+        log.DetectedFormat = converted.Format;
+        log.RecordsProcessed = converted.RecordCount;
+        log.UpcERecordsExpanded = converted.UpcExpanded;
+        log.OutputBytes = converted.Bytes.LongLength;
+        if (converted.HasWarnings)
+            log.Warnings = converted.Warnings.Select(w => $"line {w.LineNumber} [{w.ReasonCode}]: {w.Message}").ToList();
 
         string desiredName = OutputNaming.BuildOutputFileName(inputFileName);
         string tempPath = Path.Combine(destinationFolder, $"~sscs-{Guid.NewGuid():N}.tmp");
@@ -86,20 +96,20 @@ public sealed class ConversionService : IFileConverter
             // 1) Write the fully converted bytes to a temporary file in the destination and flush to disk.
             using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                fs.Write(result.OutputBytes, 0, result.OutputBytes.Length);
+                fs.Write(converted.Bytes, 0, converted.Bytes.Length);
                 fs.Flush(flushToDisk: true);
             }
 
             // 2) Re-read and verify the temporary file is a complete, correct copy.
             byte[] written = File.ReadAllBytes(tempPath);
-            if (!written.AsSpan().SequenceEqual(result.OutputBytes))
+            if (!written.AsSpan().SequenceEqual(converted.Bytes))
                 throw new IOException("The written file did not match the converted data (disk problem?).");
 
             // 3) Compute success metadata BEFORE the final rename so that nothing after the
             //    commit point can throw and misreport an already-written file as failed.
-            log.Status = result.HasWarnings ? "Warning" : "Success";
+            log.Status = converted.HasWarnings ? "Warning" : "Success";
             log.InputSha256 = System.Convert.ToHexString(SHA256.HashData(inputBytes));
-            log.OutputSha256 = System.Convert.ToHexString(SHA256.HashData(result.OutputBytes));
+            log.OutputSha256 = System.Convert.ToHexString(SHA256.HashData(converted.Bytes));
 
             // 4) Atomically claim a non-conflicting final name. File.Move fails if the target
             //    exists, which makes the claim safe even when several conversions run at once.
@@ -109,15 +119,15 @@ public sealed class ConversionService : IFileConverter
             _logger.TryWrite(log);
 
             string message = $"Saved {Path.GetFileName(finalPath)} to {destinationFolder}";
-            if (result.HasWarnings)
-                message += $"\n{string.Join("\n", result.Warnings.Select(w => w.Message))}";
+            if (converted.HasWarnings)
+                message += $"\n{string.Join("\n", converted.Warnings.Select(w => w.Message))}";
 
             return new ConversionOutcome
             {
                 Success = true,
-                HasWarnings = result.HasWarnings,
+                HasWarnings = converted.HasWarnings,
                 FinalOutputPath = finalPath,
-                Result = result,
+                Result = converted.EdiResult,
                 UserMessage = message,
             };
         }
@@ -130,6 +140,33 @@ public sealed class ConversionService : IFileConverter
             // A failed conversion must never leave a temporary file that looks like an invoice.
             try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* best effort */ }
         }
+    }
+
+    /// <summary>Unifies the EDI and PDF conversion outputs so the safe-write path below is shared.</summary>
+    private sealed record Converted(
+        byte[] Bytes, string Format, int RecordCount,
+        IReadOnlyList<ConversionWarning> Warnings, int UpcExpanded, ConversionResult? EdiResult)
+    {
+        public bool HasWarnings => Warnings.Count > 0;
+    }
+
+    private static Converted ConvertEdi(byte[] inputBytes)
+    {
+        var r = EdiConverter.Convert(inputBytes);
+        return new Converted(r.OutputBytes, r.Format.ToString(), r.RecordCount, r.Warnings, r.UpcEExpandedCount, r);
+    }
+
+    private static Converted ConvertPdf(byte[] inputBytes)
+    {
+        if (!PdfTextExtractor.LooksLikePdf(inputBytes))
+            throw new EdiConversionException(PdfReasonCodes.NotAPdf,
+                "This file does not look like a PDF. Please drop the vendor's PDF invoice.");
+
+        IReadOnlyList<string> lines = PdfTextExtractor.ExtractLines(inputBytes);
+        var warnings = new List<ConversionWarning>();
+        Invoice invoice = DrPepperPdfParser.Parse(lines, warnings);
+        byte[] output = NaxmlBuilder.Build(invoice);
+        return new Converted(output, "PDF/DrPepper", invoice.Lines.Count, warnings, 0, null);
     }
 
     private static byte[] ReadInputBytes(string inputPath)

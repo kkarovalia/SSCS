@@ -15,7 +15,7 @@
     <InformationalVersion>1.0.0</InformationalVersion>
     <AssemblyTitle>EDI to SSCS Converter</AssemblyTitle>
     <Product>EDI to SSCS Converter</Product>
-    <Description>Converts fixed-width EDI and EDI13 invoice files to SSCS text files.</Description>
+    <Description>Converts vendor EDI, EDI13 and PDF invoices into NAXML invoice files for SSCS.</Description>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 

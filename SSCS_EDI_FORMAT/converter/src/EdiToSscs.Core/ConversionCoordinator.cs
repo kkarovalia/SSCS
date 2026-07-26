@@ -5,11 +5,16 @@ namespace EdiToSscs.Core;
 /// <summary>Per-file status shown in the UI.</summary>
 public enum FileStatus { Waiting, Converting, Converted, Warning, Failed, Canceled }
 
+/// <summary>Which input a queued file is: a fixed-width EDI file or a searchable PDF invoice.</summary>
+public enum ConversionKind { Edi, Pdf }
+
 /// <summary>One file tracked by the conversion queue.</summary>
 public sealed class QueuedFile
 {
     public required string InputPath { get; init; }
     public string FileName => Path.GetFileName(InputPath);
+    /// <summary>Which pipeline to run. Defaults to EDI so existing callers/tests are unchanged.</summary>
+    public ConversionKind Kind { get; init; } = ConversionKind.Edi;
     public FileStatus Status { get; internal set; } = FileStatus.Waiting;
     public string Detail { get; internal set; } = "";
     public string? OutputPath { get; internal set; }
@@ -31,7 +36,7 @@ public interface IDestinationProvider
 /// <summary>Abstraction over the end-to-end single-file conversion, for testability.</summary>
 public interface IFileConverter
 {
-    ConversionOutcome ConvertFile(string inputPath, string destinationFolder);
+    ConversionOutcome ConvertFile(QueuedFile file, string destinationFolder);
 }
 
 /// <summary>
@@ -66,18 +71,18 @@ public sealed class ConversionCoordinator
     /// Folders are rejected with a Failed status rather than being traversed.
     /// Returns the created queue items (including immediately-rejected ones).
     /// </summary>
-    public IReadOnlyList<QueuedFile> Enqueue(IEnumerable<string> paths)
+    public IReadOnlyList<QueuedFile> Enqueue(IEnumerable<string> paths, ConversionKind kind = ConversionKind.Edi)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var added = new List<QueuedFile>();
         foreach (string path in paths)
         {
-            var item = new QueuedFile { InputPath = path };
+            var item = new QueuedFile { InputPath = path, Kind = kind };
             added.Add(item);
             if (Directory.Exists(path))
             {
                 item.Status = FileStatus.Failed;
-                item.Detail = "Folders are not supported. Drop individual EDI files instead.";
+                item.Detail = "Folders are not supported. Drop individual files instead.";
                 RaiseFileChanged(item);
                 continue;
             }
@@ -197,7 +202,7 @@ public sealed class ConversionCoordinator
             ConversionOutcome outcome;
             try
             {
-                outcome = _converter.ConvertFile(item.InputPath, folder);
+                outcome = _converter.ConvertFile(item, folder);
             }
             catch (Exception ex)
             {

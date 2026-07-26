@@ -74,4 +74,12 @@ public sealed class SettingsStore
             try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>Persists only the output folder.</summary>
+    public void SaveOutputFolder(string? folder)
+    {
+        var s = Load();
+        s.OutputFolder = folder;
+        Save(s);
+    }
 }
