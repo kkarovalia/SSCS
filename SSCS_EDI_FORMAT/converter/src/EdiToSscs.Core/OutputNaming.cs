@@ -38,6 +38,18 @@ public static partial class OutputNaming
         return "SSCS_" + Sanitize(name) + ".xml";
     }
 
+    /// <summary>
+    /// Names an output after its invoice number rather than its source file. Used where one input
+    /// produces several invoices — a Blue Bell ticket carrying both a Sales and a Returns invoice —
+    /// so the two files are told apart by the number a person can read off the paper.
+    /// </summary>
+    public static string BuildInvoiceOutputFileName(string invoiceNumber)
+    {
+        ArgumentNullException.ThrowIfNull(invoiceNumber);
+        string trimmed = Sanitize(invoiceNumber.Trim()).Trim();
+        return trimmed.Length == 0 ? FallbackName : "SSCS_" + trimmed + ".xml";
+    }
+
     /// <summary>Replaces only characters Windows forbids in filenames; all other characters are preserved.</summary>
     public static string Sanitize(string name)
     {

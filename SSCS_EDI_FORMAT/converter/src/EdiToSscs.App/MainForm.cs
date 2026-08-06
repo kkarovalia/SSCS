@@ -4,7 +4,7 @@ using EdiToSscs.Core;
 
 namespace EdiToSscs.App;
 
-public sealed class MainForm : Form, IDestinationProvider
+public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 {
     // Option A — navy primary, light surfaces, red used sparingly for brand accent.
     private static readonly Color ThemeBg = Color.FromArgb(248, 249, 252);
@@ -27,16 +27,31 @@ public sealed class MainForm : Form, IDestinationProvider
     private string? _currentFolder;
     private bool _firstShownHandled;
 
+    /// <summary>
+    /// The email configuration as last saved. Guarded because Send Email runs on a background
+    /// thread while Settings can be edited on the UI thread.
+    /// </summary>
+    private EmailSettings _email = new();
+    private readonly object _emailLock = new();
+    private readonly SmtpEmailSender _emailSender;
+
     private Label _folderValueLabel = null!;
+    private Label _emailValueLabel = null!;
 
     public MainForm()
     {
         _ = _logger.CleanupOldLogs(DateTime.UtcNow);
-        _currentFolder = _settingsStore.Load().OutputFolder;
+        var settings = _settingsStore.Load();
+        _currentFolder = settings.OutputFolder;
+        _email = settings.Email;
         _logoImage = LoadEmbeddedLogo();
+
+        // Reads the live settings on every send, so a change in Settings takes effect immediately.
+        _emailSender = new SmtpEmailSender(() => { lock (_emailLock) return _email.Clone(); });
 
         BuildLayout();
         UpdateFolderLabel();
+        UpdateEmailLabel();
 
         Shown += OnFormShown;
         FormClosing += OnFormClosingConfirm;
@@ -96,6 +111,67 @@ public sealed class MainForm : Form, IDestinationProvider
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.SelectedPath : null;
     }
 
+    // ---------------------------------------------------------------- IInvoiceDetailsPrompt
+
+    /// <summary>
+    /// Asks the operator to key the invoice number — and the date, when the scan destroyed it —
+    /// showing what was parsed so they can check it against the paper. Called from the conversion
+    /// worker, so it marshals to the UI thread. Returns null when the operator cancels the file.
+    /// </summary>
+    public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (IsDisposed || !IsHandleCreated) return null;
+        if (InvokeRequired)
+        {
+            try { return (InvoiceDetails?)Invoke(() => AskInvoiceDetails(request)); }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        using var dialog = new InvoiceNumberDialog(request);
+        return dialog.ShowDialog(this) == DialogResult.OK
+            ? new InvoiceDetails(dialog.InvoiceNumber, dialog.Date)
+            : null;
+    }
+
+    /// <summary>
+    /// Asks the operator to type one line's barcode, for the rare product whose code the scan
+    /// destroyed and the vendor's catalogue does not hold. Called from the conversion worker, so it
+    /// marshals to the UI thread. Returns null when the operator skips the file.
+    /// </summary>
+    public string? AskBarcode(BarcodeRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (IsDisposed || !IsHandleCreated) return null;
+        if (InvokeRequired)
+        {
+            try { return (string?)Invoke(() => AskBarcode(request)); }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        using var dialog = new BarcodeDialog(request);
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Barcode : null;
+    }
+
+    /// <summary>
+    /// Asks the operator for one figure on one product row — barcode, units or amount — that the
+    /// scan destroyed and the ticket's own arithmetic could not rebuild. Called from the conversion
+    /// worker, so it marshals to the UI thread. Returns null when the operator skips the file.
+    /// </summary>
+    public string? AskLineField(LineFieldRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (IsDisposed || !IsHandleCreated) return null;
+        if (InvokeRequired)
+        {
+            try { return (string?)Invoke(() => AskLineField(request)); }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        using var dialog = new LineFieldDialog(request);
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Value : null;
+    }
+
     public void SaveFolder(string folder)
     {
         _currentFolder = folder;
@@ -114,6 +190,7 @@ public sealed class MainForm : Form, IDestinationProvider
     private void BuildLayout()
     {
         Text = "EDI & PDF to SSCS Converter";
+        AppIcon.ApplyTo(this);
         MinimumSize = new Size(820, 600);
         Size = new Size(940, 700);
         Font = new Font("Segoe UI", 10f);
@@ -140,20 +217,22 @@ public sealed class MainForm : Form, IDestinationProvider
         var ediPage = new TabPage("EDI to SSCS XML") { BackColor = ThemeBg, Padding = new Padding(10), UseVisualStyleBackColor = false };
         var pdfPage = new TabPage("PDF to SSCS XML") { BackColor = ThemeBg, Padding = new Padding(10), UseVisualStyleBackColor = false };
 
+        // PDF sits ahead of EDI and opens first: the PDF vendors are the everyday job, and the tab
+        // that is already in front is the one nobody converts on the wrong tab by accident.
         tabs.TabPages.Add(settingsPage);
-        tabs.TabPages.Add(ediPage);
         tabs.TabPages.Add(pdfPage);
+        tabs.TabPages.Add(ediPage);
 
         _ediTab = new ConvertTab(this, ConversionKind.Edi,
             "Click or drag and drop EDI files here",
             "Accepted: .txt, .edi, .edi13  —  the data file a vendor emails you");
         _pdfTab = new ConvertTab(this, ConversionKind.Pdf,
             "Click or drag and drop PDF invoices here",
-            "Accepted: .pdf (searchable)  —  a vendor's PDF invoice, e.g. Dr Pepper");
+            "Accepted: .pdf (searchable)  —  choose the vendor above before dropping");
         _ediTab.Build(ediPage);
         _pdfTab.Build(pdfPage);
 
-        tabs.SelectedTab = ediPage;
+        tabs.SelectedTab = pdfPage;
         shell.Controls.Add(tabs, 0, 1);
 
         BuildSettingsPage(settingsPage);
@@ -186,6 +265,9 @@ public sealed class MainForm : Form, IDestinationProvider
         row.Controls.Add(new Label
         {
             Text = "EDI & PDF to SSCS Converter", AutoSize = true,
+            // Without this a Label eats the "&" as a keyboard accelerator and the title renders as
+            // "EDI _PDF to SSCS Converter" with the space underlined.
+            UseMnemonic = false,
             Font = new Font("Segoe UI", 16f, FontStyle.Bold), ForeColor = ThemeNavy,
             BackColor = Color.Transparent, Margin = new Padding(0, 24, 0, 0),
             TextAlign = ContentAlignment.MiddleLeft,
@@ -199,37 +281,113 @@ public sealed class MainForm : Form, IDestinationProvider
 
     private void BuildSettingsPage(TabPage page)
     {
+        // Scrollable: the page carries two sections, and at 150% display scaling on a short laptop
+        // screen the help text would otherwise be cut off with no way to reach it.
         var layout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = ThemeBg,
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, BackColor = ThemeBg,
+            AutoScroll = true,
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // folder heading
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // folder value
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // change folder button
+        for (int i = 0; i < 6; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // help text / filler
         page.Controls.Add(layout);
 
-        layout.Controls.Add(new Label
-        {
-            Text = "Output folder", AutoSize = true, Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-            ForeColor = ThemeNavy, Margin = new Padding(0, 0, 0, 6),
-        }, 0, 0);
+        // --- Email ---
+        layout.Controls.Add(SectionHeading("Email"), 0, 0);
+
+        _emailValueLabel = new Label { AutoSize = true, MaximumSize = new Size(760, 0), ForeColor = ThemeText, Margin = new Padding(0, 0, 0, 8) };
+        layout.Controls.Add(_emailValueLabel, 0, 1);
+
+        var emailButton = MakePrimaryButton("Email Settings...");
+        emailButton.Margin = new Padding(0, 0, 0, 20);
+        emailButton.Click += OnOpenEmailSettings;
+        layout.Controls.Add(emailButton, 0, 2);
+
+        // --- Output folder ---
+        layout.Controls.Add(SectionHeading("Output folder"), 0, 3);
 
         _folderValueLabel = new Label { AutoSize = true, MaximumSize = new Size(760, 0), ForeColor = ThemeText, Margin = new Padding(0, 0, 0, 8) };
-        layout.Controls.Add(_folderValueLabel, 0, 1);
+        layout.Controls.Add(_folderValueLabel, 0, 4);
 
         var changeFolderButton = MakePrimaryButton("Change Output Folder");
         changeFolderButton.Margin = new Padding(0, 0, 0, 16);
         changeFolderButton.Click += OnChangeOutputFolder;
-        layout.Controls.Add(changeFolderButton, 0, 2);
+        layout.Controls.Add(changeFolderButton, 0, 5);
 
         layout.Controls.Add(new Label
         {
-            Text = "Converted SSCS files are saved to this folder.\n\n" +
+            Text = "How sending works\n\n" +
+                   "Converted files are always saved to the output folder. Press Send Email on a convert\n" +
+                   "tab to email everything that has just been converted — one email per invoice, each\n" +
+                   "with its own XML attached. Nothing is sent until you press it.\n\n" +
+                   "An invoice already sent is not sent again unless you say so, so pressing the button\n" +
+                   "twice cannot double-book a delivery.\n\n" +
                    "• EDI to SSCS XML — converts the data files vendors email you (.txt, .edi, .edi13).\n" +
-                   "• PDF to SSCS XML — converts Dr Pepper's searchable PDF invoices.",
+                   "• PDF to SSCS XML — converts Dr Pepper, Blue Bell, Chubiwinos, Bimbo and Red Bull PDF\n" +
+                   "  invoices. Pick the vendor first.\n\n" +
+                   "A Blue Bell ticket that also has a Returns section produces two files, one per\n" +
+                   "invoice number, and each goes out as its own email.\n\n" +
+                   "Use View XML to read what a file converted to.",
             AutoSize = true, Font = new Font("Segoe UI", 10.5f), ForeColor = ThemeMuted, Margin = new Padding(0, 4, 0, 0),
-        }, 0, 3);
+        }, 0, 6);
+    }
+
+    private static Label SectionHeading(string text) => new()
+    {
+        Text = text, AutoSize = true, Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+        ForeColor = ThemeNavy, Margin = new Padding(0, 0, 0, 6),
+    };
+
+    /// <summary>
+    /// Opens the email settings, behind the admin PIN. The first time through, the operator chooses
+    /// the PIN — which is saved even if they then cancel the settings themselves, so that the gate
+    /// is in place from that moment on rather than only once email is configured.
+    /// </summary>
+    private void OnOpenEmailSettings(object? sender, EventArgs e)
+    {
+        EmailSettings current;
+        lock (_emailLock) current = _email.Clone();
+
+        var (allowed, newPinHash) = PinDialog.Authorize(this, current.AdminPinHash);
+        if (!allowed) return;
+
+        if (newPinHash is not null)
+        {
+            current.AdminPinHash = newPinHash;
+            ApplyEmailSettings(current);
+        }
+
+        using var dialog = new EmailSettingsDialog(current);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        ApplyEmailSettings(dialog.Result);
+    }
+
+    /// <summary>Saves the email settings and makes them live for the next send.</summary>
+    private void ApplyEmailSettings(EmailSettings settings)
+    {
+        lock (_emailLock) _email = settings;
+        try
+        {
+            _settingsStore.SaveEmail(settings);
+        }
+        catch
+        {
+            MessageBox.Show(this,
+                "Your email settings could not be saved and will be asked again next time.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        UpdateEmailLabel();
+    }
+
+    private void UpdateEmailLabel()
+    {
+        EmailSettings s;
+        lock (_emailLock) s = _email;
+
+        _emailValueLabel.Text = s.IsComplete
+            ? $"Send Email sends to: {s.ToAddress}\nSent from {s.FromAddress}. Files are saved to the output folder as well."
+            : "Email is not set up yet, so Send Email has nothing to send to.\nOpen Email Settings to set the store's address and the sending mailbox.";
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -239,6 +397,14 @@ public sealed class MainForm : Form, IDestinationProvider
         Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat,
         BackColor = ThemeNavy, ForeColor = ThemeButtonText, Padding = new Padding(12, 4, 12, 4),
         Cursor = Cursors.Hand, FlatAppearance = { BorderSize = 0 },
+    };
+
+    /// <summary>An underlined text link, for the places that only open a window to look at.</summary>
+    private static LinkLabel MakeLink(string text) => new()
+    {
+        Text = text, AutoSize = true, LinkColor = ThemeNavy, ActiveLinkColor = ThemeRedAccent,
+        LinkBehavior = LinkBehavior.AlwaysUnderline, Cursor = Cursors.Hand,
+        Margin = new Padding(2, 10, 16, 0),
     };
 
     private static Image? LoadEmbeddedLogo()
@@ -364,6 +530,9 @@ public sealed class MainForm : Form, IDestinationProvider
         private ListView _fileList = null!;
         private Label _summaryLabel = null!;
         private Panel _dropPanel = null!;
+        private ComboBox? _vendorCombo;
+        private Button _sendEmailButton = null!;
+        private bool _sending;
 
         public ConvertTab(MainForm owner, ConversionKind kind, string dropPrimary, string dropSecondary)
         {
@@ -373,7 +542,7 @@ public sealed class MainForm : Form, IDestinationProvider
             _dropPrimaryText = dropPrimary;
             _dropSecondaryText = dropSecondary;
 
-            var service = new ConversionService(owner._logger, Application.ProductVersion);
+            var service = new ConversionService(owner._logger, Application.ProductVersion, owner);
             _coordinator = new ConversionCoordinator(service, owner);
             _coordinator.FileChanged += OnFileChanged;
             _coordinator.BatchCompleted += summary => _owner.RunOnUi(() => _summaryLabel.Text = summary);
@@ -390,9 +559,14 @@ public sealed class MainForm : Form, IDestinationProvider
             var vendorRow = _kind == ConversionKind.Pdf ? BuildVendorRow() : null;
 
             // --- Middle: drop area + file list (fills remaining space, compresses when short) ---
-            var middle = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = ThemeBg };
-            middle.RowStyles.Add(new RowStyle(SizeType.Percent, 38f)); // drop area
-            middle.RowStyles.Add(new RowStyle(SizeType.Percent, 62f)); // list
+            // The drop area gets a fixed height rather than a share of what is left. As a percentage
+            // it was squeezed by the caption row above the list and clipped both of its lines; 132px
+            // is what the 14pt heading plus the "Accepted:" line actually need. The list takes
+            // everything else, which is the part worth growing anyway.
+            var middle = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = ThemeBg };
+            middle.RowStyles.Add(new RowStyle(SizeType.Absolute, 132)); // drop area
+            middle.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // list caption + View XML
+            middle.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // list
 
             _dropPanel = new Panel
             {
@@ -444,6 +618,7 @@ public sealed class MainForm : Form, IDestinationProvider
             _fileList.Columns.Add("File", 260);
             _fileList.Columns.Add("Status", 90);
             _fileList.Columns.Add("Details", 380);
+            _fileList.DoubleClick += (_, _) => ViewSelectedXml();
             _fileList.Resize += (_, _) =>
             {
                 int used = 0;
@@ -451,7 +626,32 @@ public sealed class MainForm : Form, IDestinationProvider
                 int remaining = _fileList.ClientSize.Width - used - 4;
                 if (remaining > 80) _fileList.Columns[^1].Width = remaining;
             };
-            middle.Controls.Add(_fileList, 0, 1);
+
+            // View XML sits on the list's own line rather than down with the action buttons: it acts
+            // on whichever row is highlighted, so it belongs beside the rows, not beside Send Email
+            // which acts on the whole batch.
+            var listHeaderRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = ThemeBg,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0, 0, 0, 4),
+            };
+            listHeaderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            listHeaderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            listHeaderRow.Controls.Add(new Label
+            {
+                Text = "Converted files - click one to view its XML", AutoSize = true, ForeColor = ThemeMuted,
+                Anchor = AnchorStyles.Left, Margin = new Padding(2, 8, 0, 0),
+            }, 0, 0);
+
+            var viewXmlButton = MakePrimaryButton("View XML");
+            viewXmlButton.Margin = new Padding(8, 0, 2, 2);
+            viewXmlButton.Anchor = AnchorStyles.Right;
+            viewXmlButton.Click += (_, _) => ViewSelectedXml();
+            listHeaderRow.Controls.Add(viewXmlButton, 1, 0);
+
+            middle.Controls.Add(listHeaderRow, 0, 1);
+            middle.Controls.Add(_fileList, 0, 2);
 
             // --- Bottom stack: status summary + action buttons (pinned to the bottom) ---
             var bottom = new TableLayoutPanel
@@ -469,6 +669,9 @@ public sealed class MainForm : Form, IDestinationProvider
             };
             bottom.Controls.Add(_summaryLabel, 0, 0);
 
+            // Bottom row: the two "go and look at something" links on the left, and the one action
+            // that actually does something — Send Email — on the right, where it reads as the end of
+            // the job and is hard to hit by accident on the way to a link.
             var footer = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = ThemeBg,
@@ -477,20 +680,29 @@ public sealed class MainForm : Form, IDestinationProvider
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-            var openFolderButton = MakePrimaryButton("Open Output Folder");
-            openFolderButton.Margin = new Padding(0, 4, 12, 4);
-            openFolderButton.Anchor = AnchorStyles.Left;
-            openFolderButton.Click += OnOpenOutputFolder;
-
-            var logsLink = new LinkLabel
+            var links = new FlowLayoutPanel
             {
-                Text = "View Logs", AutoSize = true, LinkColor = ThemeNavy, ActiveLinkColor = ThemeRedAccent,
-                Margin = new Padding(0, 10, 2, 0), Anchor = AnchorStyles.Right,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = ThemeBg,
+                Margin = new Padding(0), Anchor = AnchorStyles.Left,
             };
+
+            var savedFolderLink = MakeLink("Saved Folder");
+            savedFolderLink.LinkClicked += (_, _) => OnOpenOutputFolder(null, EventArgs.Empty);
+
+            var logsLink = MakeLink("View Logs");
             logsLink.LinkClicked += (_, _) => OpenFolderInExplorer(_owner._logger.Directory, "logs folder", ensureExists: true);
 
-            footer.Controls.Add(openFolderButton, 0, 0);
-            footer.Controls.Add(logsLink, 1, 0);
+            links.Controls.Add(savedFolderLink);
+            links.Controls.Add(logsLink);
+
+            _sendEmailButton = MakePrimaryButton("Send Email");
+            _sendEmailButton.Margin = new Padding(12, 2, 2, 2);
+            _sendEmailButton.Anchor = AnchorStyles.Right;
+            _sendEmailButton.Click += (_, _) => SendConvertedByEmail();
+
+            footer.Controls.Add(links, 0, 0);
+            footer.Controls.Add(_sendEmailButton, 1, 0);
             bottom.Controls.Add(footer, 0, 1);
 
             // Add the Fill panel first (it takes the leftover center), then the docked edges.
@@ -499,9 +711,12 @@ public sealed class MainForm : Form, IDestinationProvider
             if (vendorRow is not null) page.Controls.Add(vendorRow);
         }
 
-        /// <summary>Builds the PDF section's vendor row: a single-choice "Dr Pepper" dropdown (the only
-        /// searchable-PDF vendor today). It is informational — the PDF pipeline always uses Dr Pepper.</summary>
-        private static FlowLayoutPanel BuildVendorRow()
+        /// <summary>
+        /// Builds the PDF section's vendor row. Each PDF vendor has its own parser, so the choice
+        /// here selects which one runs — an invoice dropped under the wrong vendor is rejected by
+        /// that parser rather than mis-read.
+        /// </summary>
+        private FlowLayoutPanel BuildVendorRow()
         {
             var row = new FlowLayoutPanel
             {
@@ -514,16 +729,41 @@ public sealed class MainForm : Form, IDestinationProvider
                 Text = "Vendor:", AutoSize = true, ForeColor = ThemeText,
                 Font = new Font("Segoe UI", 10f, FontStyle.Bold), Margin = new Padding(2, 10, 8, 0),
             });
-            var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300, Margin = new Padding(0, 6, 0, 0) };
-            combo.Items.Add("Dr Pepper");
-            combo.SelectedIndex = 0;
-            row.Controls.Add(combo);
-            row.Controls.Add(new Label
+
+            var hint = new Label
             {
-                Text = "  (Dr Pepper searchable PDF invoices)", AutoSize = true, ForeColor = ThemeMuted, Margin = new Padding(4, 10, 0, 0),
-            });
+                AutoSize = true, ForeColor = ThemeMuted, Margin = new Padding(4, 10, 0, 0),
+            };
+
+            _vendorCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240, Margin = new Padding(0, 6, 0, 0) };
+            _vendorCombo.Items.Add("Dr Pepper");
+            _vendorCombo.Items.Add("Blue Bell");
+            _vendorCombo.Items.Add("Chubiwinos");
+            _vendorCombo.Items.Add("Bimbo");
+            _vendorCombo.Items.Add("Red Bull");
+            _vendorCombo.SelectedIndexChanged += (_, _) => hint.Text = SelectedVendor switch
+            {
+                PdfVendor.BlueBell => "  (Blue Bell delivery tickets - you will be asked for each invoice number)",
+                PdfVendor.Chubiwinos => "  (Chubiwinos S&G invoices - you will be asked for the invoice number)",
+                PdfVendor.Bimbo => "  (Bimbo delivery tickets - you will be asked for the invoice number)",
+                PdfVendor.RedBull => "  (Red Bull delivery tickets - all pages are one invoice)",
+                _ => "  (Dr Pepper searchable PDF invoices)",
+            };
+            _vendorCombo.SelectedIndex = 0;
+
+            row.Controls.Add(_vendorCombo);
+            row.Controls.Add(hint);
             return row;
         }
+
+        private PdfVendor SelectedVendor => _vendorCombo?.SelectedIndex switch
+        {
+            1 => PdfVendor.BlueBell,
+            2 => PdfVendor.Chubiwinos,
+            3 => PdfVendor.Bimbo,
+            4 => PdfVendor.RedBull,
+            _ => PdfVendor.DrPepper,
+        };
 
         private void WireDropTarget(Control control)
         {
@@ -569,7 +809,7 @@ public sealed class MainForm : Form, IDestinationProvider
             }
             if (allowed.Count == 0) return;
 
-            foreach (var file in _coordinator.Enqueue(allowed, _kind))
+            foreach (var file in _coordinator.Enqueue(allowed, _kind, SelectedVendor))
                 EnsureRow(file);
         }
 
@@ -581,6 +821,190 @@ public sealed class MainForm : Form, IDestinationProvider
             if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path)) return false;
             string ext = Path.GetExtension(path);
             return _extensions.Any(a => string.Equals(a, ext, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Emails every converted invoice on this tab, one message each, without asking which — the
+        /// operator has just converted a delivery and wants it filed, not a row-picking exercise.
+        ///
+        /// An invoice already sent is skipped, so pressing the button a second time after adding one
+        /// more file sends only the new one. That guard is the reason this can be a single click: a
+        /// duplicate invoice email books the stock twice in SSCS, and nothing downstream catches it.
+        ///
+        /// The send runs on a background thread because a dead network costs 45 seconds per message,
+        /// and a frozen window during that is indistinguishable from a crash.
+        /// </summary>
+        private async void SendConvertedByEmail()
+        {
+            if (_sending) return;
+
+            if (!_owner._emailSender.IsConfigured)
+            {
+                MessageBox.Show(_owner,
+                    "Email is not set up yet. Open the Settings tab, press Email Settings, and fill in the store's address and the sending mailbox.",
+                    _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var pending = PendingForEmail();
+            if (pending.Count == 0)
+            {
+                MessageBox.Show(_owner, DescribeNothingToSend(),
+                    _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string to = _owner._emailSender.ToAddress ?? "the store";
+            _sending = true;
+            _sendEmailButton.Enabled = false;
+            _sendEmailButton.Text = "Sending...";
+            _summaryLabel.Text = $"Sending {pending.Count} invoice{(pending.Count == 1 ? "" : "s")} to {to}...";
+
+            try
+            {
+                var report = await Task.Run(() => SendAll(pending)).ConfigureAwait(true);
+                _summaryLabel.Text = report.Summary;
+
+                foreach (var (file, _) in pending)
+                    RefreshRow(file);
+
+                if (report.Failures.Count > 0)
+                {
+                    MessageBox.Show(_owner,
+                        $"{report.Failures.Count} invoice{(report.Failures.Count == 1 ? "" : "s")} could not be sent:\n\n"
+                        + string.Join("\n\n", report.Failures)
+                        + "\n\nThe converted files are still in the output folder, so nothing was lost. "
+                        + "Fix the problem and press Send Email again - the ones that did send will not go twice.",
+                        _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            finally
+            {
+                _sending = false;
+                _sendEmailButton.Enabled = true;
+                _sendEmailButton.Text = "Send Email";
+            }
+        }
+
+        /// <summary>Every converted invoice on this tab that has not already been emailed.</summary>
+        private List<(QueuedFile File, ConvertedDocument Document)> PendingForEmail()
+        {
+            var pending = new List<(QueuedFile, ConvertedDocument)>();
+            foreach (ListViewItem row in _fileList.Items)
+            {
+                if (row.Tag is not QueuedFile file) continue;
+                if (file.Status is not (FileStatus.Converted or FileStatus.Warning)) continue;
+                foreach (var doc in file.Documents)
+                    if (!file.EmailedFileNames.Contains(doc.FileName))
+                        pending.Add((file, doc));
+            }
+            return pending;
+        }
+
+        /// <summary>
+        /// Says why the button did nothing, distinguishing "nothing converted yet" from "all of it
+        /// has already gone" — those need opposite responses from the operator.
+        /// </summary>
+        private string DescribeNothingToSend()
+        {
+            bool anyConverted = _fileList.Items.Cast<ListViewItem>()
+                .Any(r => r.Tag is QueuedFile f && f.Documents.Count > 0);
+
+            return anyConverted
+                ? "Every converted invoice on this tab has already been emailed. Convert another file to send more."
+                : "There is nothing to send yet. Convert an invoice first.";
+        }
+
+        private sealed record SendReport(string Summary, List<string> Failures);
+
+        /// <summary>
+        /// Sends each invoice in turn on the worker thread. One failure never stops the rest: the
+        /// remaining invoices are independent deliveries and a network blip on one is not a reason
+        /// to hold the others back.
+        /// </summary>
+        private SendReport SendAll(List<(QueuedFile File, ConvertedDocument Document)> pending)
+        {
+            int sent = 0;
+            var failures = new List<string>();
+
+            foreach (var (file, doc) in pending)
+            {
+                var result = _owner._emailSender.Send(doc, file.FileName);
+                if (result.Sent)
+                {
+                    file.MarkEmailed(doc.FileName);
+                    sent++;
+                }
+                else
+                {
+                    failures.Add($"{doc.FileName}: {result.ErrorMessage}");
+                }
+            }
+
+            string to = _owner._emailSender.ToAddress ?? "the store";
+            string summary = failures.Count == 0
+                ? $"Sent {sent} invoice{(sent == 1 ? "" : "s")} to {to}."
+                : $"Sent {sent} of {pending.Count} to {to}. {failures.Count} could not be sent - see the message for why.";
+            return new SendReport(summary, failures);
+        }
+
+        /// <summary>Repaints one row after a send, so the Details column shows what happened.</summary>
+        private void RefreshRow(QueuedFile file)
+        {
+            if (!_rowMap.TryGetValue(file, out var item)) return;
+            int emailed = file.EmailedFileNames.Count;
+            if (emailed == 0) return;
+
+            string note = emailed == file.Documents.Count
+                ? $"Emailed to {_owner._emailSender.ToAddress}"
+                : $"Emailed {emailed} of {file.Documents.Count} to {_owner._emailSender.ToAddress}";
+            item.SubItems[2].Text = note;
+            item.ToolTipText = note + "\n" + file.Detail;
+        }
+
+
+        /// <summary>
+        /// The queue item behind the selected row, once it has actually converted. Returns null and
+        /// explains why not, naming <paramref name="action"/> so the message fits the button pressed.
+        /// </summary>
+        private QueuedFile? SelectedConvertedFile(string action)
+        {
+            if (_fileList.SelectedItems.Count == 0)
+            {
+                MessageBox.Show(_owner, $"Click a converted file in the list first, then try {action} again.",
+                    _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return null;
+            }
+
+            if (_fileList.SelectedItems[0].Tag is not QueuedFile file) return null;
+
+            if (file.Documents.Count == 0)
+            {
+                string reason = file.Status switch
+                {
+                    FileStatus.Waiting or FileStatus.Converting => "That file has not finished converting yet.",
+                    FileStatus.Failed => "That file did not convert, so there is nothing to send.",
+                    FileStatus.Canceled => "That file was canceled, so there is nothing to send.",
+                    _ => "There is nothing to send for that file.",
+                };
+                MessageBox.Show(_owner, reason, _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return null;
+            }
+
+            return file;
+        }
+
+        /// <summary>
+        /// Opens the converted XML for the selected row. The documents live on the queue item rather
+        /// than being re-read from disk, so the viewer works even if the saved file has since moved.
+        /// </summary>
+        private void ViewSelectedXml()
+        {
+            var file = SelectedConvertedFile("View XML");
+            if (file is null) return;
+
+            using var viewer = new XmlViewerDialog(file.Documents, file.FileName, file.OutputPath);
+            viewer.ShowDialog(_owner);
         }
 
         private void OnOpenOutputFolder(object? sender, EventArgs e)
@@ -627,7 +1051,7 @@ public sealed class MainForm : Form, IDestinationProvider
         private ListViewItem EnsureRow(QueuedFile file)
         {
             if (_rowMap.TryGetValue(file, out var existing)) return existing;
-            var item = new ListViewItem(file.FileName);
+            var item = new ListViewItem(file.FileName) { Tag = file };
             item.SubItems.Add(StatusText(file.Status));
             item.SubItems.Add(FirstLine(file.Detail));
             item.ToolTipText = file.Detail;

@@ -104,6 +104,32 @@ Two consequences:
 whose code field already had its check digit removed, we compute the check digit back on
 (`Upc.AppendCheckDigit`) so SSCS's drop returns the original code.
 
+#### SSCS drops the last character and nothing else
+
+**Verified in live SSCS, 2026-07-26.** Blue Bell prints its UPC column as the 11-digit UPC-A body
+padded to 12 with a leading zero (`007189905101` = `0` + `07189905101`), and only 3 of its 21 codes
+pass a UPC-A check-digit test — they are not barcodes. A two-line test invoice carrying the same
+pint under both encodings was imported into BEST STOP #14:
+
+```
+sent 007189905101 (as printed)          → ID/PLU 00718990510 — flagged "New Item",
+                                          department "Unknown items"
+sent 071899051015 (check digit restored) → ID/PLU 07189905101 — matched the store's existing
+                                          item, department "ICE CREAM"
+```
+
+So the leading zero is **not** stripped, and a padded body must have its check digit restored or it
+lands one digit short and creates a duplicate item. Two lessons for any future vendor:
+
+- Run a vendor's codes through `Upc.IsValidUpcA12` before assuming the "UPC" column holds barcodes.
+  If far fewer than all of them pass, it is a body or an internal code, not a GTIN. Measured:
+  VM Novelties 6/6 pass (real barcodes), Blue Bell 3/21 (chance) — and 21/21 after the repair.
+  **The full decision table — every code shape seen and what to send for it — is in
+  [ADDING_A_PDF_VENDOR.md](./ADDING_A_PDF_VENDOR.md) §3. Use it instead of a live test.**
+- The cheapest way to settle it is one tiny test invoice carrying both candidate encodings of the
+  same product — the Line Items tab shows both resulting IDs side by side, and "New Item" tells you
+  which one is wrong. Pinned in `BlueBellPipelineTests.MatchesWhatLiveSscsDidWithBothBarcodeForms`.
+
 ### Money — 4-decimal unit costs are safe
 
 **Verified 16/16 against live SSCS, 2026-07-25.** SSCS rounds `units × unit cost` to the cent
@@ -120,6 +146,46 @@ A Dr Pepper invoice where 14 of 16 lines do not divide evenly still totalled exa
 A case cost that does not divide evenly into its pack can still leave a cent on the line
 (2 of 772 real rows). The converter records a `TOTAL_MISMATCH` warning naming the difference and
 writes the file anyway — a cent is for the operator to correct in SSCS.
+
+### Quantity — individual sellable units, never cases
+
+**Verified in live SSCS, 2026-07-26.** `InvoiceUnitQty` is the number of things the store actually
+sells — one pint, one ice cream sandwich — and `InvoiceUnitCost` is the cost of one of those. **A
+box, carton or case is never a unit.**
+
+The trap is that a vendor's own quantity column need not be in units, and one vendor can use both
+meanings in the same column. Blue Bell invoice 033100305634 read back off the Line Items tab:
+
+```
+invoice line                              SSCS holds
+1/2 GAL GR SUP    QTY  4 @ 6.64   26.56   07189903720   4.00   6.64    26.56   (already units)
+PT GR SUPREME     QTY 90 @ 2.91  261.90   07189905101  90.00   2.91   261.90   (already units)
+DZ VANILLA SAND   QTY  2 @ 6.48   12.96   07189921122  24.00   0.54    12.96   (a carton of 12)
+```
+
+Nothing catches this automatically: `EXTENDED` comes off the invoice either way, so the money
+reconciles whichever reading you take, and only the quantity and per-unit cost are wrong. The
+visible tell is the each-list — a 40% margin on the carton price puts $11.49 on a single ice cream
+sandwich instead of $0.99.
+
+So for every vendor, establish what one unit is **per product**, and hold the pack size somewhere
+reliable. Blue Bell's lives in its parser's catalogue rather than being read from the printed
+description, because "DZ" is exactly what a scanner mangles (it read `07 VANILLA SAND` on one
+ticket). See `vendors/BLUE_BELL.md` §1.
+
+A partial case comes back as a fraction — Blue Bell writes `-11/12` for eleven bars out of a
+twelve-bar carton — and needs no special handling once the per-unit cost is right:
+`-5.94 ÷ 0.54 = -11`.
+
+### What SSCS keeps and what it overrides
+
+For an item already in its master, SSCS honours **only the GTIN, quantity and unit cost** from the
+file. It substitutes **its own description, retail and department**. Verified twice: it displayed
+`JANJOO 8PIN 5FT CABLE` where the file said `JANJOO 8-PIN CABLE 5FT`, and `BLUE BELL PT GR SUPREM`
+in department `ICE CREAM` where the file supplied different text and no department at all.
+
+It derives Ea Cost, Ex Cost and Margin % itself. So description and retail are best-effort seeds
+that matter only for a brand-new item — which is also why they must still be sane rather than empty.
 
 ### Each-list — always sent, never zero if avoidable
 

@@ -12,6 +12,20 @@ public static class PdfReasonCodes
     public const string TotalMismatch = "PDF_TOTAL_MISMATCH";
     public const string LineMathMismatch = "PDF_LINE_MATH_MISMATCH";
     public const string UpcCheckDigit = "PDF_UPC_CHECK_DIGIT";
+    /// <summary>
+    /// Ink or scan damage is sitting on a figure that decides an item, a quantity or a price, so the
+    /// row cannot be read. Distinct from <see cref="TotalMismatch"/>, which reports the symptom (the
+    /// money no longer adds up) rather than the line to go and look at.
+    /// </summary>
+    public const string UnreadableLine = "PDF_UNREADABLE_LINE";
+    /// <summary>The parsed quantities do not match the unit count the invoice prints for itself.</summary>
+    public const string QtyMismatch = "PDF_QTY_MISMATCH";
+    /// <summary>A barcode neither read nor known, so the operator had to be asked and was not.</summary>
+    public const string BarcodeRequired = "PDF_BARCODE_REQUIRED";
+    /// <summary>A line the vendor billed without a barcode — a credit, or a mixed display shipper.</summary>
+    public const string NoBarcode = "PDF_NO_BARCODE";
+    /// <summary>The invoice carries returned goods, sent as negative quantities.</summary>
+    public const string CreditLines = "PDF_CREDIT_LINES";
     public const string VendorRequired = "PDF_VENDOR_REQUIRED";
     public const string VendorNoParser = "PDF_VENDOR_NO_PARSER";
     public const string VendorMismatch = "VENDOR_MISMATCH";
@@ -47,10 +61,25 @@ public sealed class InvoiceLine
 
     public required string Description { get; init; }
 
-    /// <summary>Quantity in individual units (never cases). Negative on a credit/return line.</summary>
+    /// <summary>
+    /// Quantity in **individual sellable units** — one pint, one ice cream sandwich. Negative on a
+    /// credit/return line. A box, carton or case is NEVER a unit.
+    ///
+    /// Verified in live SSCS 2026-07-26: a Blue Bell line printed as `QTY 2 @ $6.48` for a
+    /// twelve-bar carton is held as **24 @ $0.54**. Note that a vendor can use both meanings in one
+    /// column — Blue Bell counts pints individually and `DZ` cartons by the carton on the same
+    /// ticket — so what a unit is has to be settled per product, not per vendor.
+    ///
+    /// Nothing downstream can catch a mistake here: the line's extended amount comes from the
+    /// invoice either way, so the money reconciles under either reading and only the quantity and
+    /// <see cref="UnitCost"/> come out wrong. The tell is an absurd <see cref="RetailPrice"/>.
+    /// </summary>
     public required int Units { get; init; }
 
-    /// <summary>Cost of one unit, to 4 decimal places (SSCS's precision for this field).</summary>
+    /// <summary>
+    /// Cost of one <see cref="Units"/> unit, to 4 decimal places (SSCS's precision for this field).
+    /// Divide a case/carton price down: a $6.48 dozen is $0.54 here, not $6.48.
+    /// </summary>
     public required decimal UnitCost { get; init; }
 
     /// <summary>

@@ -1,0 +1,173 @@
+using System.Globalization;
+using EdiToSscs.Core;
+
+namespace EdiToSscs.App;
+
+/// <summary>
+/// Asks the operator to type the fields a scanned Blue Bell ticket cannot supply, showing the total
+/// and line count that were read from it so they can find the matching paper before typing.
+///
+/// The invoice number is always asked for, and the box always starts empty. The scanners mis-read
+/// it without any sign of trouble — a Blue Bell ticket's text layer says 033105035263 where the
+/// paper reads 033103035263, and Chubiwinos numbers came back as "0V9293" and "6)9141" — and the
+/// number carries no check digit, so nothing in the file can catch the error. Everything else on the
+/// ticket reconciles against the printed TOTAL; this one field does not, so it is typed off the
+/// paper. Offering the scan's reading as a starting point would defeat the point of asking.
+///
+/// The date box appears only when the scan destroyed the date ("DATE 12-14-Z023"). That ticket is
+/// otherwise sound — its money still has to reconcile — so it is worth converting, and one mangled
+/// character should not cost the operator the whole delivery.
+/// </summary>
+internal sealed class InvoiceNumberDialog : Form
+{
+    private const string DateFormat = "MM-dd-yyyy";
+
+    private readonly TextBox _input;
+    private readonly TextBox? _dateInput;
+    private readonly DateOnly? _knownDate;
+
+    public string InvoiceNumber => _input.Text.Trim();
+
+    /// <summary>The date to use: the ticket's own when it had one, otherwise what was typed.</summary>
+    public DateOnly Date => _knownDate ?? (ParseDate(_dateInput?.Text) ?? default);
+
+    public InvoiceNumberDialog(InvoiceDetailsRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        _knownDate = request.Date;
+
+        // Says whose paper to pick up, in the words the operator would use. The window title is the
+        // first thing read and often the only thing read, so it carries the instruction rather than
+        // a category name.
+        Text = request.Vendor.Length > 0 ? $"Type invoice for {request.Vendor}" : "Invoice details";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        ShowInTaskbar = false;
+        Font = new Font("Segoe UI", 10f);
+        // Sized from its contents, because the date box is only present on some tickets.
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        MinimumSize = new Size(500, 0);
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(16),
+        };
+        Controls.Add(layout);
+
+        // The Kind is only worth naming when it says something the title does not: a Blue Bell ticket
+        // carries a Sales invoice and a Returns invoice, and the operator has to know which one this
+        // box is asking about. For a one-invoice vendor it would just repeat the title.
+        string kind = string.Equals(request.Kind, request.Vendor, StringComparison.OrdinalIgnoreCase)
+            ? "" : $" ({request.Kind})";
+        string heading = request.SectionCount > 1
+            ? $"{request.FileName} - invoice {request.SectionIndex} of {request.SectionCount}{kind}"
+            : $"{request.FileName}{kind}";
+
+        layout.Controls.Add(Heading(heading));
+
+        string read = request.NeedsDate
+            ? $"Total {request.Total:0.00}      {Items(request.LineCount)}"
+            : $"Date {request.Date:MM-dd-yyyy}      Total {request.Total:0.00}      {Items(request.LineCount)}";
+        layout.Controls.Add(new Label
+        {
+            Text = read, AutoSize = true, MaximumSize = new Size(430, 0), Margin = new Padding(0, 0, 0, 10),
+        });
+
+        layout.Controls.Add(FieldLabel("Invoice #"));
+        // Deliberately empty. The scan's own reading is never put in this box: it is wrong often
+        // enough to matter (033105035263 for 033103035263; "0V9293" for 6V9293) and nothing in the
+        // file can catch it, so a pre-filled box would turn the one field that needs a person's eyes
+        // into a keypress. The operator reads it off the paper.
+        _input = new TextBox
+        {
+            Width = 260, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
+        };
+        layout.Controls.Add(_input);
+        layout.Controls.Add(Hint("Copy it from the top of the ticket."));
+
+        if (request.NeedsDate)
+        {
+            layout.Controls.Add(FieldLabel("Date  (mm-dd-yyyy)"));
+            _dateInput = new TextBox
+            {
+                Width = 160, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
+                Text = request.SuggestedDate?.ToString(DateFormat, CultureInfo.InvariantCulture) ?? "",
+            };
+            layout.Controls.Add(_dateInput);
+            layout.Controls.Add(Hint(request.SuggestedDate is null
+                ? "The scan could not be read. Copy it from the ticket."
+                : "From the scan - check it matches the paper."));
+        }
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft,
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+
+        var cancel = new Button { Text = "Skip this file", DialogResult = DialogResult.Cancel, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+        var ok = new Button { Text = "Convert", DialogResult = DialogResult.OK, AutoSize = true };
+        ok.Click += (_, _) =>
+        {
+            string? problem = WhatIsMissing();
+            if (problem is null) return;
+            MessageBox.Show(this, problem, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DialogResult = DialogResult.None;
+        };
+
+        buttons.Controls.Add(cancel);
+        buttons.Controls.Add(ok);
+        layout.Controls.Add(buttons);
+
+        AcceptButton = ok;
+        CancelButton = cancel;
+        Shown += (_, _) => { _input.Focus(); _input.SelectAll(); };
+    }
+
+    private static string Items(int count) => $"{count} line item{(count == 1 ? "" : "s")}";
+
+    private static Label Heading(string text) => new()
+    {
+        Text = text, AutoSize = true, MaximumSize = new Size(430, 0),
+        Font = new Font("Segoe UI", 10f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8),
+    };
+
+    /// <summary>The name of a box, directly above it. Short — the operator is holding the paper.</summary>
+    private static Label FieldLabel(string text) => new()
+    {
+        Text = text, AutoSize = true, Margin = new Padding(0, 6, 0, 3),
+        Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+    };
+
+    /// <summary>A footnote under a box. One short line, or it stops being read at all.</summary>
+    private static Label Hint(string text) => new()
+    {
+        Text = text, AutoSize = true, MaximumSize = new Size(430, 0),
+        Font = new Font("Segoe UI", 8.5f), ForeColor = Color.FromArgb(110, 118, 138),
+        Margin = new Padding(0, 0, 0, 6),
+    };
+
+    /// <summary>The message to show, or null when the dialog may close.</summary>
+    private string? WhatIsMissing()
+    {
+        if (InvoiceNumber.Length == 0) return "Type the invoice number, or Skip this file.";
+        if (_dateInput is not null && ParseDate(_dateInput.Text) is null)
+            return "Type the date like 12-14-2023.";
+        return null;
+    }
+
+    /// <summary>
+    /// Parses the typed date strictly as mm-dd-yyyy, the way Blue Bell prints it. A loose parse
+    /// would read "12-14-2023" one way here and another way on a machine set to a day-first locale,
+    /// which would silently book the invoice into the wrong period.
+    /// </summary>
+    private static DateOnly? ParseDate(string? text) =>
+        DateOnly.TryParseExact((text ?? "").Trim(), DateFormat,
+            CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
+            ? d
+            : null;
+}

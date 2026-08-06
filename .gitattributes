@@ -6,3 +6,6 @@ SSCS_EDI_FORMAT/EDI/** -text
 SSCS_EDI_FORMAT/EDI13/** -text
 "SSCS_EDI_FORMAT/SSCS (REAL)/**" -text
 SSCS_EDI_FORMAT/converter/tests/EdiToSscs.Tests/Fixtures/** -text
+
+# Vendor PDF invoice fixtures are binary: never normalize, never try to diff them.
+*.pdf binary

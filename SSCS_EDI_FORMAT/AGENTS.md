@@ -32,8 +32,17 @@ SSCS/                          # GitHub repo root
         ├── FORMAT_SPEC.md          # NAXML output + fixed-width input layouts
         ├── ADDING_A_PDF_VENDOR.md  # standalone guide: new PDF vendor, start here
         ├── PDF_TO_SSCS.md          # PDF invoice → NAXML architecture summary
-        └── vendors/                # one profile per PDF vendor (e.g. DR_PEPPER.md)
+        └── vendors/                # one profile per PDF vendor (DR_PEPPER.md, BLUE_BELL.md,
+                                    #   CHUBIWINOS.md, BIMBO.md, RED_BULL.md)
 ```
+
+**One input is normally one invoice, but the writer supports several.** Every PDF vendor here now
+produces a single payable per file — including Blue Bell, whose ticket prints a *separate invoice
+number* on its Returns block and was assumed for that reason to be two payables. It is not: live
+SSCS holds the 03/19/2026 ticket as one $325.50 paidout of seven lines. A printed invoice number
+identifies a document; it does not decide what the store books. Only the store's own books do.
+`ConversionService` still writes N files for N invoices, and all documents are written and verified
+as temp files before any of them claims a final name, so a ticket never lands half-converted.
 
 ## Non-negotiable rules
 
@@ -41,7 +50,13 @@ SSCS/                          # GitHub repo root
    `analysis/FORMAT_SPEC.md`, then implement. Where a claim is verified against live SSCS, say so
    and date it.
 2. **Every parse needs a checksum.** Reconcile the lines against the invoice's own printed total.
-   A parser with no way to detect its own misreading is not finished.
+   A parser with no way to detect its own misreading is not finished. Take any *second* checksum the
+   paper offers, too — a printed unit count catches the one error the money cannot, because a misread
+   quantity is absorbed by the unit cost and still balances to the penny (Chubiwinos, `Totals: 206`).
+   **Check that the checksum is independent of what it is checking.** On Red Bull it is not: the
+   scanner mis-renders a glyph identically everywhere it appears, so its printed total is wrong
+   exactly when the rows are, and two money columns holding the same number are one reading and not
+   two. There the arithmetic has to cross *different* glyphs — see `analysis/vendors/RED_BULL.md` §4.
 3. **Never modify or delete input files.**
 4. **Never silently overwrite output.** Use `SSCS_Name.xml`, then `SSCS_Name (1).xml`, …
 5. **Never claim success without running the tests.**
@@ -50,6 +65,12 @@ SSCS/                          # GitHub repo root
 8. **Warn only when a human must act.** A warning that fires on every conversion trains people to
    ignore warnings. Charge records are counted, not warned about, for exactly this reason.
 9. Keep the GUI simple for nontechnical store staff.
+10. **Refuse a file only when the money is in doubt.** A header field the scan destroyed — a date,
+    an invoice number — is asked for, not fatal; the ticket still has to reconcile against its own
+    printed total either way, so nothing is lost by accepting it and a whole delivery is saved.
+    Never accept a keyed value for the **total** itself: that is what proves the parse. And never
+    silently repair a header field instead of asking — offer the repaired reading as a suggestion
+    for the operator to check against the paper.
 
 ## Architecture
 
@@ -66,7 +87,37 @@ Settings: `%LOCALAPPDATA%\EDI-to-SSCS-Converter\settings.json` (atomic write).
 Logs: `%LOCALAPPDATA%\EDI-to-SSCS-Converter\Logs` (30-day retention; delete only files **strictly
 older** than 30 days; never follow reparse points).
 
-## The three verified facts (live SSCS, 2026-07-25)
+### Delivery: SMTP behind an admin PIN, on an explicit button
+
+Because fact 3 below is true — a store is chosen by the address a file arrives at — emailing the
+file is what actually files an invoice.
+
+**Conversion always writes to the output folder. Sending is a separate, explicit act.**
+
+- `EmailSender.cs` — `IEmailDelivery` + `SmtpEmailSender`. **One invoice per message**, attachment
+  built from a `MemoryStream` over the converted bytes. A Blue Bell ticket carrying Sales *and*
+  Returns therefore sends two emails, and one failing never takes the good one down with it.
+- **Send Email** on a convert tab sends every converted invoice on that tab, with **no row
+  selection** and no confirmation — one click. It runs on a background thread (a dead network costs
+  45s per message).
+- `QueuedFile.MarkEmailed` / `WasEmailed` is what makes one-click safe: an invoice already sent is
+  skipped, so pressing the button twice cannot double-send. **A duplicate invoice email books the
+  delivery twice in SSCS, the money balances both times, and nothing downstream flags it** — this
+  guard is the only place it can be caught.
+- `SecretProtector.cs` (DPAPI, current Windows user) holds the app password; `AdminPin.cs` (PBKDF2)
+  gates the settings screen. Both fail closed: an unreadable secret means "not configured", and a
+  malformed PIN hash refuses every PIN. Neither is ever displayed back. Converting and sending never
+  ask for the PIN — only changing *where files go* does.
+- **Setup requires a Gmail App Password, which requires 2-Step Verification on the sending
+  mailbox.** A Gmail-compose-link alternative that needed no credentials was built on 2026-07-27 and
+  removed the same day: it cannot attach a file (browsers forbid a page from reaching a local file;
+  Gmail's compose params are only `to`/`su`/`body`/`cc`/`bcc`), and the manual attach step was not
+  wanted. Don't re-propose it.
+- `ConversionOutcome.Documents` / `QueuedFile.Documents` keep the XML in memory for the session, so
+  the attachment is provably the converted bytes and `XmlViewerDialog` works even if the saved file
+  moved. `QueuedFile.OutputPaths` carries every file written.
+
+## The verified facts (live SSCS)
 
 Read these before touching conversion logic. Full evidence in `FORMAT_SPEC.md`.
 
@@ -74,10 +125,26 @@ Read these before touching conversion logic. Full evidence in `FORMAT_SPEC.md`.
    `600609100271` → `60060910027`; `6917673180912` → `691767318091`. Always send the whole
    barcode. Because a 12-digit UPC-A therefore reaches the same id the retired output wrote, a
    vendor can move from the old path to XML without creating duplicate items.
+   **It drops nothing else — leading zeros are kept** (verified 2026-07-26). Blue Bell prints the
+   11-digit UPC-A body padded to 12; sent as printed it made a *New Item*, sent as the real UPC-A
+   it matched the store's own item. If a source gives you a body, put the check digit back.
 2. **SSCS rounds `units × unit cost` to the cent per line, then sums.** 4-decimal unit costs are
    safe; errors do not accumulate. Verified 16/16 on a Dr Pepper invoice totalling $532.43.
 3. **Store routing is the email address the file is sent to.** Every store has its own EDI email
    address; nothing inside the file selects a store.
+4. **SSCS counts in individual sellable units. A box or case is never a unit** (verified
+   2026-07-26). Its Qty column is the number of things the store sells: one pint, one ice cream
+   sandwich. A vendor line reading `QTY 2 @ $6.48` for a twelve-bar carton is held as
+   **24 @ $0.54**. A vendor can mix both in one column — Blue Bell counts pints individually and
+   `DZ` cartons by the carton on the same ticket — so establish what a unit is **per product**.
+   The money reconciles either way, so no checksum catches this; the tell is an absurd retail
+   (a 40% margin on the carton priced one sandwich at $11.49 instead of $0.99).
+5. **For an item it already knows, SSCS keeps its own description, retail and department** and
+   honours only the file's GTIN, quantity and cost. Verified twice: it showed
+   `JANJOO 8PIN 5FT CABLE` over the file's wording, and `BLUE BELL PT GR SUPREM` in department
+   ICE CREAM while the file said otherwise. So GTIN, units and unit cost must be exact;
+   description and retail only ever seed a **brand-new** item — but retail must still never be
+   `0.00`, or an unpriced new item rings up free.
 
 ## Input format summary (see FORMAT_SPEC.md for details)
 

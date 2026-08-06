@@ -3,7 +3,11 @@
 **Vendor:** Dr Pepper Bottling Company of Texas.  **Supplier name written:** `DR PEPPER`.
 **Input:** searchable PDF, one invoice per file.
 
-**Status: IMPLEMENTED & VERIFIED.** Confirmed in live SSCS twice:
+**Status: IMPLEMENTED & VERIFIED** for straight sales. **Credits are NOT yet round-tripped through
+live SSCS** — see the CREDITS section below; what SSCS does with a negative `InvoiceUnitQty` remains
+an open question.
+
+Confirmed in live SSCS twice:
 
 - **2026-07-23** via the retired fixed-width output.
 - **2026-07-25** via NAXML — example 7 (invoice 4643517800, $532.43) imported as XML at BEST STOP
@@ -21,6 +25,30 @@ spaces inside its digits (`07 181700 1320/10090 16 1` → stripped); the money s
 are read loosely. The invoice-total reconciliation remains the hard gate — a scan that loses a line
 is refused, not shipped.
 
+## Handwriting on the paper (added 2026-07-27)
+
+Invoices come back from the store marked up in pen, and OCR transcribes a stroke as a stray token
+wherever it crossed the page — **including on two consecutive lines**, when the stroke was long
+enough to cross both. Invoice **4646600671** (07/27/26, $1317.21) had a stroke down the AMOUNT
+column; PdfPig read `38.00 1 12 25.07 0.00 / 25.07` and `PEG 8 96 / 200.56`. That seventh column
+broke the row, the $25.07 line vanished, and the invoice was refused for a total that was short by
+exactly that line.
+
+The rule now, in `ReadAmounts` and the unclaimed-row scan:
+
+- The priced row is read **column by column**, not with one fixed pattern. A token carrying **no
+  digit at all** is ink, not data, and is discarded before the columns are counted.
+- A mark that lands in white space or on the unused **NET/TAX** columns is dropped **silently** —
+  it hides nothing, so it is not the operator's problem and raises no warning.
+- A mark touching **WHSLE, CASES, UNITS or AMOUNT** leaves a column that is not clean money or a
+  clean integer. That is `PDF_UNREADABLE_LINE`: refused, with the item and the raw line quoted.
+- A mark through the **barcode** is the dangerous one — the money still reconciles, so the total
+  gate is blind to it. The tell is a **priced row no product line claimed**; the parser scans for
+  those after the loop and refuses with the damaged line quoted.
+
+Re-scanning does not help here, because the ink is on the paper. The message says to compare the
+line with the invoice and key it by hand if the figure is genuinely covered.
+
 ## Page handling (do this first)
 
 Parse **only the invoice page(s)**. **Ignore** any page titled **"SKIS DEBIT SCAN SHEET"** — a
@@ -37,6 +65,45 @@ as one page.
 
 **None.** Across all 7 samples Dr Pepper invoices carry no fees or deposits with dollar amounts.
 The non-priced `PALLET`/`SHELL` equipment lines are not charges and are skipped.
+
+## CREDITS section (added 2026-07-29, invoice 4646105204)
+
+A delivery that takes goods back prints a second section under a **`CREDITS`** banner, with its own
+header and **a different set of columns**:
+
+```
+CREDITS
+DESCRIPTION UPC/SKU
+CASES UNITS NET TAX AMOUNT        <- no WHSLE column
+12z12p Zsgr DP 078000035261/10136728
+0 1 6.37 0.00 (6.37)              <- amount in brackets, i.e. negative
+```
+
+Rules:
+
+- Credits are **line items**, not a footer. Without them the invoice cannot reconcile — 4646105204's
+  sales come to $1487.84 against a printed **Amount Due $1468.73**, the difference being 3 credits.
+- The sign goes on the **count**, not the money: `Units = -1` at a positive `UnitCost` of 6.37.
+- A credit has **no WHSLE column**, so its retail seed comes from `RetailSeed.FromCost` (40%) rather
+  than the WHSLE rule. Returns are of items the store already stocks, so SSCS overrides it anyway —
+  it exists only so the field is never `0.00`.
+- The `SALES SUMMARY` under the credits also prints a bracketed figure (`Cases 0 (19.11)`). It has
+  two columns, not five, so it is not mistaken for a credit row.
+- This ticket prints **two invoice numbers** under `INVOICE` (`4646105204` *and* `4646105205`) —
+  evidently one document for the sale and one for the credit, though a single Amount Due totals
+  them. Everything goes out under the **first**, and a `PDF_CREDIT_LINES` warning says so.
+  **Open question: whether SSCS wants the credit filed under its own number instead.**
+
+## Scan damage to the code token (added 2026-07-29)
+
+Three things the 2026-07 scans do to the `<UPC>/<SKU>` token that the older samples never did:
+
+| Seen | Handling |
+|------|----------|
+| `0.5L12 VC PureCocoDb898999010007/20000642` | The space before the barcode is **lost**. The split is allowed with no space *only when a letter sits immediately before the code* — a bare digit would let the split land part-way through the barcode and yield a shorter, wrong UPC that still passes every length check. |
+| `071817033291/100,00862` | Punctuation dropped into the **SKU**. The SKU is never written to the XML, so this is ignored outright. |
+| `071817` + `` ` `` + `000453/10000069` | A mark inside the **barcode**. Stripped — but then the **check digit must pass**, because a mark that lands on a barcode may have taken a digit out with it. `071817000453` checks out, so it ships. If it did not, the invoice stops (`PDF_UNREADABLE_LINE`). This is stricter than the plain-digit case, which only warns. |
+| `600m112 PnFiel Limda0i8000200.287/...` | A **letter** inside the barcode (the 7 read as an `i`). Letters are not noise and are never stripped: refused. |
 
 ## Header
 

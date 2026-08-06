@@ -40,6 +40,26 @@ public static class Upc
         UpcE.ComputeUpcACheckDigit(upc12[..11]) == upc12[11];
 
     /// <summary>
+    /// Validates a whole barcode of either length SSCS sees — a 12-digit UPC-A or a 13-digit EAN-13
+    /// — by its trailing check digit. The two differ only in which end the x3 weighting starts from,
+    /// which weighting from the right handles for both.
+    ///
+    /// This is the only free error detector a scanned invoice offers: the check digit is arithmetic
+    /// on the other digits, so a single mis-read digit almost always breaks it. Anything that is not
+    /// a barcode at all — a store PLU, a vendor SKU — returns false, so callers must decide what a
+    /// non-barcode code means for them rather than reading false as "damaged".
+    /// </summary>
+    public static bool IsValidGtin(string? gtin)
+    {
+        if (gtin is null || gtin.Length is not (12 or 13) || !AllAsciiDigits(gtin)) return false;
+
+        int sum = 0;
+        for (int i = gtin.Length - 2; i >= 0; i--)
+            sum += (gtin[i] - '0') * ((gtin.Length - 2 - i) % 2 == 0 ? 3 : 1);
+        return (10 - sum % 10) % 10 == gtin[^1] - '0';
+    }
+
+    /// <summary>
     /// Turns an 11-digit check-digit-less body into the full 12-digit UPC-A by computing and
     /// appending its check digit.
     ///

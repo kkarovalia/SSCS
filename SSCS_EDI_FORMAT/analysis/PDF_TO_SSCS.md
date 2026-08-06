@@ -4,9 +4,14 @@
 > complete standalone guide — every rule, the full output format, and the traps — written so someone
 > with no context can work from it alone. This page is the shorter architectural summary.
 
-The second input path, for vendors who don't send EDI. First and currently only vendor:
-**Dr Pepper**, verified end-to-end in live SSCS. Per-vendor detail lives in
-[vendors/](./vendors/); the output format is in [FORMAT_SPEC.md](./FORMAT_SPEC.md).
+The second input path, for vendors who don't send EDI. Vendors: **Dr Pepper**, **Blue Bell**,
+**Bimbo Bakeries** and **Red Bull**, all verified end-to-end in live SSCS; and **Chubiwinos S&G**,
+which reconciles against eight and whose line figures are pinned against a hand-keyed SSCS screen but
+which has not been round-tripped either. Per-vendor detail lives in [vendors/](./vendors/); the
+output format is in [FORMAT_SPEC.md](./FORMAT_SPEC.md).
+
+The PDF tab has a **vendor dropdown** — the choice selects the parser, so a ticket dropped under the
+wrong vendor is refused rather than mis-read.
 
 ## Architecture: two stages, shared backend
 
@@ -66,12 +71,160 @@ Two findings worth keeping in mind for future vendors:
 5. Record the confirmed figures in the tests, the way `PdfConversionTests` pins the 16 Ex Cost
    values SSCS displayed.
 
+## What Blue Bell added to the architecture
+
+Blue Bell (2026-07-26) broke two assumptions that were true while Dr Pepper was the only vendor:
+
+- **One PDF can carry several documents.** A ticket carries a Sales block and a Returns block with
+  separate printed numbers. `ConversionService` therefore writes a *list* of documents, not one.
+  (What that ticket is not is two payables — see the correction below. The plural write path stayed,
+  because nothing guarantees the next vendor will be singular.)
+- **Not every header field can be parsed.** Blue Bell's invoice number has no check digit and the
+  scanner mis-reads it silently (one sample says `033105035263` where the paper says
+  `033103035263`). `IInvoiceDetailsPrompt` asks the operator instead of guessing. Reach for this
+  only where a field genuinely cannot be verified — everything else on that ticket reconciles
+  against its printed TOTAL and is parsed normally.
+
+The same prompt is the answer to a **damaged** header field, not just an unverifiable one. One Blue
+Bell ticket scanned as `DATE 12-14-Z023`; the rest of it was sound and its money reconciled, so it
+now asks for the date rather than refusing the delivery over a single character. Three rules make
+that safe, and are worth copying for any header field a future vendor loses:
+
+1. The parsed value always wins — the prompt is only consulted when parsing found nothing, so it
+   can never overwrite what the paper actually said.
+2. A repaired reading (letters mapped back to digits, then validated) is offered as a *suggestion*
+   to check against the paper, never used on its own.
+3. Nothing supplied still refuses the file. A placeholder is worse than no file.
+
+This applies to header fields only. A field that **proves** the parse — the printed TOTAL — can
+never be typed, because accepting a keyed figure removes the only check between a misread ticket
+and the register.
+
+Blue Bell also showed that **a "UPC" column need not hold a UPC.** Its printed code is the 11-digit
+UPC-A body padded with a leading zero; sending it unchanged created a duplicate item in live SSCS.
+Check a new vendor's codes against `Upc.IsValidUpcA12` before assuming they are barcodes — if far
+fewer than all of them pass, they are not.
+
+### Correction, 2026-08-04: a printed invoice number is not a payable
+
+Blue Bell prints a separate invoice number on its Returns block, and this path was built on the
+assumption that a separate number meant a separate payable — one XML per block, two invoice-number
+prompts. The store's live SSCS holds the 03/19/2026 ticket as a **single $325.50 paidout of seven
+lines**, six Sales rows and one −$2.98 return. It is one payable, and the converter now writes one
+file, the same shape as Bimbo and Red Bull.
+
+The general rule this leaves behind, and the one to apply to the *next* vendor: **a printed invoice
+number identifies a document; only the store's own books say what a payable is.** That is not
+something a PDF can tell you, and it is not something to infer from the paper's own numbering — it
+has to be checked against SSCS, on a real ticket, before the shape of the output is decided.
+
+## What Chubiwinos added to the architecture
+
+Chubiwinos (2026-07-26) is the first vendor whose scans damage the **money columns** often enough
+that a row cannot simply be read. Six rows across eight samples have a mangled price or extended.
+See [vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §4; the three ideas worth reusing:
+
+- **Let the invoice's own total choose between readings.** A row offers `QTY × PRICE` and the
+  printed `TOTAL`; when they disagree, try every combination across the damaged rows and accept only
+  when exactly one combination reproduces the invoice total. That is arithmetic, not a preference
+  for one column, and it refuses rather than guessing when the damage is genuinely ambiguous.
+- **A printed unit count is worth more than it looks.** Quantity is the one field money cannot
+  check — misread it and the unit cost absorbs the difference, so the invoice balances to the penny
+  while the store's stock is wrong. Chubiwinos prints `Totals: <units>` per section; it is a hard
+  gate, and it is what makes repairing an amount from the leftover safe.
+- **Vote on a figure printed more than once.** The grand total appears five times; three are read
+  and the majority wins, which silently corrected a `$684.82` for `$584.82`.
+
+It also added the first **product catalogue** (`ChubiwinosCatalog`): item number → barcode, used
+only to replace a code that has already failed its own check digit. A code that passes is always
+sent as printed. That is a narrow, evidence-backed use — every one of the seven damaged codes was a
+single wrong digit in a code the same vendor prints correctly elsewhere — and it is **not** a
+reintroduction of the configurable vendor→code map, which stays deleted. An item the catalogue has
+never seen goes to the operator (`BarcodeDialog`), because guessing a barcode is the one error
+nothing downstream catches.
+
+## What Bimbo added to the architecture
+
+Bimbo (2026-08-03) is the first vendor whose **barcodes cannot check themselves at all**: it prints
+the UPC-A body with the leading zero *and* the check digit removed, so a mis-read digit is completely
+silent — the money reconciles, the unit counts agree, and SSCS opens a new item under an id belonging
+to nothing. See [vendors/BIMBO.md](./vendors/BIMBO.md) §3. Three ideas worth reusing:
+
+- **When a code has no check digit, find a second encoding of the same product on the page.** Bimbo
+  prints its own item number in the next column, so the two columns check each other. This is
+  `ChubiwinosCatalog`'s idea used more aggressively — there it only replaced a code that had already
+  failed a check digit, here it is the *only* detector — so it is fenced twice: an entry may correct a
+  code only once **two separate tickets** agree on it, and only when the two codes are **one digit
+  apart**. Further apart means the item number is the damaged column, and following it would swap a
+  good barcode for an unrelated product's.
+- **A validated prefix is a cheap partial check digit.** Bimbo bills under three GS1 manufacturer
+  prefixes; a scanned prefix one digit from exactly one of them is repaired, an ambiguous one is
+  warned about. That alone caught six of the ten sample mis-reads.
+- **A printed count can be wrong too — cross-check it before refusing.** Chubiwinos treats a section's
+  unit count as a hard gate, which is right when it is the only one. Bimbo prints a count per band
+  *and* for the ticket, and one sample prints `RETURNS TOTAL -15` where its rows come to 16 and the
+  ticket's own `104` agrees with the rows. So a band count is overruled by the grand count when the
+  grand count matches the lines; only when **both** disagree is the ticket refused. A hard gate on a
+  figure that is itself OCR'd costs whole deliveries.
+
+It also showed that **counting digits beats pattern-matching them**. PdfPig renders the same row as
+`74323-09513 008799`, `70870- 73400 014153` and `74323-0 951 3 008799`; a regex with lazy digit
+groups partitions the third wrongly and drops the row without a sound. Taking a fixed *number* of
+leading digits and ignoring the separators between them cannot make that mistake, and it doubles as
+the non-product-row filter.
+
+Finally, it settled that **no scanned invoice number may reach the prompt, for any vendor.**
+`InvoiceDetailsRequest` carries no suggestion field at all, so the box cannot be pre-filled by
+accident. See [vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §8.
+
+## What Red Bull added to the architecture
+
+Red Bull (2026-08-04) is the first vendor whose **own printed total cannot gate the parse**, and the
+reason generalises: a checksum is only worth having if it is independent of the thing it checks.
+See [vendors/RED_BULL.md](./vendors/RED_BULL.md) §4. Four ideas worth reusing:
+
+- **Ask whether two readings are really two readings.** `PRICE` and `TOTAL` hold the same number
+  when QTY is 1, so a row that multiplies out looks self-confirming. It is the same glyph printed
+  twice, and the scanner mis-renders it identically in both places — the verified ticket reads
+  $40.76 in both columns where the paper says $40.75. Chubiwinos' majority vote fails here for
+  exactly the same reason: one sample's $918.33 comes back as $910.33 in all three of the places the
+  figure is printed. Redundancy only helps when the copies can fail independently.
+- **So cross *different* glyphs.** What survives is `QTY x PRICE = TOTAL` (different columns),
+  `UNITS = QTY x pack` (a catalogue, not the page), the UPC-A check digit, and the rows against the
+  printed total (a different figure entirely). `SettleByPrintedTotal` runs the last of these as a
+  search: each row offers at most two amounts, and the printed total picks the combination Red Bull
+  actually billed. Where several combinations reach it, only the rows they **all agree on** are
+  settled and the rest go to the operator — an answer every solution shares is not a guess.
+- **Keep a vendor's self-declared totals as a set.** Red Bull prints ROA and INVOICE; one sample
+  reads $509.14 and $599.14 and the rows prove the second. Collapsing them to one number would have
+  rejected a perfectly good ticket.
+- **A dropped line is worse than a wrong one.** A short invoice is internally consistent, so nothing
+  downstream questions it. Red Bull's barcode is printed beside the TOTAL column and on bad scans
+  destroys it, so a row is recognised by QTY + UNITS + a word of description as well as by its
+  money; a barcode arriving when the current product already has one becomes a row of its own with
+  everything else asked for; and rows the scan's skew split across two baselines are reunited before
+  anything is read.
+
+It also settled what to ask a person for. **Barcode, units and amount get a prompt; the description
+never does** — SSCS overrides the description for any item it already knows, so asking about it
+would be a prompt that changes nothing, and a prompt that changes nothing teaches people to click
+past the prompts that matter. Same logic for the silent barcode repairs: a single-digit fix that
+satisfies both the check digit and the catalogue is not warned about, because one 300 dpi sample
+reads its entire barcode column as `611260...` for `611269...` and warning on every row of every
+ticket is the same as warning on none.
+
+Finally, it is the first vendor read from **positioned words** rather than joined lines
+(`PdfTextExtractor.ExtractPages`). Once a scan has split the ID column in two or dropped a money
+column, no amount of counting tokens says which figure is the price and which is the total; column
+x-positions survive damage that reading order does not, and they are calibrated from where the money
+sits on the page because the column headings themselves read `PflICE` and `TdrAo.`.
+
 ## Supplier name
 
-There is **no vendor→code mapping UI** — it was built and removed as unnecessary. The PDF tab
-converts Dr Pepper and writes the fixed name `DR PEPPER`; the EDI tab passes each file's own
-vendor code through. SSCS resolves the name to one of its Vendor IDs through its
+There is **no vendor→code mapping UI** — it was built and removed as unnecessary. Each PDF vendor's
+parser carries a hardcoded `SupplierName` (`DR PEPPER`, `BLUE BELL`, `CHUBIWINOS`,
+`BIMBO`, `RED BULL`); the EDI tab passes
+each file's own vendor code through. SSCS resolves the name to one of its Vendor IDs through its
 *Map Supplier to Vendor* screen, and an operator can override it from a dropdown.
 
-If a second PDF vendor is added, give it its own parser and a hardcoded name rather than
-reintroducing a configurable map.
+A further PDF vendor gets its own parser and hardcoded name — do not reintroduce a configurable map.
