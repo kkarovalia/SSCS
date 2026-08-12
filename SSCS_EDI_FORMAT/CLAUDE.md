@@ -46,15 +46,33 @@ became a *New Item* under `00718990510`; sent as the real UPC-A `071899051015` i
 store's existing `07189905101` in department ICE CREAM. Restore the check digit — see
 [analysis/vendors/BLUE_BELL.md](./analysis/vendors/BLUE_BELL.md) §3.
 
+**A sixth, 2026-08-11: a second *reader* is not a second calculation.** `QTY x PRICE` checked against
+`TOTAL` is the same OCR pass twice, which is why it cannot see a glyph the scanner renders wrongly in
+both columns. A vision model reading the **picture** fails differently, so the two agreeing is real
+corroboration — and it is still only ever allowed to *confirm*. See `VisionInvoiceReader.cs`.
+
+**A fifth, learned the hard way on 2026-08-11: a checksum may confirm a figure, never supply one.**
+Red Bull ticket 2035939353 reached its own printed $394.84 exactly, through four wrong rows whose
+errors cancelled to the cent, and reported it with complete confidence. A calculation whose input was
+misread returns a confident wrong answer, and `QTY × PRICE` is not a second opinion about `TOTAL` —
+it is the same scan damage wearing a different hat. So where two *different* readings of a figure
+agree it is taken; where they do not, or where there is only one, the operator is shown the printed
+row and asked. This is why the PDF vendors prompt more than they used to: 64 questions across
+Red Bull's twelve samples, 8 across Dr Pepper's. **A barcode is the exception** — it carries its own
+check digit and `RedBullCatalog`/`BimboCatalog` are independent records, so two unrelated things have
+to agree on the same digits, and that is verification rather than arithmetic.
+
+
 ## Do / don't
 
 | Do | Don't |
 |----|--------|
+| **Confirm a printed figure, or ask** | **Work a figure out and use it** |
 | Send whole barcodes and let SSCS drop the check digit | Pre-truncate a code to 11 characters |
 | Prove a barcode change with `EveryBarcodeLandsOnTheSameSscsItem` | Assume an id change is harmless |
-| Reconcile lines against the invoice's own printed total | Trust a parse with no checksum |
+| Use a checksum to say *something is wrong* | Refuse a delivery a person could fix in seconds |
 | Fail closed on a bad UPC-E check digit | Guess at a mistyped barcode |
-| Warn only when a human must act | Add warnings that fire on every file |
+| Warn only when a human must act | Open a window after the work is done |
 | Populate each-list from the vendor's own figure | Write `0.00` and risk a free sale |
 | Edit conversion in `EdiToSscs.Core` | Put business logic in WinForms |
 
@@ -65,15 +83,61 @@ store's existing `07189905101` in department ICE CREAM. Restore the check digit 
 - `Invoice.cs` — the shared model (`Invoice`, `InvoiceLine`, `ShipToInfo`) both paths produce
 - `NaxmlBuilder.cs` — the one place XML bytes are written
 - `Upc.cs` — check-digit maths; `UpcE.cs` — UPC-E expansion
-- `PdfTextExtractor.cs` — PdfPig text layer → visual lines
-- `DrPepperPdfParser.cs` — Dr Pepper PDF → `Invoice`. Two things beyond the plain layout. **Ink:**
+- `PdfTextExtractor.cs` — PdfPig text layer → visual lines. `ExtractPositionedLines` is the one pass;
+  `ExtractLines` is projected off it so a line number reported by a parser and the band of paper a
+  snip cuts can never drift apart.
+- `PdfRowSnipper.cs` — cuts the picture of a printed row out of a scanned invoice. Every vendor PDF is
+  a photograph with a machine's transcription underneath, and **only the transcription has ever been
+  wrong**, so a question shows the row rather than describing it. The question is five words —
+  "Type the number under
+  UNITS" — naming the column from `LineFieldRequest.ColumnName`, because the vendors disagree about
+  it (Dr Pepper's last column is AMOUNT, Red Bull's is TOTAL) and sending someone to look for a
+  column that is not on their paper is worse than saying nothing. The ticket's own headings are cut
+  from the same page at the same width and shown **directly on top of** the row, so UNITS sits over
+  the units. **Which lines a row spans is the parser's to say, never the snipper's:** Dr Pepper
+  prints the barcode on the product line *above* the priced row and Red Bull prints it on the line
+  *below*, so "one line up" is right half the time and produces a real row of a real invoice with the
+  wrong figure marked on it the other half. Nothing but a question ever opens a window — a note goes
+  to the log and to the file list, because by the time one is written there is nothing left to do
+  about it. Best-effort by design: `TryCut` never throws and
+  returns null for a PDF that was never a scan, because the message it decorates has to stand on its
+  own.
+- `DrPepperPdfParser.cs` — Dr Pepper PDF → `Invoice`. Three things beyond the plain layout. **Ink:**
   invoices come back marked up in pen and OCR turns a stroke into a stray token, so a token with no
   digit in it is discarded — but only white space and the unused NET/TAX columns may absorb one. A
-  mark on WHSLE/CASES/UNITS/AMOUNT, or on a barcode, is `PDF_UNREADABLE_LINE`. The barcode case
-  cannot be caught by the total gate (the money still adds up), so the tell is **a priced row no
-  product line claimed**. **Credits:** a `CREDITS` banner switches the page to a shorter column set
-  with no WHSLE and money in brackets; they are line items with **negative units at a positive
-  cost** — the invoice does not reconcile without them.
+  mark *welded to* a figure comes off only when the figure is **money** (`20.66-`), because money is
+  re-added by the package subtotal and again by AMOUNT DUE, so a wrong strip fails loudly. A mark on
+  a **count** stays damage: a count is what those totals are made of. A **letter is never a mark** —
+  `1Z` is 12 with the 2 lost, `5b.14` is 50.14 — so rubbing one out would delete a digit and leave a
+  figure that looks clean. A mark on a barcode cannot be caught by the total gate (the money still
+  adds up), so the tell is **a priced row no product line claimed** — including a *damaged* one,
+  which is how invoice 5218300220 lost $115.95 in silence. A row that **lost a column** is read from
+  its tail, since NET/TAX/AMOUNT are the last three and all three are money; before that, such a row
+  went unrecognised and took its whole product line with it (invoice 4643519283). **Quantities:** the
+  money cannot check a UNITS column — 11 for 12 leaves every dollar on the page correct and books a
+  unit short — so units are reconciled against the **package subtotal** (which states the pack size,
+  `units ÷ cases`, and so names the damaged row) and against the invoice's own count of itself:
+  **TOT SALE**, or the **SALES SUMMARY** block a ticket carrying returns prints instead. Those are
+  **checks, not sources**: a subtotal that disagrees has said its whole piece — this row is wrong —
+  and filling the count in from `cases × pack` would rest on QTY having been read right, so the row
+  is shown to the operator instead. With no prompt available the invoice is refused, never guessed. A damaged **AMOUNT is never back-filled from AMOUNT DUE**: that
+  would satisfy the only checksum by construction. WHSLE and CASES are the exception that does *not*
+  ask, because they seed nothing but a new item's shelf price. Its **invoice number is typed like
+  every other vendor's** (2026-08-10) and overrides the printed one; the date and total are shown in
+  the same window for checking, and become boxes only when the scan destroyed them. **An invoice
+  that does not reach its own AMOUNT DUE is no longer refused** (2026-08-11): the total says
+  *something* is wrong, so the rows that cannot be right are asked about first — `CASES x NET` is
+  the row printing its own money a second time in different glyphs, and on the two samples that hit
+  this it names one row out of 22 and 29 — then the rows nothing checked, and only then is it
+  refused. A subtotal keeps its group when the scan destroys only its **dollar figure**
+  (`PEG 21 504 682.S0`); losing it took the group boundary too and put eleven rows in question for
+  one misread UNITS. A page that reads as *nothing at all* — no date, no total, no product row — is
+  refused **before any prompt**, because it went through the scanner upside down. **Credits:** a
+  `CREDITS` banner switches the page to a shorter column set with no WHSLE and money in brackets;
+  they are line items with **negative units at a positive cost** — the invoice does not reconcile
+  without them, and the summary block is the only count they get. Read
+  [analysis/vendors/DR_PEPPER.md](./analysis/vendors/DR_PEPPER.md) before touching its code token: a
+  period and a letter each need a second, deliberately stricter pattern.
 - `BlueBellPdfParser.cs` — Blue Bell PDF → one or more `BlueBellSection`s (a ticket can carry a
   Sales *and* a Returns invoice); `ToGtin` holds the check-digit rule, `SeedRetail` the 40% margin,
   `PackFor` the units rule — **a `DZ` line is a carton of twelve, so its QTY is not units**
@@ -108,17 +172,96 @@ store's existing `07189905101` in department ICE CREAM. Restore the check digit 
   way everywhere, so one sample's $918.33 reads $910.33 in all three places it appears, and PRICE
   and TOTAL agreeing means nothing because they are the same glyph twice. Read
   [analysis/vendors/RED_BULL.md](./analysis/vendors/RED_BULL.md) §4 before touching its money.
+  **Its columns are calibrated from the product rows only** (2026-08-11): the TOTALS block is a
+  narrow stack of five money figures, and on a one- or two-SKU ticket that was the only stack dense
+  enough to qualify as a column, so those tickets found no products at all and were refused.
   Reads positioned words (`PdfTextExtractor.ExtractPages`) because its columns cannot be told apart
-  by reading order once the scan has split or dropped one.
+  by reading order once the scan has split or dropped one — which is why `PdfPositionedWord` carries
+  a **line number**: a vendor read by column has none of its own, and without one no question about
+  a row could show that row. Its column headings are OCR debris (`PflICE`, `IDEAL`), so the header
+  line is found by **position** — the row above the first product, guarded by carrying no money —
+  and its *picture* is the legend. A ticket that does not add up is never refused: every amount
+  nobody has looked at is shown, and once a person has read them all the lines are used and the
+  disagreement is said out loud (`SettleAgainstThePrintedTotal`). That took the store's ten samples
+  from 5 converting to 9. `CheckRedBullUnits` is the backstop, because a row the scan lost takes its
+  dollars with it and only the printed unit count can see it. Its printed total may only **confirm**
+  a row's own reading,
+  never replace it — `REDBULL_2035939353_total_reached_wrong_way` reached the printed $394.84 exactly
+  through four wrong rows whose errors cancelled, so reaching the total proves nothing when the truth
+  was never among the readings the scan produced. That ticket is refused now. §4 of the vendor doc
+  has the table.
+- `VisionInvoiceReader.cs` — the contract for reading an invoice off the **picture** rather than the
+  text layer: `VisionRow`/`VisionReading`, and `AlignTo`, which decides which parsed row a vision row
+  belongs to. That alignment is the dangerous part — a reading tied to the wrong row puts one
+  product's figures onto another and every total still adds up — so it goes by **position**, checked
+  first against the rows themselves (a pair agrees on its item number, its count or its amount;
+  more than half must agree, and a one-row ticket is forced). Position rather than the item number
+  because that column is OCR debris on these scans (`O84815`, `9/221027`), so a key match would hold
+  only on the rows nobody needed help with. Failing that, rows tie by key. There is deliberately
+  **no "last one standing" rule**: pairing off the single unclaimed row looks forced but is satisfied
+  exactly by a model that dropped one row and invented another.
+- `GeminiVisionReader.cs` — the Gemini implementation. One request per page, `temperature 0`, money
+  returned as **text** so a cent never goes through a float, and a prompt whose first rule is *never
+  guess* — a blank sends the row to a person, a guess sends it to the register. Every failure (no
+  key, no network, refusal, throttling, unparseable reply) is `VisionReading.Empty`, exactly like
+  `PdfBarcodeReader`'s empty list. `CheckTheKeyWorks` is the Test button, for the same reason Test
+  Email exists. Key lives in `VisionSettings`, DPAPI-encrypted, behind the admin PIN; **off by
+  default**, and off means the converter behaves exactly as it did before this existed.
+- **A page the text layer cannot read is no longer a lost file.** Where the OCR found no product
+  rows and the picture did, the picture *is* the invoice: `RowsFromThePicture` builds the rows on
+  both vendors, `PdfTextExtractor`'s `PDF_NO_TEXT_LAYER` refusal is deferred (`ConversionService.
+  TextOr`), and Dr Pepper's `LooksReadable` gate now **discards the text layer whole** rather than
+  merely tolerating it — the upside-down scan is not blank, it has 136 lines and some of them match
+  as product rows (`SO'6Z ZI T 9Yd`), so leaving them in would put garbage in beside the reading.
+  Those rows are **not** then "corroborated" by the same picture (`Settle` is handed an empty
+  reading), because one reader agreeing with itself would wave every figure through; what checks
+  them is `QTY x PRICE = TOTAL` over three separately-read figures and the ticket's own total, which
+  is why the model is asked for QTY at all. Two things the picture path has to do for itself that the
+  text layer got for free (2026-08-11): **a barcode still has to pass its own check digit** — the
+  model misreads a digit exactly as the scanner does, one sample's printed `810128528191` came back
+  `810128529191`, and the invoice still reached its own AMOUNT DUE to the cent with a line booked onto
+  a product that never arrived — and **Dr Pepper's pallets and shells are not goods**
+  (`IsReturnableEquipment`), which the text layer never had to know because they carry no
+  `<barcode>/<SKU>` token, while on the picture a name, a number and a count is exactly the shape of a
+  product row. And the quietest of the three: **`TOT SALE` has to gate the quantities here too** — the
+  hard units check existed but its figure came only from the text layer, so on a page with no text
+  layer it never ran, and one sample booked 342 units against the paper's 326 while reporting the
+  ticket's own `$588.97` to the cent. **Line number 0 throughout**: with no text layer there
+  are no coordinates, and an invented line number would mark a figure on some other row — a question
+  with no picture is worth having, one with the wrong picture is not. Where both readers found rows
+  but not the same number, that is said out loud and **not** patched: a lost row takes its money
+  with it so no total can see it, but swapping ten double-read rows for a single-reader list to
+  recover one is the worse trade.
+- How a vision reading is used: it is a **second reader, never an oracle**. It joins the existing
+  settle ladders as another candidate — in Red Bull's `SettleByPrintedTotal` the printed total may
+  now confirm a *picture* reading as well as a TOTAL column, which is what repairs a row that
+  reconciles with itself (one ticket prints $54.70 and the scan renders `$64.70` in PRICE and TOTAL
+  both). Where the two readers agree, the figure is taken. Where they disagree, only arithmetic over
+  genuinely different glyphs may overrule the picture — so a **QTY 1 row may not**, because its
+  `QTY x PRICE` is the same figure twice. Where nothing independent separates them, the operator is
+  still asked. Dr Pepper's rungs are the same shape: a lost AMOUNT confirmed by `CASES x NET`, a row
+  the picture reads differently that lands the invoice on its own AMOUNT DUE, and a package group's
+  counts confirmed by its printed subtotal — all of them confirmation, never derivation.
+- `PdfBarcodeReader.cs` — decodes the printed **bars** off a scanned page (ZXing), tied to the text
+  line they sit on. Red Bull only; Dr Pepper prints no bars. This is the one encoding on these pages
+  with error correction in it, read by code that shares nothing with the OCR — so it fails
+  differently, which is the whole point. It is **not** clean: 6 of 174 decodes were wrong and
+  satisfied their own check digit, so it sits at rung 2 of `ResolveBarcode` — ahead of the
+  single-digit repairs, because a repair is a guess among six equally valid candidates, and behind a
+  clean reading of the digits, which it may only ever *disagree* with (that goes to the operator).
+  Took the store's twenty tickets from 17 barcode questions to 3, and from 6 wrong product codes to
+  0 out of 222. Best-effort: an empty list changes nothing.
 - `RetailSeed.cs` — the each-list seed for vendors whose invoices print no retail column. 40% for
   Blue Bell; `FromCost(cost, margin)` takes the vendor's own margin, which is how
   Chubiwinos gets the 50% that reproduces the Ea List 5.59 SSCS shows against a 2.79 cost
 - `ConversionService.cs` — read / convert / atomic write (**writes N files for N invoices**);
   `ConversionCoordinator.cs` — queue; `IInvoiceDetailsPrompt` — asks the operator for the Blue Bell
-  and Chubiwinos invoice number, for the date when the scan destroyed it (the ticket's own date
-  always wins), and for a Chubiwinos barcode that neither read nor is on record. `AskLineField`
-  asks for **one figure on one Red Bull row** — its UPC, units or amount — named the way the
-  operator will find it ("The 5th product's UPC is blurry"). **Never the description:** SSCS
+  and Chubiwinos invoice number, for **the date on every invoice** (the box is pre-filled with what
+  the scan read and what the operator confirms wins - a wrong year is the one thing these scanners
+  produce that looks entirely plausible, and two of twenty-two samples booked themselves into 2016
+  and 2020 for 2026), and for a Chubiwinos barcode that neither read nor is on record. `AskLineField`
+  asks for **one figure on one Dr Pepper or Red Bull row** — its UPC, units or amount — by showing
+  the printed row with that figure boxed, rather than by describing it. **Never the description:** SSCS
   overrides it for a known item, so asking would be a prompt that changes nothing. **The invoice-number
   box is never pre-filled from a scan, for any vendor** — `InvoiceDetailsRequest` deliberately has no
   suggestion field, so it cannot be

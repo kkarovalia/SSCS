@@ -267,9 +267,9 @@ public static partial class BlueBellPdfParser
         {
             SupplierName = SupplierName,
             InvoiceNumber = invoiceNumber,
-            // Every section of one ticket carries the same printed date; the first one that read is
-            // as good as any, and the operator's answer is the fallback when none did.
-            Date = sections.Select(s => s.Date).FirstOrDefault(d => d is not null) ?? date,
+            // The date the operator confirmed, typed on every invoice now - see
+            // InvoiceDetailsRequest.NeedsDate for why a date that read is still not trusted.
+            Date = date,
             Total = sections.Sum(s => s.Total),
             Lines = sections.SelectMany(s => s.Lines).ToList(),
         };

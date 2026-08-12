@@ -110,7 +110,9 @@ public class BimboPipelineTests
         Assert.Equal("Bimbo", asked.Vendor);
         Assert.Equal(335.07m, asked.Total);
         Assert.Equal(35, asked.LineCount);
-        Assert.False(asked.NeedsDate);   // the 300 dpi scan read its own date
+        // The date is typed on every invoice now, with what the scan read offered in the box.
+        Assert.True(asked.NeedsDate);
+        Assert.Equal(new DateOnly(2026, 7, 28), asked.DateToOffer);
 
         // InvoiceDetailsRequest has no field that could carry a suggested number, by design.
         Assert.DoesNotContain(

@@ -4,7 +4,7 @@ using EdiToSscs.Core;
 
 namespace EdiToSscs.App;
 
-public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
+public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt, IInvoiceVisionReader
 {
     // Option A — navy primary, light surfaces, red used sparingly for brand accent.
     private static readonly Color ThemeBg = Color.FromArgb(248, 249, 252);
@@ -35,8 +35,16 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
     private readonly object _emailLock = new();
     private readonly SmtpEmailSender _emailSender;
 
+    /// <summary>
+    /// The AI reader's configuration as last saved, guarded for the same reason as the email
+    /// settings: a conversion runs on a background thread while Settings can be edited on the UI one.
+    /// </summary>
+    private VisionSettings _vision = new();
+    private readonly object _visionLock = new();
+
     private Label _folderValueLabel = null!;
     private Label _emailValueLabel = null!;
+    private Label _visionValueLabel = null!;
 
     public MainForm()
     {
@@ -44,6 +52,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         var settings = _settingsStore.Load();
         _currentFolder = settings.OutputFolder;
         _email = settings.Email;
+        _vision = settings.Vision;
         _logoImage = LoadEmbeddedLogo();
 
         // Reads the live settings on every send, so a change in Settings takes effect immediately.
@@ -52,6 +61,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         BuildLayout();
         UpdateFolderLabel();
         UpdateEmailLabel();
+        UpdateVisionLabel();
 
         Shown += OnFormShown;
         FormClosing += OnFormClosingConfirm;
@@ -130,7 +140,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
         using var dialog = new InvoiceNumberDialog(request);
         return dialog.ShowDialog(this) == DialogResult.OK
-            ? new InvoiceDetails(dialog.InvoiceNumber, dialog.Date)
+            ? new InvoiceDetails(dialog.InvoiceNumber, dialog.Date, dialog.Total)
             : null;
     }
 
@@ -285,10 +295,10 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         // screen the help text would otherwise be cut off with no way to reach it.
         var layout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, BackColor = ThemeBg,
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 10, BackColor = ThemeBg,
             AutoScroll = true,
         };
-        for (int i = 0; i < 6; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int i = 0; i < 9; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // help text / filler
         page.Controls.Add(layout);
 
@@ -303,16 +313,27 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         emailButton.Click += OnOpenEmailSettings;
         layout.Controls.Add(emailButton, 0, 2);
 
+        // --- AI reading ---
+        layout.Controls.Add(SectionHeading("AI reading"), 0, 3);
+
+        _visionValueLabel = new Label { AutoSize = true, MaximumSize = new Size(760, 0), ForeColor = ThemeText, Margin = new Padding(0, 0, 0, 8) };
+        layout.Controls.Add(_visionValueLabel, 0, 4);
+
+        var visionButton = MakePrimaryButton("AI Reading Settings...");
+        visionButton.Margin = new Padding(0, 0, 0, 20);
+        visionButton.Click += OnOpenVisionSettings;
+        layout.Controls.Add(visionButton, 0, 5);
+
         // --- Output folder ---
-        layout.Controls.Add(SectionHeading("Output folder"), 0, 3);
+        layout.Controls.Add(SectionHeading("Output folder"), 0, 6);
 
         _folderValueLabel = new Label { AutoSize = true, MaximumSize = new Size(760, 0), ForeColor = ThemeText, Margin = new Padding(0, 0, 0, 8) };
-        layout.Controls.Add(_folderValueLabel, 0, 4);
+        layout.Controls.Add(_folderValueLabel, 0, 7);
 
         var changeFolderButton = MakePrimaryButton("Change Output Folder");
         changeFolderButton.Margin = new Padding(0, 0, 0, 16);
         changeFolderButton.Click += OnChangeOutputFolder;
-        layout.Controls.Add(changeFolderButton, 0, 5);
+        layout.Controls.Add(changeFolderButton, 0, 8);
 
         layout.Controls.Add(new Label
         {
@@ -329,7 +350,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                    "invoice number, and each goes out as its own email.\n\n" +
                    "Use View XML to read what a file converted to.",
             AutoSize = true, Font = new Font("Segoe UI", 10.5f), ForeColor = ThemeMuted, Margin = new Padding(0, 4, 0, 0),
-        }, 0, 6);
+        }, 0, 9);
     }
 
     private static Label SectionHeading(string text) => new()
@@ -388,6 +409,103 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         _emailValueLabel.Text = s.IsComplete
             ? $"Send Email sends to: {s.ToAddress}\nSent from {s.FromAddress}. Files are saved to the output folder as well."
             : "Email is not set up yet, so Send Email has nothing to send to.\nOpen Email Settings to set the store's address and the sending mailbox.";
+    }
+
+    /// <summary>
+    /// Opens the AI reading settings, behind the same PIN as email. It holds a key and it sends the
+    /// store's invoices outside the building, which is the same class of decision.
+    /// </summary>
+    private void OnOpenVisionSettings(object? sender, EventArgs e)
+    {
+        EmailSettings email;
+        lock (_emailLock) email = _email.Clone();
+
+        var (allowed, newPinHash) = PinDialog.Authorize(this, email.AdminPinHash);
+        if (!allowed) return;
+
+        if (newPinHash is not null)
+        {
+            email.AdminPinHash = newPinHash;
+            ApplyEmailSettings(email);
+        }
+
+        VisionSettings current;
+        lock (_visionLock) current = _vision.Clone();
+
+        using var dialog = new VisionSettingsDialog(current);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        ApplyVisionSettings(dialog.Result);
+    }
+
+    /// <summary>Saves the AI reader's settings and makes them live for the next conversion.</summary>
+    private void ApplyVisionSettings(VisionSettings settings)
+    {
+        lock (_visionLock) _vision = settings;
+        try
+        {
+            _settingsStore.SaveVision(settings);
+        }
+        catch
+        {
+            MessageBox.Show(this,
+                "Your AI reading settings could not be saved and will be asked again next time.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        UpdateVisionLabel();
+    }
+
+    private void UpdateVisionLabel()
+    {
+        VisionSettings s;
+        lock (_visionLock) s = _vision;
+
+        _visionValueLabel.Text = s.IsActive
+            ? "On. Scanned invoices are read twice - from the PDF and from the picture - so you are only\n"
+              + "asked about a figure when nothing on the page can settle it."
+            : string.IsNullOrWhiteSpace(s.ProtectedApiKey)
+                ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
+                  + "Open AI Reading Settings to switch it on with a free Google key."
+                : "Off. A key is saved but not being used - open AI Reading Settings to switch it back on.";
+    }
+
+    /// <summary>
+    /// The second reading of a scanned invoice, built from whatever is saved right now — so turning
+    /// it on or off in Settings takes effect on the very next file, with no restart.
+    ///
+    /// Never throws and never blocks a conversion: no key, no network, a bad reply, all give an
+    /// empty reading and the invoice converts the way it always has.
+    /// </summary>
+    public VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor)
+    {
+        VisionSettings s;
+        lock (_visionLock) s = _vision;
+        if (!s.IsActive) return VisionReading.Empty;
+
+        try
+        {
+            var keys = s.AllProtectedKeys
+                .Select(SecretProtector.Unprotect)
+                .Where(k => !string.IsNullOrEmpty(k))
+                .Select(k => k!)
+                .ToList();
+
+            // The single legacy Model setting still counts, ahead of the list, so a store that
+            // pinned one model keeps it.
+            var models = new[] { s.Model }.Concat(s.Models)
+                .Where(m => !string.IsNullOrWhiteSpace(m))
+                .Select(m => m!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return keys.Count == 0
+                ? VisionReading.Empty
+                : new GeminiVisionReader(keys, models).TryRead(pdfBytes, vendor);
+        }
+        catch
+        {
+            return VisionReading.Empty;
+        }
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -542,7 +660,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             _dropPrimaryText = dropPrimary;
             _dropSecondaryText = dropSecondary;
 
-            var service = new ConversionService(owner._logger, Application.ProductVersion, owner);
+            var service = new ConversionService(
+                owner._logger, Application.ProductVersion, owner, visionReader: owner);
             _coordinator = new ConversionCoordinator(service, owner);
             _coordinator.FileChanged += OnFileChanged;
             _coordinator.BatchCompleted += summary => _owner.RunOnUi(() => _summaryLabel.Text = summary);
@@ -1045,6 +1164,12 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 item.ForeColor = StatusColor(file.Status);
                 if (file.Status is FileStatus.Converted or FileStatus.Warning or FileStatus.Failed or FileStatus.Canceled)
                     _summaryLabel.Text = file.Detail;
+
+                // Nothing opens on its own here. A conversion that finished interrupts nobody: the
+                // only window this app puts in front of an operator is a question it cannot answer
+                // itself. A window that appears after the work is done is a window that gets clicked
+                // through, and one that appears on a file that converted perfectly well teaches
+                // people to click through the ones that matter.
             });
         }
 

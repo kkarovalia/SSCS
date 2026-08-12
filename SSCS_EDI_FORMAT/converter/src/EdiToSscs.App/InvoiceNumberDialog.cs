@@ -22,14 +22,18 @@ internal sealed class InvoiceNumberDialog : Form
 {
     private const string DateFormat = "MM-dd-yyyy";
 
-    private readonly TextBox _input;
+    private readonly TextBox? _input;
     private readonly TextBox? _dateInput;
+    private readonly TextBox? _totalInput;
     private readonly DateOnly? _knownDate;
 
-    public string InvoiceNumber => _input.Text.Trim();
+    public string InvoiceNumber => _input?.Text.Trim() ?? "";
 
     /// <summary>The date to use: the ticket's own when it had one, otherwise what was typed.</summary>
     public DateOnly Date => _knownDate ?? (ParseDate(_dateInput?.Text) ?? default);
+
+    /// <summary>The grand total typed, when the scan lost the ticket's own. Zero otherwise.</summary>
+    public decimal Total => ParseMoney(_totalInput?.Text) ?? 0m;
 
     public InvoiceNumberDialog(InvoiceDetailsRequest request)
     {
@@ -69,19 +73,20 @@ internal sealed class InvoiceNumberDialog : Form
 
         layout.Controls.Add(Heading(heading));
 
-        string read = request.NeedsDate
-            ? $"Total {request.Total:0.00}      {Items(request.LineCount)}"
-            : $"Date {request.Date:MM-dd-yyyy}      Total {request.Total:0.00}      {Items(request.LineCount)}";
+        // What was read off the ticket, so the operator knows they have the right piece of paper.
+        // The line count is left out when the invoice has not been read that far yet.
+        string counted = request.LineCount > 0 ? $"      {Items(request.LineCount)}" : "";
+        string read = $"Total {request.Total:0.00}{counted}";
         layout.Controls.Add(new Label
         {
             Text = read, AutoSize = true, MaximumSize = new Size(430, 0), Margin = new Padding(0, 0, 0, 10),
         });
 
         layout.Controls.Add(FieldLabel("Invoice #"));
-        // Deliberately empty. The scan's own reading is never put in this box: it is wrong often
-        // enough to matter (033105035263 for 033103035263; "0V9293" for 6V9293) and nothing in the
-        // file can catch it, so a pre-filled box would turn the one field that needs a person's eyes
-        // into a keypress. The operator reads it off the paper.
+        // Deliberately empty, for every vendor. The scan's own reading is never put in this box: it
+        // is wrong often enough to matter (033105035263 for 033103035263; "0V9293" for 6V9293) and
+        // nothing in the file can catch it, so a pre-filled box would turn the one field that needs
+        // a person's eyes into a keypress. The operator reads it off the paper.
         _input = new TextBox
         {
             Width = 260, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
@@ -95,12 +100,23 @@ internal sealed class InvoiceNumberDialog : Form
             _dateInput = new TextBox
             {
                 Width = 160, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
-                Text = request.SuggestedDate?.ToString(DateFormat, CultureInfo.InvariantCulture) ?? "",
+                Text = request.DateToOffer?.ToString(DateFormat, CultureInfo.InvariantCulture) ?? "",
             };
             layout.Controls.Add(_dateInput);
-            layout.Controls.Add(Hint(request.SuggestedDate is null
+            layout.Controls.Add(Hint(request.DateToOffer is null
                 ? "The scan could not be read. Copy it from the ticket."
                 : "From the scan - check it matches the paper."));
+        }
+
+        if (request.NeedsTotal)
+        {
+            layout.Controls.Add(FieldLabel("Amount due"));
+            _totalInput = new TextBox
+            {
+                Width = 160, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
+            };
+            layout.Controls.Add(_totalInput);
+            layout.Controls.Add(Hint("The total at the bottom of the invoice, for example 1080.22."));
         }
 
         var buttons = new FlowLayoutPanel
@@ -125,7 +141,12 @@ internal sealed class InvoiceNumberDialog : Form
 
         AcceptButton = ok;
         CancelButton = cancel;
-        Shown += (_, _) => { _input.Focus(); _input.SelectAll(); };
+        Shown += (_, _) =>
+        {
+            var first = (Control?)_input ?? _dateInput;
+            first?.Focus();
+            (first as TextBox)?.SelectAll();
+        };
     }
 
     private static string Items(int count) => $"{count} line item{(count == 1 ? "" : "s")}";
@@ -154,10 +175,22 @@ internal sealed class InvoiceNumberDialog : Form
     /// <summary>The message to show, or null when the dialog may close.</summary>
     private string? WhatIsMissing()
     {
-        if (InvoiceNumber.Length == 0) return "Type the invoice number, or Skip this file.";
+        if (_input is not null && InvoiceNumber.Length == 0)
+            return "Type the invoice number, or Skip this file.";
         if (_dateInput is not null && ParseDate(_dateInput.Text) is null)
             return "Type the date like 12-14-2023.";
+        if (_totalInput is not null && ParseMoney(_totalInput.Text) is not > 0m)
+            return "Type the amount due like 1080.22.";
         return null;
+    }
+
+    /// <summary>Parses the typed grand total, ignoring a "$" or thousands separators.</summary>
+    private static decimal? ParseMoney(string? text)
+    {
+        string cleaned = new((text ?? "").Where(c => char.IsAsciiDigit(c) || c == '.').ToArray());
+        return decimal.TryParse(cleaned, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal d)
+            ? d
+            : null;
     }
 
     /// <summary>

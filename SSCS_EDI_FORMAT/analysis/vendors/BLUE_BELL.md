@@ -394,8 +394,11 @@ date box appears on the dialog, and the operator keys `mm-dd-yyyy`.
 
 Three rules keep that honest:
 
-- **The ticket's own date always wins.** `ConversionService` uses what came back from the prompt
-  only when the parser found nothing, so a prompt can never move a date that was printed clearly.
+- **The date is typed on every ticket** (changed 2026-08-11). The box is pre-filled with what the
+  scan read and what the operator confirms is what the invoice carries. A date that reads cleanly is
+  still not trusted: a wrong year is entirely plausible, checks nothing, and files the delivery into
+  the wrong period. `SuggestedDate` is never used on its own - a ticket whose date was destroyed and
+  whose operator typed none is still refused.
 - **A repaired reading is a suggestion, never the date.** `ReadDamagedDate` maps the letters the
   scanner substitutes (`Z`→2, `O`→0, `l`→1 …) back to digits and insists on a real calendar date in
   2000–2100, then offers the result for the operator to check against the paper. Mapping characters

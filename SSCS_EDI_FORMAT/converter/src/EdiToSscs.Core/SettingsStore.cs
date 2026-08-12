@@ -15,6 +15,85 @@ public sealed class AppSettings
     /// </summary>
     [JsonPropertyName("email")]
     public EmailSettings Email { get; set; } = new();
+
+    /// <summary>The second reader, off by default. Never null after a load, as above.</summary>
+    [JsonPropertyName("vision")]
+    public VisionSettings Vision { get; set; } = new();
+}
+
+/// <summary>
+/// The AI reader that looks at the picture of a scanned invoice.
+///
+/// Off unless a key is present, and the converter works exactly as it always has without one — this
+/// is a second opinion layered on top of the existing reading, never a dependency. What it changes
+/// is how often the operator is asked about a figure the scan damaged.
+///
+/// Worth being plain about what turning it on means: the pictures of the invoices are sent to
+/// Google. They are vendor delivery tickets — products, counts and prices — with no customer or
+/// payment information on them, but they do leave the building, and on the free tier Google may use
+/// them to improve their models. That is the trade for it costing nothing.
+/// </summary>
+public sealed class VisionSettings
+{
+    /// <summary>
+    /// The Gemini API key, DPAPI-encrypted for the current Windows user. Read it with
+    /// <see cref="SecretProtector.Unprotect"/>; it is never held or displayed as plain text.
+    ///
+    /// Superseded by <see cref="ProtectedApiKeys"/> and kept only so a settings file written by an
+    /// earlier build still works. <see cref="AllProtectedKeys"/> is what callers should read.
+    /// </summary>
+    [JsonPropertyName("protectedApiKey")]
+    public string? ProtectedApiKey { get; set; }
+
+    /// <summary>
+    /// Every key to try, in order, each DPAPI-encrypted. More than one because a free-tier key runs
+    /// out: the store's own thirty-five invoices exhausted one in a single afternoon, and a key with
+    /// nothing left is a silent loss of the second reader rather than a visible failure.
+    /// </summary>
+    [JsonPropertyName("protectedApiKeys")]
+    public List<string> ProtectedApiKeys { get; set; } = [];
+
+    /// <summary>Every key configured, old single-key setting first. Never null, never blank entries.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> AllProtectedKeys =>
+        [.. new[] { ProtectedApiKey }.Concat(ProtectedApiKeys)
+            .Where(k => !string.IsNullOrWhiteSpace(k))
+            .Select(k => k!.Trim())
+            .Distinct(StringComparer.Ordinal)];
+
+    /// <summary>
+    /// Which model to ask. Empty means the current default, so a settings file does not pin the
+    /// converter to a model that has since been retired.
+    /// </summary>
+    [JsonPropertyName("model")]
+    public string? Model { get; set; }
+
+    /// <summary>
+    /// The models to fall through, in order. Each carries its own quota, so a key that has run out
+    /// on one may still answer on the next — which is a great deal cheaper than a second account.
+    /// Empty means <see cref="GeminiVisionReader.DefaultModels"/>.
+    /// </summary>
+    [JsonPropertyName("models")]
+    public List<string> Models { get; set; } = [];
+
+    /// <summary>
+    /// Whether to use it. Separate from the key so the reader can be turned off for a run — a slow
+    /// line, a quota exhausted — without the key having to be typed in again afterwards.
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>True when a reading will actually be attempted.</summary>
+    public bool IsActive => Enabled && AllProtectedKeys.Count > 0;
+
+    public VisionSettings Clone() => new()
+    {
+        ProtectedApiKey = ProtectedApiKey,
+        ProtectedApiKeys = [.. ProtectedApiKeys],
+        Model = Model,
+        Models = [.. Models],
+        Enabled = Enabled,
+    };
 }
 
 /// <summary>
@@ -106,6 +185,7 @@ public sealed class SettingsStore
             // but an explicit null would slip through it. Normalise here so nothing downstream has
             // to defend against a null section.
             loaded.Email ??= new EmailSettings();
+            loaded.Vision ??= new VisionSettings();
             return loaded;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
@@ -158,6 +238,15 @@ public sealed class SettingsStore
         ArgumentNullException.ThrowIfNull(email);
         var s = Load();
         s.Email = email;
+        Save(s);
+    }
+
+    /// <summary>Persists only the AI reader section, leaving everything else untouched.</summary>
+    public void SaveVision(VisionSettings vision)
+    {
+        ArgumentNullException.ThrowIfNull(vision);
+        var s = Load();
+        s.Vision = vision;
         Save(s);
     }
 }

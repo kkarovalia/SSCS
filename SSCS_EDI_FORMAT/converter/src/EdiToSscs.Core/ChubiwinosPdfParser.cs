@@ -68,7 +68,10 @@ public sealed class ChubiwinosTicket
         {
             SupplierName = ChubiwinosPdfParser.SupplierName,
             InvoiceNumber = invoiceNumber,
-            Date = Date ?? date,
+            // The date the operator confirmed. It is typed on every invoice now, with what the scan
+            // read offered in the box, because a plausible wrong date is what this scanner produces
+            // and nothing in the file can catch one - see InvoiceDetailsRequest.NeedsDate.
+            Date = date,
             Total = Total,
             Lines = Lines.Select(l => new InvoiceLine
             {

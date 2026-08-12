@@ -7,10 +7,12 @@ namespace EdiToSscs.App;
 /// Asks the operator for one figure on one product row that the scan destroyed — its barcode, its
 /// unit count, or its dollar amount.
 ///
-/// The wording is deliberately plain and says which product it means the way a person reading the
-/// paper would find it: "The 5th product's UPC is blurry." It also shows what the scan made of the
-/// figure, which is usually close enough to confirm the right row without being trustworthy enough
-/// to send.
+/// The window shows the printed row itself, cut out of the scan and marked. That is nearly all of
+/// the design: the answer is on the screen, so there is nothing to describe, nothing to look up on
+/// the paper, and nothing to explain. One question, the row, a box, one hint.
+///
+/// Where the picture cannot be had — a PDF that was never a scan — it falls back to naming the row
+/// in words, which is what this window used to do for every case.
 ///
 /// There is no prompt for a description. SSCS keeps its own wording for any item it already knows,
 /// so a garbled one costs nothing and the operator can fix it on the rare new item.
@@ -20,22 +22,34 @@ internal sealed class LineFieldDialog : Form
     private readonly TextBox _input;
     private readonly LineFieldRequest _request;
 
-    /// <summary>What the operator typed.</summary>
-    public string Value => _input.Text.Trim();
+    /// <summary>
+    /// What the operator typed, with the SKU dropped if they copied the whole printed token.
+    ///
+    /// The invoice prints the code as "078000200287/20020468", and where the scan mangled it badly
+    /// enough that the marker cannot be trusted around the barcode alone, the whole row is marked and
+    /// copying both halves is the obvious thing to do. The slash says exactly where one ends and the
+    /// other begins, so this is not a guess — and refusing it would be telling someone off for
+    /// reading the paper correctly.
+    /// </summary>
+    public string Value
+    {
+        get
+        {
+            string typed = _input.Text.Trim();
+            int slash = typed.IndexOf('/');
+            return _request.Field == LineField.Barcode && slash > 0 ? typed[..slash].Trim() : typed;
+        }
+    }
 
     public LineFieldDialog(LineFieldRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         _request = request;
 
-        string what = request.Field switch
-        {
-            LineField.Barcode => "UPC",
-            LineField.Units => "units",
-            _ => "amount",
-        };
+        var row = SnipView.TryCreate(request.Snip);
+        int textWidth = row?.Width ?? 450;
 
-        Text = $"{request.Vendor} invoice - {what} needed";
+        Text = $"{request.Vendor} - item {request.Position} of {request.LineCount}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
@@ -53,51 +67,62 @@ internal sealed class LineFieldDialog : Form
         };
         Controls.Add(layout);
 
+        // The question, in five words, naming the column the vendor prints. This is the only line
+        // that has to be read: the row is on screen underneath it with the figure marked, so there
+        // is nothing to describe and nothing to look up.
         layout.Controls.Add(new Label
         {
-            Text = $"{request.FileName} - line {request.Position} of {request.LineCount}",
-            AutoSize = true, MaximumSize = new Size(450, 0), ForeColor = SystemColors.GrayText,
-            Margin = new Padding(0, 0, 0, 8),
+            Text = request.Field == LineField.Barcode || request.ColumnName.Length == 0
+                ? "Type the barcode"
+                : $"Type the number under {request.ColumnName}",
+            AutoSize = true, MaximumSize = new Size(textWidth, 0),
+            Font = new Font("Segoe UI", 12f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 10),
         });
 
-        layout.Controls.Add(new Label
+        if (row is not null)
         {
-            Text = $"The {Ordinal(request.Position)} product's {what} is blurry - please type it here.",
-            AutoSize = true, MaximumSize = new Size(450, 0),
-            Font = new Font("Segoe UI", 10f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8),
-        });
-
-        layout.Controls.Add(new Label
-        {
-            Text = Describe(request),
-            AutoSize = true, MaximumSize = new Size(450, 0), Margin = new Padding(0, 0, 0, 10),
-        });
-
-        layout.Controls.Add(new Label
-        {
-            Text = what switch
+            // The invoice's own column names, cut from the same page at the same width, so they sit
+            // directly over the figures they name — and directly against the row, with nothing
+            // between them, because a legend two paragraphs above a picture is a legend nobody
+            // connects to it. This is what answers "which number do you mean" on a row whose marker
+            // could not be trusted to a single figure.
+            var legend = SnipView.TryCreate(request.Header);
+            if (legend is not null)
             {
-                "UPC" => "UPC",
-                "units" => "Units",
-                _ => "Amount",
-            },
-            AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(0, 0, 0, 2),
-        });
+                legend.Margin = new Padding(legend.Margin.Left, legend.Margin.Top, legend.Margin.Right, 0);
+                layout.Controls.Add(legend);
+            }
 
-        _input = new TextBox { Width = 260, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2) };
+            layout.Controls.Add(row);
+        }
+        else
+        {
+            // No picture to be had, so say in words which row is meant.
+            layout.Controls.Add(new Label
+            {
+                Text = Describe(request),
+                AutoSize = true, MaximumSize = new Size(450, 0), Margin = new Padding(0, 0, 0, 10),
+            });
+        }
+
+        _input = new TextBox
+        {
+            Width = 260, Font = new Font("Consolas", 14f),
+            // The gap under the box belongs to the hint when there is one, and to the box when
+            // there is not, so the buttons never end up jammed against it.
+            Margin = new Padding(0, 10, 0, request.Hint.Length > 0 ? 2 : 12),
+        };
         layout.Controls.Add(_input);
 
-        layout.Controls.Add(new Label
-        {
-            Text = request.Field switch
+        // A hint only where something can actually go wrong. Anything the picture already answers is
+        // a line that gets skipped, and skipping becomes a habit that skips the line that mattered.
+        if (request.Hint.Length > 0)
+            layout.Controls.Add(new Label
             {
-                LineField.Barcode => "All the digits under the bars, including the last one. Dashes are fine.",
-                LineField.Units => "The number in the UNITS column - individual cans, not cases.",
-                _ => "The dollar figure in the TOTAL column, at the right-hand end of the row.",
-            },
-            AutoSize = true, MaximumSize = new Size(450, 0), ForeColor = SystemColors.GrayText,
-            Margin = new Padding(0, 0, 0, 10),
-        });
+                Text = request.Hint,
+                AutoSize = true, MaximumSize = new Size(textWidth, 0), ForeColor = SystemColors.GrayText,
+                Margin = new Padding(0, 0, 0, 10),
+            });
 
         var buttons = new FlowLayoutPanel
         {
@@ -120,10 +145,14 @@ internal sealed class LineFieldDialog : Form
         Shown += (_, _) => { _input.Focus(); _input.SelectAll(); };
     }
 
-    /// <summary>Names the row the way it is printed, plus whatever else about it did read.</summary>
+    /// <summary>
+    /// Points at the row on the paper: where to find it, what it says, and what the scan made of the
+    /// figure being asked about. Two short lines — a paragraph here does not get read.
+    /// </summary>
     private static string Describe(LineFieldRequest request)
     {
         var parts = new List<string>();
+        if (request.LineCount > 0) parts.Add($"Item {request.Position} of {request.LineCount}");
         if (request.Description.Length > 0) parts.Add(request.Description);
         if (request.Field != LineField.Units && request.Units is int u)
             parts.Add($"{Math.Abs(u)} units");
@@ -132,21 +161,10 @@ internal sealed class LineFieldDialog : Form
 
         string row = parts.Count > 0 ? string.Join("  -  ", parts) : "this row";
         string scanned = request.PrintedValue.Length > 0
-            ? $"\n\nThe scan read it as \"{request.PrintedValue}\", which does not add up against the "
-              + "rest of the ticket."
+            ? $"\n\nThe scan read \"{request.PrintedValue}\", which does not match the rest of the invoice."
             : "\n\nThe scan could not read it at all.";
         return row + scanned;
     }
-
-    private static string Ordinal(int n) => n switch
-    {
-        1 => "1st",
-        2 => "2nd",
-        3 => "3rd",
-        21 => "21st", 22 => "22nd", 23 => "23rd",
-        31 => "31st", 32 => "32nd", 33 => "33rd",
-        _ => $"{n}th",
-    };
 
     /// <summary>Rejects something that plainly is not the figure being asked for, before it can
     /// reach the invoice. Anything that gets past here still has to survive the parser.</summary>
@@ -168,8 +186,8 @@ internal sealed class LineFieldDialog : Form
                 if (digits.Length is < 11 or > 13)
                 {
                     MessageBox.Show(this,
-                        $"A barcode is 12 digits; you typed {digits.Length}. Please check the number on "
-                        + "the invoice.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        $"A barcode is 12 digits; that is {digits.Length}. Type the number before the "
+                        + "slash on the invoice.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return false;
                 }
                 if (digits.Length == 11 || Upc.IsValidGtin(digits)) return true;

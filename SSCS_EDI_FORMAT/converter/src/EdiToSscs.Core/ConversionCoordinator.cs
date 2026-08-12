@@ -80,7 +80,13 @@ public sealed record InvoiceDetailsRequest(
     DateOnly? SuggestedDate = null,
     /// <summary>The vendor whose paper the operator is holding, so the window can say whose invoice
     /// number it wants ("Type invoice for Bimbo") instead of a generic heading.</summary>
-    string Vendor = "")
+    string Vendor = "",
+    /// <summary>
+    /// True when the scan destroyed the printed grand total. Asking for it does not weaken the
+    /// sum-must-equal-total gate — it restores it, with a figure a person read off the paper
+    /// instead of one OCR guessed at.
+    /// </summary>
+    bool NeedsTotal = false)
 {
     // There is deliberately no SuggestedInvoiceNumber here. The parsers can read one off a scan and
     // some of them do (BlueBellSection.SuggestedInvoiceNumber), but it must not reach the prompt: it
@@ -88,8 +94,23 @@ public sealed record InvoiceDetailsRequest(
     // the one field that needs a person's eyes into an Enter keypress. Leaving it out of this record
     // is what makes that a guarantee rather than a habit.
 
-    /// <summary>True when the ticket's own date was unreadable, so the operator must supply one.</summary>
-    public bool NeedsDate => Date is null;
+    /// <summary>
+    /// Always true: the date is typed on every invoice, for every vendor.
+    ///
+    /// It used to be shown rather than asked whenever the scan produced something plausible, and a
+    /// plausible wrong date is exactly what this scanner produces. Two of the store's twenty-two
+    /// samples book themselves into the wrong year - one reads 07/13/2016 and another 07/20/2020,
+    /// both for 2026, because the last digit was eaten. A date in the *future* was caught; a date in
+    /// the past never was, however absurd, and it lands a delivery in the wrong period with nothing
+    /// said. The box is pre-filled with what was read (unlike the invoice number, a date is checked
+    /// at a glance against paper the operator is already holding) and <see cref="SuggestedDate"/>
+    /// falls back to it.
+    /// </summary>
+    public bool NeedsDate => true;
+
+    /// <summary>What to put in the date box: the reconstructed date if there is one, else what the
+    /// scan read, else nothing.</summary>
+    public DateOnly? DateToOffer => SuggestedDate ?? Date;
 }
 
 /// <summary>
@@ -149,11 +170,39 @@ public sealed record LineFieldRequest(
     /// <summary>The row's units, when they were readable — context for the operator.</summary>
     int? Units = null,
     /// <summary>The row's amount, when it was readable — context for the operator.</summary>
-    decimal? Amount = null);
+    decimal? Amount = null,
+    /// <summary>
+    /// The printed row, cut out of the scan. This is the answer to the question being asked: the
+    /// picture holds every figure even where the machine's transcription of it lost one, so the
+    /// operator reads the number off the screen instead of hunting for the row on paper. Null when
+    /// the invoice is not a scan, or its picture could not be cut.
+    /// </summary>
+    PdfRowSnip? Snip = null,
+    /// <summary>
+    /// The invoice's own column header, cut from the same page at the same width so it sits over the
+    /// row as a legend — WHSLE above WHSLE, AMOUNT above AMOUNT. Where the marker cannot be trusted
+    /// to one figure this is what keeps the question answerable, and it follows the section: a credit
+    /// row gets the CREDITS header, which has no WHSLE column of its own.
+    /// </summary>
+    PdfRowSnip? Header = null,
+    /// <summary>
+    /// The heading this vendor prints over the column being asked about, which is what the whole
+    /// question is reduced to: "Type the number under UNITS". It has to come from the vendor because
+    /// they do not agree — Dr Pepper's last column is AMOUNT and Red Bull's is TOTAL, and sending an
+    /// operator looking for a column that is not on their paper is worse than saying nothing.
+    /// Empty for a barcode, which is printed under the description rather than in a named column.
+    /// </summary>
+    string ColumnName = "",
+    /// <summary>
+    /// One short line under the box, and only where something can actually go wrong: which half of
+    /// a Dr Pepper code to type, or that UNITS means bottles rather than cases. Everything else the
+    /// picture already answers, and a hint nobody needs is a hint nobody reads.
+    /// </summary>
+    string Hint = "");
 
-/// <summary>What the operator keyed for one invoice. <see cref="Date"/> is ignored when the ticket
-/// carried a readable date of its own.</summary>
-public sealed record InvoiceDetails(string InvoiceNumber, DateOnly Date = default);
+/// <summary>What the operator keyed for one invoice. Each field is ignored when the ticket carried a
+/// readable one of its own, so a prompt can never overwrite something that was read off the paper.</summary>
+public sealed record InvoiceDetails(string InvoiceNumber, DateOnly Date = default, decimal Total = 0m);
 
 /// <summary>
 /// Asks the operator for the fields a scanned invoice cannot supply reliably.

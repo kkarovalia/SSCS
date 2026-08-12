@@ -40,6 +40,18 @@ public class RedBullPipelineTests
     private static ConversionService Service(TempDir tmp, IInvoiceDetailsPrompt prompt) =>
         new(new ConversionLogger(Path.Combine(tmp.Path, "logs")), "test", prompt);
 
+    /// <summary>
+    /// The verified ticket, answered from the paper. Two of its money columns are damaged with
+    /// nothing on their row left to check them against, so both are asked about; the paper prints
+    /// $106.90 and ($4.45), which is also what live SSCS holds for those two lines.
+    /// </summary>
+    private static ScriptedPrompt VerifiedTicketPrompt()
+    {
+        var prompt = new ScriptedPrompt("112425112379D");
+        prompt.Answers[LineField.Amount] = new Queue<string>(["106.90", "4.45"]);
+        return prompt;
+    }
+
     private static QueuedFile RedBull(string path) =>
         new() { InputPath = path, Kind = ConversionKind.Pdf, Vendor = PdfVendor.RedBull };
 
@@ -60,7 +72,7 @@ public class RedBullPipelineTests
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
-        var prompt = new ScriptedPrompt("112425112379D");
+        var prompt = VerifiedTicketPrompt();
 
         var outcome = Service(tmp, prompt).ConvertFile(RedBull(Place(tmp, "2030211863_sscs_verified")), dest);
 
@@ -71,7 +83,10 @@ public class RedBullPipelineTests
         Assert.Equal("RED BULL", xml.Descendants("Supplier").First().Element("Name")!.Value);
         Assert.Equal("112425112379D", xml.Descendants("InvoiceNumber").Single().Value);
         Assert.Equal(10, xml.Descendants("LineItem").Count());
-        Assert.Empty(prompt.LineFields);   // a clean-enough ticket asks nothing about its lines
+
+        // Exactly the two money columns the scan destroyed, and nothing else.
+        Assert.Equal(2, prompt.LineFields.Count);
+        Assert.All(prompt.LineFields, r => Assert.Equal(LineField.Amount, r.Field));
     }
 
     /// <summary>
@@ -83,7 +98,7 @@ public class RedBullPipelineTests
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
-        var prompt = new ScriptedPrompt("112425112379D");
+        var prompt = VerifiedTicketPrompt();
 
         var outcome = Service(tmp, prompt).ConvertFile(RedBull(Place(tmp, "2030211863_sscs_verified")), dest);
 
@@ -153,28 +168,98 @@ public class RedBullPipelineTests
     }
 
     /// <summary>
-    /// A ticket whose lines miss the printed total by dollars is refused, because a missing line or
-    /// an amount misread by dollars is not something anyone would catch on a Paidout screen. The
-    /// message says how far out it is and what to do.
+    /// A ticket whose lines miss the printed total by dollars is not thrown away — every amount
+    /// nobody has looked at is shown, and the file is written with the disagreement said out loud.
+    ///
+    /// This is the worst-scanned sample there is: it loses a whole product row, so no amount of
+    /// asking will make it balance. What matters is that the operator ends up holding a converted
+    /// file and a note telling them a line may be missing, rather than a refusal and no way forward.
     /// </summary>
     [Fact]
-    public void RefusesATicketWhoseMoneyIsDollarsOut()
+    public void ATicketThatCannotBalanceIsStillWrittenWithTheProblemSaidOutLoud()
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
 
         var prompt = new ScriptedPrompt("062226-1");
         // Answer everything, so the file reaches the money gate rather than stopping at a prompt.
-        prompt.Answers[LineField.Amount] = new Queue<string>(Enumerable.Repeat("53.45", 8));
-        prompt.Answers[LineField.Units] = new Queue<string>(Enumerable.Repeat("24", 8));
-        prompt.Answers[LineField.Barcode] = new Queue<string>(Enumerable.Repeat("611269818994", 8));
+        prompt.Answers[LineField.Amount] = new Queue<string>(Enumerable.Repeat("53.45", 30));
+        prompt.Answers[LineField.Units] = new Queue<string>(Enumerable.Repeat("24", 30));
+        prompt.Answers[LineField.Barcode] = new Queue<string>(Enumerable.Repeat("611269818994", 30));
 
         var outcome = Service(tmp, prompt)
             .ConvertFile(RedBull(Place(tmp, "2035261008_total_misread", "rb2.pdf")), dest);
 
-        Assert.False(outcome.Success);
-        Assert.Contains("difference", outcome.UserMessage, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(Directory.GetFiles(dest));
+        Assert.True(outcome.Success, outcome.UserMessage);
+        Assert.True(outcome.HasWarnings);
+        Assert.Single(Directory.GetFiles(dest));
+        Assert.Contains(outcome.Warnings, w => w.ReasonCode == PdfReasonCodes.TotalMismatch);
+    }
+
+
+    /// <summary>
+    /// The ticket that used to reach its own printed total through four wrong rows now comes out
+    /// **exactly right**, and this is the whole argument for asking rather than deriving.
+    ///
+    /// Its lines added up to the printed $394.84 with four of eight amounts wrong, because the errors
+    /// cancelled to the cent, and nothing said a word. Two of those rows read cleanly and wrongly —
+    /// the scanner rendered the same misreading in PRICE and TOTAL, so the row agreed with itself —
+    /// which is why the ticket not adding up is the only thing that can find them. Every amount
+    /// nobody had looked at gets shown, the operator reads the paper, and the ticket lands on its own
+    /// printed figure with the right money on every line.
+    /// </summary>
+    [Fact]
+    public void TheTicketThatAddedUpThroughTheWrongRowsComesOutRightWhenTheRowsAreChecked()
+    {
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+
+        // What the paper prints, row by row: 42.00, 36.11, 43.23, then five at 54.70.
+        var prompt = new ScriptedPrompt("081026-1");
+        prompt.Answers[LineField.Amount] = new Queue<string>(
+            ["54.70", "54.70", "42.00", "36.11", "43.23", "54.70", "54.70", "54.70"]);
+
+        var outcome = Service(tmp, prompt)
+            .ConvertFile(RedBull(Place(tmp, "2035939353_total_reached_wrong_way", "rb6.pdf")), dest);
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+
+        // All eight amounts end up read by a person, and the result is the ticket's own total.
+        Assert.Equal(8, prompt.LineFields.Count(r => r.Field == LineField.Amount));
+        var xml = XDocument.Load(Assert.Single(outcome.FinalOutputPaths));
+        Assert.Equal("394.84", xml.Descendants("TotalInvoiceDueAmt").Single().Value);
+        Assert.Equal(168, xml.Descendants("InvoiceUnitQty").Sum(e => int.Parse(e.Value)));
+        Assert.DoesNotContain(outcome.Warnings, w => w.ReasonCode == PdfReasonCodes.TotalMismatch);
+    }
+
+    /// <summary>
+    /// A ticket whose own printed total is the damaged figure still converts, once every amount has
+    /// been read off the paper.
+    ///
+    /// Its five rows plainly print $42.00 and four at $54.70, coming to $315.50, and the ticket prints
+    /// $315.60 for itself — the same 5-read-as-6 that damages the rows, landing on the total this
+    /// time. Refusing here threw away a delivery that was entirely correct. The lines are used and
+    /// the disagreement is said out loud.
+    /// </summary>
+    [Fact]
+    public void ATicketWhoseOwnTotalIsDamagedStillConvertsOnTheRowsThatWereChecked()
+    {
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+
+        var prompt = new ScriptedPrompt("071326-1");
+        prompt.Answers[LineField.Amount] = new Queue<string>(
+            ["42.00", "54.70", "54.70", "54.70", "109.40"]);
+
+        var outcome = Service(tmp, prompt)
+            .ConvertFile(RedBull(Place(tmp, "2035039295_no_total_column", "rb5.pdf")), dest);
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        var xml = XDocument.Load(Assert.Single(outcome.FinalOutputPaths));
+        Assert.Equal("315.50", xml.Descendants("TotalInvoiceDueAmt").Single().Value);
+
+        var note = Assert.Single(outcome.Warnings, w => w.ReasonCode == PdfReasonCodes.TotalMismatch);
+        Assert.Contains("read off the paper", note.Message, StringComparison.Ordinal);
     }
 
     /// <summary>A cent of scan noise is flagged and written — losing a whole delivery over a
@@ -185,7 +270,7 @@ public class RedBullPipelineTests
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
 
-        var outcome = Service(tmp, new ScriptedPrompt("112425112379D"))
+        var outcome = Service(tmp, VerifiedTicketPrompt())
             .ConvertFile(RedBull(Place(tmp, "2030211863_sscs_verified")), dest);
 
         Assert.True(outcome.Success, outcome.UserMessage);
@@ -213,6 +298,59 @@ public class RedBullPipelineTests
         var xml = XDocument.Load(outcome.FinalOutputPaths[0]);
         Assert.Equal(6, xml.Descendants("LineItem").Count());
         Assert.Equal("305.88", xml.Descendants("TotalInvoiceDueAmt").Single().Value);
+    }
+
+    /// <summary>
+    /// A one-SKU delivery, which is a shape the parser could not see at all.
+    ///
+    /// The money columns are found by where the money on the page stacks up, and a column used to
+    /// need three readings before it counted as a column. A ticket for one product has one reading
+    /// per column — so the only stack that qualified was the TOTALS block at the bottom, and with
+    /// PRICE and TOTAL calibrated onto DISCOUNT and TAX the page contained no products at all.
+    /// "No product lines could be read" for a ticket a person can read in two seconds.
+    /// </summary>
+    [Fact]
+    public void ASingleSkuTicketIsReadLikeAnyOther()
+    {
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+
+        var prompt = new ScriptedPrompt("111025-1");
+        prompt.Answers[LineField.Amount] = new Queue<string>(["53.45"]);   // the scan read $53.46
+
+        var outcome = Service(tmp, prompt)
+            .ConvertFile(RedBull(Place(tmp, "2029376829_single_line", "rb.pdf")), dest);
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        var xml = XDocument.Load(Assert.Single(outcome.FinalOutputPaths));
+        Assert.Equal("53.45", xml.Descendants("TotalInvoiceDueAmt").Single().Value);
+        Assert.Equal("611269002867", Assert.Single(xml.Descendants("InvoiceUnitId")).Value);
+        Assert.Equal(24, xml.Descendants("InvoiceUnitQty").Sum(e => int.Parse(e.Value)));
+    }
+
+    /// <summary>
+    /// Two SKUs, same story — and this one also shows why the printed total cannot be trusted to
+    /// settle a row on this vendor. Its 16oz line prints $35.11 and the scan renders `$36.11` in
+    /// PRICE and TOTAL both, so the row agrees with itself; only the ticket's own $142.01 disagrees,
+    /// and the operator reads the figure off the picture.
+    /// </summary>
+    [Fact]
+    public void ATwoLineTicketIsReadLikeAnyOther()
+    {
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+
+        var prompt = new ScriptedPrompt("010626-1");
+        prompt.Answers[LineField.Amount] = new Queue<string>(["106.90", "35.11"]);
+
+        var outcome = Service(tmp, prompt)
+            .ConvertFile(RedBull(Place(tmp, "2030959983_two_lines", "rb.pdf")), dest);
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        var xml = XDocument.Load(Assert.Single(outcome.FinalOutputPaths));
+        Assert.Equal("142.01", xml.Descendants("TotalInvoiceDueAmt").Single().Value);
+        Assert.Equal(2, xml.Descendants("LineItem").Count());
+        Assert.Equal(60, xml.Descendants("InvoiceUnitQty").Sum(e => int.Parse(e.Value)));
     }
 
     /// <summary>A PDF whose OCR was switched off is refused with the fix, not a parse error.</summary>

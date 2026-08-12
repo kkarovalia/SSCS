@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace EdiToSscs.Core;
@@ -39,6 +39,32 @@ public sealed class RedBullLine
     /// <summary>What the scan made of the TOTAL column.</summary>
     public required string PrintedAmount { get; init; }
 
+    /// <summary>
+    /// Where this row is printed, so a question about it can show the paper instead of describing
+    /// it. <see cref="LineNumber"/> is the priced row; <see cref="LastLineNumber"/> runs down to the
+    /// barcode Red Bull prints beneath it; <see cref="CodeLineNumber"/> is that barcode's own line,
+    /// which is the one to mark when the barcode is what is being asked for.
+    /// </summary>
+    public required int LineNumber { get; init; }
+    public required int LastLineNumber { get; init; }
+    public required int CodeLineNumber { get; init; }
+
+    /// <summary>The barcode exactly as the scan wrote it, used to find it on its line.</summary>
+    public required string CodeToken { get; init; }
+
+    /// <summary>The line holding the ticket's own column names, shown as the legend over a snip.</summary>
+    public required int HeaderLineNumber { get; init; }
+
+    /// <summary>
+    /// 1-based page this row is on, for a row that came off the picture and so has no line number.
+    /// With nothing to cut a band around, the whole page is shown instead, and that is only any use
+    /// if it is the right page. 0 where the text layer read the row - it has a line number.
+    /// </summary>
+    public int Page { get; init; }
+
+    /// <summary>Whether that page was scanned the wrong way up, so its picture needs turning.</summary>
+    public bool PageUpsideDown { get; init; }
+
     public bool NeedsBarcode => Gtin is null;
     public bool NeedsUnits => Units is null;
     public bool NeedsAmount => Amount is null;
@@ -70,6 +96,18 @@ public sealed class RedBullTicket
     /// </summary>
     public required IReadOnlyList<decimal> PrintedTotals { get; init; }
 
+    /// <summary>
+    /// The `Units Delivered` figure the ticket prints for itself, added up across its pages, or null
+    /// where the scan destroyed it.
+    ///
+    /// This is the only check that can see a **missing line**. Money cannot: a row the scan lost
+    /// takes its dollars with it, so the rest still adds up against a printed total that is itself
+    /// suspect on this vendor. The unit count is made of different glyphs again and does not move
+    /// when an amount is misread, so a disagreement here means a row is gone or a quantity is wrong.
+    /// Checked after the operator has answered, in <see cref="ConversionService"/>.
+    /// </summary>
+    public required int? PrintedUnits { get; init; }
+
     public required IReadOnlyList<RedBullLine> Lines { get; init; }
 
     /// <summary>
@@ -77,7 +115,18 @@ public sealed class RedBullTicket
     /// The invoice total is the sum of the lines, never the printed figure — see
     /// <see cref="RedBullPdfParser"/> for why that is the right way round on this vendor.
     /// </summary>
-    public Invoice ToInvoice(string invoiceNumber, DateOnly date, Func<RedBullLine, LineField, string> ask)
+    /// <param name="recheck">
+    /// Positions whose amount must be asked about even though the scan read one.
+    ///
+    /// This is how a ticket that does not add up gets settled. A row whose PRICE and TOTAL columns
+    /// hold the same misreading agrees with itself and is taken silently — one sample prints $54.70
+    /// and the scanner renders `$64.70` in both columns — so nothing on the page can find it. The
+    /// ticket's own total says *something* is wrong without saying what, and the rows nobody has
+    /// looked at are the only candidates. Asking about them costs a question and finds it.
+    /// </param>
+    public Invoice ToInvoice(
+        string invoiceNumber, DateOnly date, Func<RedBullLine, LineField, string> ask,
+        IReadOnlySet<int>? recheck = null)
     {
         ArgumentNullException.ThrowIfNull(ask);
         var lines = new List<InvoiceLine>(Lines.Count);
@@ -85,7 +134,9 @@ public sealed class RedBullTicket
         {
             string gtin = l.Gtin ?? RedBullPdfParser.ParseTypedGtin(ask(l, LineField.Barcode), l);
             int units = l.Units ?? RedBullPdfParser.ParseTypedUnits(ask(l, LineField.Units), l);
-            decimal amount = l.Amount ?? RedBullPdfParser.ParseTypedAmount(ask(l, LineField.Amount), l, units);
+            decimal amount = l.Amount is decimal read && recheck?.Contains(l.Position) != true
+                ? read
+                : RedBullPdfParser.ParseTypedAmount(ask(l, LineField.Amount), l, units);
 
             // SSCS wants the cost of one unit; the ticket prints the cost of a case and the extended
             // amount. Extended / units gives the same figure and needs no pack size, which matters
@@ -105,7 +156,10 @@ public sealed class RedBullTicket
         {
             SupplierName = RedBullPdfParser.SupplierName,
             InvoiceNumber = invoiceNumber,
-            Date = Date ?? date,
+            // The date the operator confirmed. It is typed on every invoice now, with what the scan
+            // read offered in the box, because a plausible wrong date is what this scanner produces
+            // and nothing in the file can catch one - see InvoiceDetailsRequest.NeedsDate.
+            Date = date,
             Total = lines.Sum(l => l.ExtendedCost),
             Lines = lines,
         };
@@ -171,8 +225,25 @@ public static partial class RedBullPdfParser
     /// <summary>Packs Red Bull actually ships, used to sanity-check a UNITS/QTY pair.</summary>
     private static readonly int[] KnownPacks = [4, 6, 12, 24, 48];
 
-    /// <summary>Parses every page of the PDF into one ticket.</summary>
-    public static RedBullTicket Parse(IReadOnlyList<PdfPage> pages, List<ConversionWarning> warnings)
+    /// <summary>
+    /// Parses every page of the PDF into one ticket.
+    /// </summary>
+    /// <param name="scannedBarcodes">
+    /// The barcodes read off the printed bars by <see cref="PdfBarcodeReader"/>, when they could be
+    /// had. Consulted only where the page has otherwise run out of ways to identify a product — see
+    /// <see cref="ResolveBarcode"/> for why it is last and not first.
+    /// </param>
+    /// <param name="vision">
+    /// The ticket as a vision model read it off the picture, when one was available. A second reader
+    /// of the same paper, made of different mistakes from the OCR — which is what makes agreement
+    /// between them worth something, and what lets a row that reconciles with itself be caught. An
+    /// empty reading leaves the parse exactly as it was.
+    /// </param>
+    public static RedBullTicket Parse(
+        IReadOnlyList<PdfPage> pages,
+        List<ConversionWarning> warnings,
+        IReadOnlyList<PdfBarcode>? scannedBarcodes = null,
+        VisionReading? vision = null)
     {
         ArgumentNullException.ThrowIfNull(pages);
         ArgumentNullException.ThrowIfNull(warnings);
@@ -187,17 +258,52 @@ public static partial class RedBullPdfParser
             figures.Add(fig);
         }
 
+        var seen = vision ?? VisionReading.Empty;
+
+        // A sheet that went through slightly crooked, or came back with a pen mark across it, reaches
+        // the OCR as nothing at all — and that is exactly the page a person can read at a glance. So
+        // where the text layer found no rows and the picture did, the picture IS the invoice.
+        //
+        // Those rows have no second reader behind them, and they are not treated as though they do.
+        // What checks them is the paper's own arithmetic: QTY x PRICE = TOTAL over three figures read
+        // separately, and the total the ticket prints for itself. A row that cannot pass those is
+        // shown to the operator exactly as it would be on any other ticket.
+        bool fromThePicture = rows.Count == 0 && seen.Rows.Count > 0;
+        if (fromThePicture)
+        {
+            rows = RowsFromThePicture(seen);
+            figures.Add(new PageFigures(0, null, null, seen.PrintedUnits, seen.PrintedTotal, null));
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                $"Nothing could be read from the text in this PDF, so all {rows.Count} lines were read "
+                + "off the picture of the page instead. Check them against the paper before sending."));
+        }
+
         if (rows.Count == 0)
             throw new EdiConversionException(PdfReasonCodes.NoLineItems,
                 "No product lines could be read from this Red Bull ticket. Check that the right vendor "
-                + "is selected and that the scan covers the whole page.");
+                + "is selected above the file list, and that the page went through the scanner the "
+                + "right way up and whole - one of the store's scans came back upside down, which "
+                + "reads as a full page of nothing.");
+
+        // Both readers found rows but not the same number of them. The text layer has lost at least
+        // one, and a lost row takes its money with it, so no total on the page can notice. Said out
+        // loud rather than patched: the rows that WERE read are still each backed by two readings,
+        // and swapping the lot for a single-reader list to recover one row would be a bad trade.
+        if (seen.Rows.Count > rows.Count)
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.NoLineItems,
+                $"The text in this PDF gives {rows.Count} lines but the picture of the page shows "
+                + $"{seen.Rows.Count}. A line is probably missing - count them against the paper "
+                + "before sending."));
 
         var (date, suggested) = ReadDate(pages, warnings);
-        var lines = Settle(rows, figures, warnings);
+
+        // Rows that came off the picture must not then be "corroborated" by the picture — that is one
+        // reader agreeing with itself, and it would wave every figure through unchecked.
+        var second = fromThePicture ? VisionReading.Empty : seen;
+        var lines = Settle(rows, figures, warnings, scannedBarcodes ?? [], second);
 
         decimal known = lines.Where(l => l.Amount is not null).Sum(l => l.Amount!.Value);
         decimal? printed = figures.Select(f => f.Roa ?? f.Invoice).FirstOrDefault(v => v is not null);
-        CheckAgainstPrintedFigures(lines, figures, warnings);
 
         return new RedBullTicket
         {
@@ -206,6 +312,9 @@ public static partial class RedBullPdfParser
             Total = known,
             PrintedTotal = printed,
             PrintedTotals = PrintedTargets(rows, figures).Select(c => c / 100m).ToList(),
+            PrintedUnits = figures.Any(f => f.UnitsDelivered is not null)
+                ? figures.Sum(f => f.UnitsDelivered ?? 0)
+                : null,
             Lines = lines,
         };
     }
@@ -217,6 +326,8 @@ public static partial class RedBullPdfParser
     {
         /// <summary>0-based page this row came off, so a page's printed figures can be matched to it.</summary>
         public required int PageIndex { get; init; }
+        /// <summary>Whether that page was scanned the wrong way up. Only ever set off the picture.</summary>
+        public bool PageUpsideDown { get; init; }
         public required string ItemNumber { get; init; }
         public required string Description { get; init; }
         public required decimal? Qty { get; init; }
@@ -226,14 +337,92 @@ public static partial class RedBullPdfParser
         public required bool IsCredit { get; init; }
         public required string PrintedUnits { get; init; }
         public required string PrintedAmount { get; init; }
+
+        /// <summary>
+        /// What the DEP / DISC / SUGAR columns take off this row, added up.
+        ///
+        /// Zero on every recent ticket, which is why the row identity was `QTY x PRICE = TOTAL` for
+        /// so long. The store's older invoices carry real per-case discounts — one prints
+        /// `$40.75 ... $1.00 ... $39.75` — and on those the old identity fails on every discounted
+        /// row, so every one went to the operator. The ticket corroborates this itself: the per-row
+        /// figures on sample 2013602330 add up to the `DISCOUNT $28.50` it prints at the bottom.
+        /// </summary>
+        public required decimal Adjustments { get; init; }
+        /// <summary>
+        /// What a vision model read on this row, where one was consulted and its reading could be
+        /// tied here beyond doubt. Null is the normal case — no key configured, no network, or a row
+        /// the alignment would not commit to — and it must leave every rule below unchanged.
+        /// </summary>
+        public VisionRow? Vision { get; set; }
+
         public List<string> CodeCandidates { get; } = [];
         public string PrintedCode { get; set; } = "";
         public string? Gtin { get; set; }
         public int? Pack { get; set; }
+
+        /// <summary>Where this row is printed, so its picture can be cut out of the scan.</summary>
+        public required int LineNo { get; init; }
+
+        /// <summary>The last line belonging to it — Red Bull prints the barcode underneath.</summary>
+        public int LastLineNo { get; set; }
+
+        /// <summary>The line the barcode is printed on, which is not the priced row.</summary>
+        public int CodeLineNo { get; set; }
+
+        /// <summary>The barcode exactly as the scan wrote it, so it can be found on that line.</summary>
+        public string CodeToken { get; set; } = "";
+
+        /// <summary>The column names printed above this row's page.</summary>
+        public int HeaderLineNo { get; set; }
     }
 
     private sealed record PageFigures(
         int PageIndex, int? Skus, decimal? Cases, int? UnitsDelivered, decimal? Invoice, decimal? Roa);
+
+    /// <summary>
+    /// Turns a reading taken off the picture into rows, for a PDF whose text layer gave up nothing.
+    ///
+    /// **Line number 0 throughout, deliberately.** These rows have no place on the page as far as the
+    /// text layer is concerned, so no question about one can cut its picture out — and a line number
+    /// invented here would land on whatever stray text the OCR did manage, putting a real row of a
+    /// real invoice on screen with the wrong figure marked on it. A question with no picture is worth
+    /// having; a question with the wrong picture is not.
+    /// </summary>
+    private static List<RawRow> RowsFromThePicture(VisionReading seen)
+    {
+        var built = new List<RawRow>(seen.Rows.Count);
+        foreach (var v in seen.Rows)
+        {
+            var row = new RawRow
+            {
+                PageIndex = Math.Max(0, v.Page - 1),
+                PageUpsideDown = v.PageUpsideDown,
+                ItemNumber = v.ItemNumber,
+                Description = v.Description,
+                Qty = v.Qty,
+                Units = v.Units,
+                Price = v.Price,
+                Amount = v.Amount,
+                IsCredit = v.IsCredit,
+                PrintedUnits = v.Units?.ToString(CultureInfo.InvariantCulture) ?? "",
+                PrintedAmount = v.Amount?.ToString("0.00", CultureInfo.InvariantCulture) ?? "",
+                // The DEP/DISC/SUGAR columns are not asked for and so are not assumed either. A row
+                // carrying a real discount will fail QTY x PRICE = TOTAL and go to the operator,
+                // which is the right outcome for a figure nobody read.
+                Adjustments = 0m,
+                LineNo = 0,
+            };
+
+            if (!string.IsNullOrEmpty(v.Barcode))
+            {
+                row.CodeCandidates.Add(v.Barcode);
+                row.PrintedCode = v.Barcode;
+            }
+
+            built.Add(row);
+        }
+        return built;
+    }
 
     private static List<RawRow> ReadPage(PdfPage page, int pageIndex, out PageFigures figures)
     {
@@ -241,16 +430,31 @@ public static partial class RedBullPdfParser
         figures = new PageFigures(pageIndex, null, null, null, null, null);
         var found = new List<RawRow>();
 
-        // The money columns are calibrated from the money on the page rather than from the column
+        // Only the rows above the totals block calibrate the columns. The block underneath prints
+        // money of its own — DISCOUNT, INVOICE, DEPOSIT, TAX, TOTAL DUE, all in one narrow stack —
+        // and on a short ticket that stack is the densest column on the page, so calibrating off the
+        // whole page hands PRICE and TOTAL to a set of figures no product row is printed in.
+        var productRegion = page.Rows
+            .TakeWhile(r => !EndOfProducts().IsMatch(string.Join(" ", r.Select(x => x.Text))))
+            .ToList();
+
+        // The money columns are calibrated from the money on those rows rather than from the column
         // headings, which are OCR debris ("PflICE", "TdrAo."). Their positions survive; their text
         // does not.
         var moneyCentres = new List<double>();
-        foreach (var row in page.Rows)
+        foreach (var row in productRegion)
             foreach (var word in row)
                 if (word.Centre > w * MoneyColumnStart && TryMoney(word.Text, out _, out _))
                     moneyCentres.Add(word.Centre);
 
-        var clusters = Cluster(moneyCentres, w * 0.03).Where(c => c.Count >= 3).ToList();
+        // Three readings stacked at the same x is what makes a column a column rather than a stray
+        // token. A ticket for one or two SKUs never has three, though, and refusing those refused a
+        // real delivery: two of the store's samples are a single-SKU drop. So where the page cannot
+        // offer three, every column found in the product region is taken — which is safe here in a
+        // way it would not be page-wide, because the totals block is no longer in the running.
+        var columns = Cluster(moneyCentres, w * 0.03);
+        var clusters = columns.Where(c => c.Count >= 3).ToList();
+        if (clusters.Count < 2) clusters = columns;
         if (clusters.Count < 2) return found;
         double priceCentre = clusters[0].Average();
         double totalCentre = clusters[^1].Average();
@@ -260,7 +464,7 @@ public static partial class RedBullPdfParser
         // and QTY has to allow a decimal because a credit page bills a fraction of a case (0.04).
         var qtyCentres = new List<double>();
         var unitCentres = new List<double>();
-        foreach (var row in page.Rows)
+        foreach (var row in productRegion)
         {
             var nums = row
                 .Where(x => x.Centre < w * QtyColumnEnd
@@ -276,6 +480,8 @@ public static partial class RedBullPdfParser
 
         RawRow? pending = null;
         var figureRows = new List<string>();
+        int headerLineNo = 0;
+        IReadOnlyList<PdfPositionedWord> previousRow = [];
         foreach (var row in MergeSplitRows(page.Rows, w, qtyCentre, totalCentre))
         {
             string text = string.Join(" ", row.Select(x => x.Text));
@@ -309,11 +515,20 @@ public static partial class RedBullPdfParser
 
             if (looksLikeProduct || orphanBarcode)
             {
+                // The column names are the row directly above the first product, and only there:
+                // Red Bull's headings are OCR debris ("PflICE", "IDEAL"), so they cannot be found by
+                // reading them. A row carrying money is a product line, not a heading — that is the
+                // guard against a damaged first product shifting the legend onto a real row.
+                if (headerLineNo == 0 && found.Count == 0 && pending is null
+                    && previousRow.Count > 0 && !previousRow.Any(x => TryMoney(x.Text, out _, out _)))
+                    headerLineNo = previousRow.Max(x => x.LineNumber);
+
                 if (pending is not null) found.Add(pending);
                 pending = looksLikeProduct
                     ? BuildRow(row, w, qtyCentre, unitCentre, priceCentre, totalWord, pageIndex)
-                    : BuildRow([], w, qtyCentre, unitCentre, priceCentre, null, pageIndex);
+                    : BuildRow([], w, qtyCentre, unitCentre, priceCentre, null, pageIndex, LineSpan(row));
             }
+            previousRow = row;
 
             // Whether or not this row started a product, it may carry that product's barcode. The
             // code is shown back to the operator when one has to be typed, so it is taken from the
@@ -324,17 +539,38 @@ public static partial class RedBullPdfParser
                 pending.CodeCandidates.AddRange(codes);
                 if (pending.PrintedCode.Length == 0)
                 {
-                    var printed = row
-                        .Select(x => Digits(x.Text))
-                        .FirstOrDefault(d => d.Length is >= 11 and <= 13);
-                    if (printed is not null) pending.PrintedCode = printed;
+                    var printed = row.FirstOrDefault(x => Digits(x.Text).Length is >= 11 and <= 13);
+                    if (printed is not null)
+                    {
+                        pending.PrintedCode = Digits(printed.Text);
+                        // The token as written, not just its digits: the marker on the picture is
+                        // placed by finding this exact word on the line, and a scan that put a stray
+                        // mark inside the code ("6112 69321210") writes a token the digits alone
+                        // would no longer match.
+                        pending.CodeToken = printed.Text;
+                        pending.CodeLineNo = printed.LineNumber;
+                    }
                 }
+
+                // Red Bull prints the barcode and its bars on the line *under* the priced row, so a
+                // row's picture is not finished until the lines below it stop belonging to it.
+                pending.LastLineNo = Math.Max(pending.LastLineNo, LineSpan(row).Last);
             }
         }
         if (pending is not null) found.Add(pending);
 
+        foreach (var r in found) r.HeaderLineNo = headerLineNo;
+
         figures = ReadFigures(figureRows, pageIndex);
         return found;
+    }
+
+    /// <summary>The first and last line number the words of a row sit on — normally the same, but a
+    /// row the scan's skew split in two spans both halves.</summary>
+    private static (int First, int Last) LineSpan(IReadOnlyList<PdfPositionedWord> row)
+    {
+        var numbered = row.Where(x => x.LineNumber > 0).ToList();
+        return numbered.Count == 0 ? (0, 0) : (numbered.Min(x => x.LineNumber), numbered.Max(x => x.LineNumber));
     }
 
     /// <summary>
@@ -389,11 +625,22 @@ public static partial class RedBullPdfParser
     private static RawRow BuildRow(
         IReadOnlyList<PdfPositionedWord> row, double w,
         double qtyCentre, double unitCentre, double priceCentre,
-        PdfPositionedWord? totalWord, int pageIndex)
+        PdfPositionedWord? totalWord, int pageIndex, (int First, int Last)? lineSpan = null)
     {
         var qtyWord = Nearest(row, qtyCentre, w * ColumnTolerance, t => QtyLike().IsMatch(t));
         var unitWord = Nearest(row, unitCentre, w * ColumnTolerance, t => CountLike().IsMatch(t));
         var priceWord = Nearest(row, priceCentre, w * ColumnTolerance, t => TryMoney(t, out _, out _));
+
+        // Everything in the money columns between PRICE and TOTAL: DEP, DISC and SUGAR. They are
+        // taken as one figure rather than three because only their sum matters to the row, and
+        // because which of the three a token belongs to is exactly the sort of thing a crooked scan
+        // gets wrong.
+        decimal adjustments = 0m;
+        if (priceWord is not null && totalWord is not null)
+            foreach (var x in row)
+                if (x.Left > priceWord.Right && x.Right < totalWord.Left
+                    && TryMoney(x.Text, out decimal middle, out _))
+                    adjustments += middle;
 
         decimal? amount = null;
         bool amountBracketed = false;
@@ -413,6 +660,7 @@ public static partial class RedBullPdfParser
             .Where(x => x.Left >= descStart && x.Right <= descEnd)
             .Select(x => x.Text)).Trim();
 
+        var span = lineSpan ?? LineSpan(row);
         return new RawRow
         {
             PageIndex = pageIndex,
@@ -425,6 +673,9 @@ public static partial class RedBullPdfParser
             IsCredit = credit,
             PrintedUnits = unitWord?.Text ?? "",
             PrintedAmount = totalWord?.Text ?? "",
+            Adjustments = adjustments,
+            LineNo = span.First,
+            LastLineNo = span.Last,
         };
     }
 
@@ -442,11 +693,37 @@ public static partial class RedBullPdfParser
 
     // ───────────────────────────────────────────────────────────────── settling the rows
 
+    /// <summary>
+    /// A note about one row, headed by the item and carrying where that row is printed.
+    ///
+    /// The shape is "&lt;item&gt; - &lt;what happened&gt;" because the "Check these lines" window splits it
+    /// there to head each entry, and because the same sentence has to stand on its own in the file
+    /// list and in the email, where there is no heading. Short on purpose: this is read standing up,
+    /// holding paper, and a second sentence is a sentence that does not get read.
+    /// </summary>
+    private static ConversionWarning Note(
+        RawRow r, string reasonCode, string what, int? lineNo = null) =>
+        new(lineNo is > 0 ? lineNo.Value : r.LineNo, reasonCode, $"{Name(r)} - {what}");
+
+    /// <summary>What to call the row: its description, else Red Bull's own item number.</summary>
+    private static string Name(RawRow r) =>
+        r.Description.Length > 0 ? r.Description
+        : r.ItemNumber.Length > 0 ? r.ItemNumber
+        : "This line";
+
     private static List<RedBullLine> Settle(
-        List<RawRow> rows, List<PageFigures> figures, List<ConversionWarning> warnings)
+        List<RawRow> rows, List<PageFigures> figures, List<ConversionWarning> warnings,
+        IReadOnlyList<PdfBarcode> scanned, VisionReading vision)
     {
+        // Tie the second reader's rows to ours before anything is settled, so every rule below can
+        // ask what the picture said about the row it is looking at. The tie is strict and often
+        // declines — see VisionReading.AlignTo for why a wrong one would be worse than none.
+        var aligned = vision.AlignTo(
+            [.. rows.Select(r => new VisionAnchor(r.ItemNumber, r.Units, r.Amount))]);
+        for (int i = 0; i < rows.Count; i++) rows[i].Vision = aligned[i];
+
         foreach (var row in rows)
-            ResolveBarcode(row, warnings);
+            ResolveBarcode(row, warnings, scanned);
 
         // Every case price the ticket charges somewhere and proves by its own arithmetic. A ticket
         // bills the same price for every product of a size, and it usually bills several, so a row
@@ -470,7 +747,7 @@ public static partial class RedBullPdfParser
         // Strongest evidence first: the total the ticket prints for itself is made of glyphs the
         // rows do not share, so it can arbitrate between two readings of a row in a way that no
         // amount of comparing the rows to each other can.
-        var byTotal = SettleByPrintedTotal(rows, figures, confirmedUnitRates, warnings);
+        var byTotal = SettleByPrintedTotal(rows, figures, confirmedUnitRates);
 
         var lines = new List<RedBullLine>(rows.Count);
         for (int i = 0; i < rows.Count; i++)
@@ -478,9 +755,9 @@ public static partial class RedBullPdfParser
             var r = rows[i];
             int position = i + 1;
             decimal? amount = byTotal[i] ?? (r.IsCredit
-                ? SettleCreditAmount(r, confirmedUnitRates, position, warnings)
-                : SettleAmount(r, confirmedPrices, position, warnings));
-            int? units = SettleUnits(r, figures, rows, amount, position, warnings);
+                ? SettleCreditAmount(r, confirmedUnitRates)
+                : SettleAmount(r, confirmedPrices, warnings));
+            int? units = SettleUnits(r, figures, rows, warnings);
 
             int sign = r.IsCredit ? -1 : 1;
             lines.Add(new RedBullLine
@@ -497,81 +774,118 @@ public static partial class RedBullPdfParser
                 PrintedCode = r.PrintedCode,
                 PrintedUnits = r.PrintedUnits,
                 PrintedAmount = r.PrintedAmount,
+                LineNumber = r.LineNo,
+                LastLineNumber = Math.Max(r.LineNo, r.LastLineNo),
+                CodeLineNumber = r.CodeLineNo,
+                CodeToken = r.CodeToken,
+                HeaderLineNumber = r.HeaderLineNo,
+                Page = r.LineNo > 0 ? 0 : r.PageIndex + 1,
+                PageUpsideDown = r.PageUpsideDown,
             });
         }
         return lines;
     }
 
     /// <summary>
-    /// Settles one row's extended amount. A delivery row offers two readings — the TOTAL column and
-    /// QTY x PRICE — and a credit row offers TOTAL against UNITS x the unit price. Agreement settles
-    /// it; disagreement is broken only by what the rest of the ticket charged for the same pack, and
-    /// otherwise left for the operator.
+    /// Settles one row's extended amount, which it may only ever do by **confirming what the ticket
+    /// actually prints** — never by working a figure out.
+    ///
+    /// A delivery row offers two readings: the TOTAL column, and QTY x PRICE. Where they agree, TOTAL
+    /// is confirmed by arithmetic over different glyphs and is taken. Where they disagree, one of
+    /// them is damaged and there is no way to tell which from the row alone, so the operator reads it
+    /// off the picture.
+    ///
+    /// Arithmetic used to break that tie, and it is exactly the wrong tool: a calculation whose input
+    /// was misread returns a confident wrong answer, and the store then books a cost nothing
+    /// downstream questions. QTY x PRICE with a damaged PRICE is not a second opinion about TOTAL —
+    /// it is the same damage wearing a different hat.
+    ///
+    /// A vision reading **is** a second opinion, because it comes off the picture rather than out of
+    /// the same OCR pass, so the two readers agreeing settles the row on its own. Where they
+    /// disagree the row's own arithmetic arbitrates — but only when it is worth something. With
+    /// QTY 1, `QTY x PRICE = TOTAL` compares a figure to itself: the scanner renders the same glyph
+    /// the same way in both columns, which is how one ticket printed $54.70 and read `$64.70` twice
+    /// and reconciled perfectly. So a single-case row may not use its own arithmetic to overrule the
+    /// picture. Where nothing independent can separate the two readers, the operator reads the row.
     /// </summary>
     private static decimal? SettleAmount(
-        RawRow r, HashSet<decimal> confirmedPrices, int position, List<ConversionWarning> warnings)
+        RawRow r, HashSet<decimal> confirmedPrices, List<ConversionWarning> warnings)
     {
         decimal? fromColumn = r.Amount;
-        decimal? fromRow = r.Qty is > 0 && r.Price is not null
-            ? decimal.Round(r.Qty.Value * r.Price.Value, 2, MidpointRounding.AwayFromZero)
-            : null;
+        decimal? fromPicture = r.Vision?.Amount;
 
-        if (fromColumn is not null && fromRow is not null && Math.Abs(fromColumn.Value - fromRow.Value) < 0.005m)
-            return fromColumn;
-
-        if (fromColumn is not null && fromRow is not null && r.Qty is > 0)
+        // What the row's own columns multiply out to, gross and after the DEP/DISC/SUGAR columns.
+        // The discount is allowed for but not demanded: those columns are `$0.00` on every recent
+        // ticket and carry real money on the older ones.
+        decimal? gross = null, net = null;
+        if (r.Qty is > 0 && r.Price is not null)
         {
-            // Both read and they disagree, so one column is damaged. The tie is broken only when
-            // exactly one of the two implied case prices is a rate this ticket charges elsewhere
-            // and proves by arithmetic there.
-            decimal impliedByColumn = fromColumn.Value / r.Qty.Value;
-            bool columnKnown = confirmedPrices.Any(p => Math.Abs(p - impliedByColumn) < 0.005m);
-            bool priceKnown = r.Price is not null && confirmedPrices.Contains(r.Price.Value);
-            if (columnKnown ^ priceKnown)
-            {
-                decimal settled = columnKnown
-                    ? fromColumn.Value
-                    : decimal.Round(r.Qty.Value * r.Price!.Value, 2, MidpointRounding.AwayFromZero);
-                warnings.Add(new ConversionWarning(position, PdfReasonCodes.LineMathMismatch,
-                    $"Line {position}: the price and the amount disagree ({Fmt(r.Price)} x {r.Qty} "
-                    + $"is not {Fmt(fromColumn)}). Used {Fmt(settled)}, which matches a rate this "
-                    + "ticket charges elsewhere."));
-                return settled;
-            }
-            return null; // ask
+            gross = decimal.Round(r.Qty.Value * r.Price.Value, 2, MidpointRounding.AwayFromZero);
+            net = decimal.Round(gross.Value - r.Adjustments, 2, MidpointRounding.AwayFromZero);
         }
 
-        if (fromColumn is not null) return fromColumn;
+        bool Multiplies(decimal? v) => Near(v, gross) || Near(v, net);
 
-        if (fromRow is not null)
+        // Two readers of the same printed figure, each with its own failures. Agreement is the
+        // corroboration this row's own columns cannot supply, and it stands whether or not PRICE
+        // survived the scan.
+        if (Near(fromColumn, fromPicture)) return fromColumn;
+
+        // No second reader: exactly the rule this vendor has always used. A TOTAL nothing confirms
+        // is asked about even though it read cleanly — on one ticket PRICE came through as "$3611"
+        // with the decimal point gone, so the row had nothing to check its TOTAL against, and the
+        // $35.11 it read for a printed $36.11 went in unquestioned.
+        if (fromPicture is null) return Multiplies(fromColumn) ? fromColumn : null;   // ask
+
+        // The readers disagree. Only arithmetic over genuinely different glyphs may settle that, and
+        // a row billing more than one case is the only place there is any: its TOTAL is a different
+        // number from its PRICE, so a glyph the scanner renders wrongly cannot damage both to match.
+        if (r.Qty is > 1 && Multiplies(fromColumn)) return fromColumn;
+        if (Multiplies(fromPicture)) return fromPicture;
+
+        // Nothing to settle: the scan read no amount at all, so there is no disagreement here, only
+        // a hole and one reader who could see the figure. Taken and flagged, rather than asked.
+        //
+        // This is a deliberate softening of the rule that governs everything else in this file, and
+        // it is worth being exact about why it is allowed. Every other case here has two claims
+        // about one figure and needs something to choose between them; a figure the scan never
+        // produced has one claim and nothing to choose. It is still a **reading** — copied off the
+        // picture, never worked out from the other columns — so no checksum is being satisfied by
+        // construction. What is given up is corroboration, which is why it goes in the file list for
+        // a person to glance at.
+        if (fromColumn is null && fromPicture is not null)
         {
-            warnings.Add(new ConversionWarning(position, PdfReasonCodes.UnreadableLine,
-                $"Line {position}: the amount column did not read; used {Fmt(fromRow)} from "
-                + $"{r.Qty} x {Fmt(r.Price)}."));
-            return fromRow;
+            warnings.Add(Note(r, PdfReasonCodes.LineMathMismatch,
+                $"the scan lost the TOTAL column, so {fromPicture:C2} was read off the picture. "
+                + "Nothing on the page confirms it - check this one against the paper."));
+            return fromPicture;
         }
 
-        return null; // ask
+        return null;   // nothing independent separates them - ask
     }
 
+    /// <summary>Two money figures that are the same to the cent, ignoring sign. Null is never near.</summary>
+    private static bool Near(decimal? a, decimal? b) =>
+        a is not null && b is not null
+        && Math.Abs(Math.Abs(a.Value) - Math.Abs(b.Value)) < 0.005m;
+
     /// <summary>
-    /// Lets the ticket's own printed total choose between the readings of each row.
+    /// Lets the ticket's own printed total **confirm** a row's own reading — never replace it.
     ///
-    /// Every row offers at most two amounts — what the TOTAL column says, and what QTY x PRICE (or,
-    /// on a credit row, UNITS x PRICE) works out to. Exactly one combination of those readings is
-    /// what Red Bull actually billed, and the printed total is the only figure on the page made of
-    /// different glyphs from the rows, so it is the only thing that can pick it out. One sample
-    /// prints $894.44 against thirteen rows whose two columns disagree; the printed figure
-    /// reconstructs all thirteen.
+    /// Every row offers at most two amounts: what the TOTAL column says, and what QTY x PRICE (or,
+    /// on a credit row, UNITS x PRICE) works out to. Where a combination of those readings adds up
+    /// to the total the ticket prints for itself, a row whose TOTAL column *already reads* the value
+    /// in that combination has been checked against a figure made of different glyphs, and is taken.
     ///
-    /// Where several combinations reach the total, only the rows on which they all agree are
-    /// settled — the rest stay open for the operator. Where none does, nothing is settled here and
-    /// the weaker per-row rules run instead: a printed total is damaged about as often as a row is,
-    /// so failing to reach it is evidence about the total as much as about the rows.
+    /// A row the search wants to **change** is not settled here, and that restriction is the whole
+    /// point. The search can only choose among readings the scan produced, so where the true figure
+    /// was never one of them, reaching the total proves nothing at all — it just means some other
+    /// wrong combination happened to add up. On ticket 2035939353 it reached the printed $394.84
+    /// exactly, through four wrong rows whose errors cancelled to the cent, and reported it with
+    /// complete confidence. Those rows go to the operator now.
     /// </summary>
     private static decimal?[] SettleByPrintedTotal(
-        List<RawRow> rows, List<PageFigures> figures, List<decimal> confirmedUnitRates,
-        List<ConversionWarning> warnings)
+        List<RawRow> rows, List<PageFigures> figures, List<decimal> confirmedUnitRates)
     {
         var settled = new decimal?[rows.Count];
 
@@ -601,8 +915,21 @@ public static partial class RedBullPdfParser
                 decimal? implied = r.IsCredit
                     ? (r.Units is > 0 && r.Price is > 0 ? r.Units.Value * r.Price.Value : null)
                     : (r.Qty is > 0 && r.Price is > 0 ? r.Qty.Value * r.Price.Value : null);
-                if (implied is not null) choices.Add(Cents(implied.Value, r.IsCredit));
+                if (implied is not null)
+                {
+                    choices.Add(Cents(implied.Value, r.IsCredit));
+                    // And the same row after its DEP/DISC/SUGAR columns, which is what the older
+                    // tickets actually bill.
+                    if (r.Adjustments != 0m)
+                        choices.Add(Cents(implied.Value - r.Adjustments, r.IsCredit));
+                }
             }
+
+            // What the picture says this row reads, which on a damaged row is frequently the only
+            // candidate that is actually correct. The other choices all come out of one OCR pass, so
+            // where that pass rendered a glyph wrongly the true figure was never among them and the
+            // search could only ever reach the printed total the wrong way round.
+            if (r.Vision?.Amount is decimal seen) choices.Add(Cents(seen, r.IsCredit));
 
             if (choices.Count == 0) return settled;   // a row with nothing to offer sinks the search
             options.Add(choices.Distinct().ToArray());
@@ -616,11 +943,19 @@ public static partial class RedBullPdfParser
             {
                 if (agreed[i] is not long cents) continue;
                 decimal value = cents / 100m;
-                settled[i] = value;
-                if (rows[i].Amount is not null && Math.Abs(Math.Abs(rows[i].Amount!.Value) - Math.Abs(value)) >= 0.005m)
-                    warnings.Add(new ConversionWarning(i + 1, PdfReasonCodes.LineMathMismatch,
-                        $"Line {i + 1}: the amount column reads {Fmt(rows[i].Amount)}; used {Fmt(value)}, "
-                        + "which is the reading that makes the ticket's own printed total."));
+
+                // Confirmation only: the combination has to match a figure some reader actually took
+                // off this row — its TOTAL column, or what the picture said. Anything else is the
+                // search inventing a figure for a row whose truth it never had, and that row goes to
+                // the operator instead.
+                //
+                // Letting the picture confirm is what repairs a row that reconciles with itself. One
+                // ticket prints $54.70 and the scan renders `$64.70` in PRICE and TOTAL both, so the
+                // row multiplies out perfectly and no arithmetic on the page can see it — but the
+                // ticket only reaches its own printed total with $54.70, and that is the figure the
+                // picture read. Before there was a second reader this row could only be asked about.
+                if (Near(rows[i].Amount, value) || Near(rows[i].Vision?.Amount, value))
+                    settled[i] = value;
             }
             return settled;
         }
@@ -705,9 +1040,13 @@ public static partial class RedBullPdfParser
     /// the printed rate is only accurate to the cent, so the exact figure comes from whichever rate
     /// the delivery page proved for that pack.
     /// </summary>
-    private static decimal? SettleCreditAmount(
-        RawRow r, List<decimal> confirmedUnitRates, int position, List<ConversionWarning> warnings)
+    private static decimal? SettleCreditAmount(RawRow r, List<decimal> confirmedUnitRates)
     {
+        // Two readers of the same printed figure, agreeing. A credit page states its money in
+        // brackets and nothing else on it is a checksum, so this is often the only corroboration a
+        // returned line can get at all.
+        if (Near(r.Amount, r.Vision?.Amount)) return r.Amount;
+
         // Both readings of this row's unit rate: from the amount column, and from the printed rate.
         var candidates = new List<decimal>();
         if (r.Amount is not null && r.Units is > 0) candidates.Add(r.Amount.Value / r.Units.Value);
@@ -722,18 +1061,18 @@ public static partial class RedBullPdfParser
             .Distinct()
             .ToList();
 
-        if (matches.Count == 1 && r.Units is > 0)
+        if (matches.Count == 1 && r.Units is > 0 && r.Amount is not null)
         {
+            // The delivery page's exact rate, which is worth more than this row's own truncated one:
+            // six returned 12oz cans are $13.36, not 6 x $2.23. Taken only when the amount column
+            // already agrees to the rounding, so this corrects the printing and not the reading.
             decimal exact = decimal.Round(r.Units.Value * matches[0], 2, MidpointRounding.AwayFromZero);
-            if (r.Amount is not null && Math.Abs(exact - r.Amount.Value) >= 0.005m)
-                warnings.Add(new ConversionWarning(position, PdfReasonCodes.LineMathMismatch,
-                    $"Line {position}: the returned amount reads {Fmt(r.Amount)} but {r.Units} units at "
-                    + $"this ticket's rate is {Fmt(exact)}. Used {Fmt(exact)}."));
-            return exact;
+            if (Math.Abs(exact - r.Amount.Value) <= 0.005m * r.Units.Value + 0.005m) return exact;
+            return null; // ask
         }
 
-        // No delivery page to check against (a credit-only ticket). Fall back to the row's own two
-        // readings, which have to agree to within the cent the printed rate is rounded to.
+        // No delivery page to check against (a credit-only ticket). The row's own two readings have
+        // to agree, to within the cent the printed rate is rounded to.
         if (r.Amount is not null && r.Price is > 0 && r.Units is > 0)
         {
             decimal implied = decimal.Round(r.Units.Value * r.Price.Value, 2, MidpointRounding.AwayFromZero);
@@ -742,52 +1081,57 @@ public static partial class RedBullPdfParser
             return null; // ask
         }
 
-        return r.Amount; // only one reading, and nothing to contradict it
+        return null; // nothing confirms it - ask
     }
 
     /// <summary>
-    /// Settles one row's unit count. UNITS is the one figure the money cannot check — misread it and
-    /// the unit cost absorbs the difference, so the invoice still balances to the penny while the
-    /// store's stock is wrong. The pack size is the check, and the page's own unit count breaks ties.
+    /// Settles one row's unit count, which — like the money — it may only do by confirming what is
+    /// printed. UNITS is the figure the money can never check: misread it and the unit cost absorbs
+    /// the difference, so the invoice balances to the penny while the store's stock is wrong.
+    ///
+    /// The pack size and the page's own unit count are **checks, not sources**. Filling a missing
+    /// UNITS from QTY x pack is a calculation resting on QTY having been read correctly, and a wrong
+    /// QTY there produces a quantity that agrees with everything and is simply not what arrived.
     /// </summary>
     private static int? SettleUnits(
-        RawRow r, List<PageFigures> figures, List<RawRow> rows,
-        decimal? amount, int position, List<ConversionWarning> warnings)
+        RawRow r, List<PageFigures> figures, List<RawRow> rows, List<ConversionWarning> warnings)
     {
-        // A credit row prints a fraction of a case in QTY, so the pack identity does not apply. Its
-        // unit count is checked against the money instead.
-        if (r.IsCredit)
-        {
-            if (r.Units is > 0) return r.Units;
-            if (amount is not null && r.Price is > 0)
-            {
-                int rebuilt = (int)decimal.Round(Math.Abs(amount.Value) / r.Price.Value, 0, MidpointRounding.AwayFromZero);
-                if (rebuilt > 0)
-                {
-                    warnings.Add(new ConversionWarning(position, PdfReasonCodes.UnreadableLine,
-                        $"Line {position}: the units column did not read; used {rebuilt} from "
-                        + $"{Fmt(amount)} at {Fmt(r.Price)} each."));
-                    return rebuilt;
-                }
-            }
-            return null; // ask
-        }
+        int? fromPicture = r.Vision?.Units is int v and > 0 ? v : null;
+
+        // A credit row prints a fraction of a case in QTY, so the pack identity does not apply.
+        if (r.IsCredit) return r.Units is > 0 ? r.Units : null;
 
         int? fromPack = r.Pack is > 0 && r.Qty is > 0 && decimal.Truncate(r.Qty.Value) == r.Qty.Value
             ? (int)(r.Qty.Value * r.Pack.Value)
             : null;
 
+        // Two readers on the printed column, agreeing. That outranks the pack arithmetic below it,
+        // which rests on QTY having been read correctly and is a check rather than a source.
+        if (r.Units is > 0 && fromPicture == r.Units) return r.Units;
+
+        // The scan lost the column outright, so there is nothing here to disagree with — only a hole
+        // and one reader who could see the count. Where the pack this product is billed in predicts
+        // the same number the figure is confirmed and goes in quietly; where nothing predicts it, the
+        // reading is still taken but flagged, because a count nobody read at all is worse than one
+        // read once. See SettleAmount for the full argument.
         if (r.Units is null or <= 0)
         {
-            if (fromPack is null) return null; // ask
-            warnings.Add(new ConversionWarning(position, PdfReasonCodes.UnreadableLine,
-                $"Line {position}: the units column did not read; used {fromPack} from "
-                + $"{r.Qty} case(s) of {r.Pack}."));
-            return fromPack;
+            if (fromPicture is null) return null;                       // neither reader saw it - ask
+            if (fromPicture == fromPack) return fromPicture;
+
+            warnings.Add(Note(r, PdfReasonCodes.QtyMismatch,
+                $"the scan lost the UNITS column, so {fromPicture} was read off the picture. "
+                + "Nothing on the page confirms it - check this one against the paper."));
+            return fromPicture;
         }
 
         if (fromPack is null) return r.Units;      // no pack on record to check it against
         if (r.Units == fromPack) return r.Units;
+
+        // UNITS and the pack arithmetic disagree, and the picture lands on the pack's answer: the
+        // column was misread and two unrelated things say what it should have been. A picture
+        // reading that agrees with neither leaves three answers on the table and goes to a person.
+        if (fromPicture is not null && fromPicture == fromPack) return fromPack;
 
         // Both readable and disagreeing. The page prints its own unit count; whichever reading makes
         // that figure is the right one, and if neither does, a person decides.
@@ -797,32 +1141,12 @@ public static partial class RedBullPdfParser
             int othersRead = rows
                 .Where(x => !ReferenceEquals(x, r) && !x.IsCredit && x.PageIndex == r.PageIndex)
                 .Sum(x => x.Units ?? 0);
-            if (othersRead + fromPack.Value == printed)
-            {
-                warnings.Add(new ConversionWarning(position, PdfReasonCodes.QtyMismatch,
-                    $"Line {position}: the units column read {r.Units} but {r.Qty} case(s) of {r.Pack} "
-                    + $"is {fromPack}. Used {fromPack}, which is what makes the ticket's own count of {printed}."));
-                return fromPack;
-            }
+            // Only the *printed* reading may be confirmed this way. Where the page's count backs the
+            // pack arithmetic instead, two calculations agree with each other and neither of them is
+            // what the paper says, so the operator reads it.
             if (othersRead + r.Units.Value == printed) return r.Units;
         }
         return null; // ask
-    }
-
-    private static void CheckAgainstPrintedFigures(
-        IReadOnlyList<RedBullLine> lines, List<PageFigures> figures, List<ConversionWarning> warnings)
-    {
-        // The money is checked again in ConversionService once the operator has filled in whatever
-        // could not be read, so it is not repeated here. What is worth saying now is anything about
-        // the unit counts, which no later step revisits.
-        if (lines.Any(l => l.NeedsAnything)) return;
-
-        int units = lines.Sum(l => l.Units!.Value);
-        int? printedUnits = figures.Sum(f => f.UnitsDelivered ?? 0) is var pu && figures.Any(f => f.UnitsDelivered is not null)
-            ? pu : null;
-        if (printedUnits is not null && lines.All(l => !l.IsCredit) && printedUnits != units)
-            warnings.Add(new ConversionWarning(0, PdfReasonCodes.QtyMismatch,
-                $"The lines come to {units} units but the ticket prints {printedUnits}."));
     }
 
     // ─────────────────────────────────────────────────────────────────────── the barcode
@@ -830,32 +1154,90 @@ public static partial class RedBullPdfParser
     /// <summary>
     /// Works out which product a row is for. The ladder runs strongest evidence first and stops as
     /// soon as one rung answers; a row that reaches the bottom is handed to the operator.
+    ///
+    /// This is the one figure on the ticket that is **not** settled by arithmetic, and that is why it
+    /// still resolves itself where the money no longer does. A barcode carries its own check digit,
+    /// and <see cref="RedBullCatalog"/> is an independent record of what this vendor actually sells:
+    /// a repair has to satisfy both, and neither knows anything about the other. Compare the money,
+    /// where "QTY x PRICE" is not a second opinion about TOTAL but the same scan damage wearing a
+    /// different hat — which is exactly how ticket 2035939353 reached its printed total through
+    /// four wrong rows.
+    ///
+    /// It also cannot be replaced by asking without ruining a *clean* scan: one whole 300 dpi sample
+    /// reads its entire barcode column as "611260..." for "611269...", so dropping the repairs puts a
+    /// question on every row of a ticket that is otherwise perfect — and a question on a good scan
+    /// is what teaches people to click through the questions that matter.
     /// </summary>
-    private static void ResolveBarcode(RawRow r, List<ConversionWarning> warnings)
+    private static void ResolveBarcode(
+        RawRow r, List<ConversionWarning> warnings, IReadOnlyList<PdfBarcode> scanned)
     {
         var candidates = r.CodeCandidates.Distinct(StringComparer.Ordinal).ToList();
+        string? fromBars = ScannedCodeFor(r, scanned);
 
         // 1. A reading that satisfies its own check digit and carries Red Bull's prefix.
         foreach (string c in candidates)
             if (Upc.IsValidUpcA12(c) && c.StartsWith(RedBullCatalog.Prefix, StringComparison.Ordinal))
             {
+                // Two readings of the same printed barcode, each protected by its own check digit,
+                // arrived at different products. One of them is wrong and nothing on the page says
+                // which, so this is the operator's - the whole reason the bars are worth reading is
+                // that they fail differently from the OCR, and that cuts both ways.
+                if (fromBars is not null && !string.Equals(fromBars, c, StringComparison.Ordinal))
+                {
+                    warnings.Add(Note(r, PdfReasonCodes.UpcCheckDigit,
+                        $"the digits under the barcode read {c} but the bars themselves decode to "
+                        + $"{fromBars}. Both pass their own check digit, so one of them is a bad read "
+                        + "and the page cannot say which.", r.CodeLineNo));
+                    r.Gtin = null;
+                    r.Pack = PackFromRow(r);
+                    return;
+                }
+
                 r.Gtin = c;
                 r.Pack = RedBullCatalog.Find(c)?.Pack ?? PackFromRow(r);
                 return;
             }
 
-        // 2. A single-digit repair. For a code whose prefix already reads correctly there are six of
+        // 2. The printed bars, decoded off the picture.
+        //
+        //    Ahead of every repair below, and that ordering is the point. A repair is a *guess*: for
+        //    a code whose prefix already reads correctly, changing any one of the last six digits
+        //    restores the check digit, so a damaged reading has six equally valid candidates and the
+        //    catalogue picks between them by what this vendor has been seen to sell. That is how the
+        //    store's tickets ended up booking SPRING CHRY as SUMMER LIME and SUGARFREE 16OZ as
+        //    RED BULL 16OZ - silently, because the money reconciles whatever code goes out. The bars
+        //    are not a guess. They are a second reading of the same printed barcode, decoded by code
+        //    that shares nothing with the OCR and carrying its own error correction, and on the
+        //    store's twenty tickets they hold the right answer for five of the six rows the repairs
+        //    get wrong.
+        //
+        //    They are not clean either - 6 of 174 decodes were wrong, and satisfied their own check
+        //    digit - which is why the prefix test above them, the one-per-row rule, and the conflict
+        //    check against a clean reading all have to stay. What is being chosen here is a reading
+        //    over a guess, not a reading over another reading.
+        if (fromBars is not null)
+        {
+            var scannedEntry = RedBullCatalog.Find(fromBars);
+            warnings.Add(Note(r, PdfReasonCodes.UpcCheckDigit,
+                $"the digits under the barcode did not read (the scan made them \"{r.PrintedCode}\"), "
+                + $"so the code was taken off the printed bars instead: {fromBars}"
+                + (scannedEntry is not null
+                    ? $" ({scannedEntry.Description})."
+                    : ". This vendor has not been seen selling that product before - worth a look at "
+                      + "the line in SSCS."),
+                r.CodeLineNo));
+            r.Gtin = fromBars;
+            r.Pack = scannedEntry?.Pack ?? PackFromRow(r);
+            return;
+        }
+
+        // 3. A single-digit repair. For a code whose prefix already reads correctly there are six of
         //    these, so the catalogue picks; where only one repair exists at all, the check digit has
         //    already picked.
         var repairs = SingleDigitRepairs(candidates);
         var known = repairs.Where(x => RedBullCatalog.Find(x) is not null).ToList();
         if (known.Count == 1)
         {
-            // Two independent things agree here — the candidate satisfies its own check digit, and
-            // it is a product this vendor is on record as selling. Nothing is left for a person to
-            // decide, so this does not warn. It would otherwise warn on almost every ticket: one
-            // whole 300 dpi sample reads its entire barcode column as "611260..." for "611269...",
-            // and warnings that fire on every conversion teach people to click past them.
             Accept(r, known[0], quiet: true, warnings);
             return;
         }
@@ -865,7 +1247,7 @@ public static partial class RedBullPdfParser
             return;
         }
 
-        // 3. A catalogued product two digits from the reading that also agrees on pack size. Two
+        // 4. A catalogued product two digits from the reading that also agrees on pack size. Two
         //    digits is further than Bimbo is ever allowed to go, and safe here only because the
         //    candidate still has to satisfy its own check digit and match the row's arithmetic.
         int? rowPack = PackFromRow(r);
@@ -879,7 +1261,7 @@ public static partial class RedBullPdfParser
             return;
         }
 
-        // 4. Red Bull's own item number, which is a second encoding of the same product.
+        // 5. Red Bull's own item number, which is a second encoding of the same product.
         var byItem = RedBullCatalog.FindByItemNumber(Digits(r.ItemNumber));
         if (byItem is not null && (rowPack is null || byItem.Pack == rowPack))
         {
@@ -892,20 +1274,61 @@ public static partial class RedBullPdfParser
     }
 
     /// <summary>
+    /// The barcode decoded off the bars printed on this row, or null when there is not exactly one.
+    ///
+    /// Three things have to hold, and each one threw out a real mis-decode on the store's samples:
+    ///
+    ///  * **It has to be a UPC-A carrying Red Bull's company prefix.** `611169546010` and
+    ///    `611260321110` are both valid UPC-A codes that a smudged barcode decoded to, and neither
+    ///    is a Red Bull code at all.
+    ///  * **It has to sit on this row.** Red Bull prints the bars beside the TOTAL column of the
+    ///    priced row and the digits on the line beneath, so a row owns the lines from its own down
+    ///    to the last one belonging to it. A code borrowed from the row above books the delivery
+    ///    onto another product with every total on the page still agreeing.
+    ///  * **There has to be exactly one.** Two different codes decoded across the same row means
+    ///    the reading or the placement is wrong, and there is no way to tell which - so neither is
+    ///    used and the operator is asked, as before.
+    /// </summary>
+    private static string? ScannedCodeFor(RawRow r, IReadOnlyList<PdfBarcode> scanned)
+    {
+        if (scanned.Count == 0 || r.LineNo <= 0) return null;
+
+        int last = Math.Max(r.LineNo, Math.Max(r.LastLineNo, r.CodeLineNo));
+        var onThisRow = scanned
+            .Where(b => b.LineNumber >= r.LineNo && b.LineNumber <= last)
+            .Select(b => b.Text)
+            .Where(t => t.Length == 12
+                        && Upc.IsValidUpcA12(t)
+                        && t.StartsWith(RedBullCatalog.Prefix, StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        return onThisRow.Count == 1 ? onThisRow[0] : null;
+    }
+
+    /// <summary>
     /// Takes a repaired barcode. <paramref name="quiet"/> is for a repair two independent checks
-    /// already agree on; anything less certain says so, because it changes which product the store
-    /// is billed for and nothing downstream would notice.
+    /// already agree on; anything less certain says so in the file list, because it changes which
+    /// product the store is billed for and nothing downstream would notice.
     /// </summary>
     private static void Accept(RawRow r, string gtin, bool quiet, List<ConversionWarning> warnings)
     {
         var entry = RedBullCatalog.Find(gtin);
         if (!quiet)
-            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UpcCheckDigit,
-                $"The scan read a barcode as \"{r.PrintedCode}\", which is not a valid one; used {gtin}"
-                + (entry is not null ? $" ({entry.Description})." : ".")
-                + " Check that line against the paper."));
+            warnings.Add(Note(r, PdfReasonCodes.UpcCheckDigit,
+                $"the barcode read {r.PrintedCode}, which fails its check digit. Used {gtin}"
+                + (entry is not null ? $" ({entry.Description})." : "."),
+                r.CodeLineNo));
         r.Gtin = gtin;
         r.Pack = entry?.Pack ?? PackFromRow(r);
+    }
+
+    private static int Differences(string a, string b)
+    {
+        if (a.Length != b.Length) return int.MaxValue;
+        int n = 0;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) n++;
+        return n;
     }
 
     private static int? PackFromRow(RawRow r)
@@ -940,14 +1363,6 @@ public static partial class RedBullPdfParser
             }
         }
         return found.ToList();
-    }
-
-    private static int Differences(string a, string b)
-    {
-        if (a.Length != b.Length) return int.MaxValue;
-        int n = 0;
-        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) n++;
-        return n;
     }
 
     /// <summary>

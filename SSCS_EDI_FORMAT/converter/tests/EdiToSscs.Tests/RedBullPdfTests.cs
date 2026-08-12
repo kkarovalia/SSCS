@@ -24,6 +24,36 @@ public class RedBullPdfTests
 
     private static RedBullTicket Parse(string name) => Parse(name, out _);
 
+    /// <summary>
+    /// What the paper prints for the figures a ticket's scan destroyed, read off the picture the
+    /// prompt puts on screen \u2014 which is the whole point of the prompt carrying one.
+    ///
+    /// Every entry here was read from the scan itself, and the two on the verified ticket are
+    /// confirmed a second time by the live SSCS screen: WNTR FUJAPP at $106.90 and the PINK credit at
+    /// $4.45. Anything asked about that is not in this table fails the test rather than being
+    /// answered with something plausible, so a change that starts asking new questions cannot slip
+    /// through by having them quietly answered.
+    /// </summary>
+    private static readonly Dictionary<(string Description, LineField Field), string> PaperSays = new()
+    {
+        // 2030211863_sscs_verified - PRICE misread $53.46 for $53.45, so nothing confirmed TOTAL
+        { ("WNTB FUJAPP 1202 LS", LineField.Amount), "106.90" },
+        // 2030211863_sscs_verified - the credit's own TOTAL read ($1.46) for a printed ($4.45)
+        { ("PINK 120215", LineField.Amount), "4.45" },
+        // 2034630731_roa_misread - TOTAL read $63.45 for a printed $53.45
+        { ("ICED 1202", LineField.Amount), "53.45" },
+        // 2034630731_roa_misread - UNITS read 46 for a printed 48
+        { ("RED BULL 120218", LineField.Units), "48" },
+    };
+
+    /// <summary>Answers a prompt from the paper, and fails loudly on a question nobody expected.</summary>
+    private static string FromThePaper(RedBullLine line, LineField field) =>
+        PaperSays.TryGetValue((line.Description, field), out string? answer)
+            ? answer
+            : throw new Xunit.Sdk.XunitException(
+                $"unexpected question: {field} for \"{line.Description}\" (line {line.Position}). "
+                + "Either the parser started asking something new, or the paper needs reading.");
+
     // ───────────────────────────────────────────────────── the live SSCS round trip
 
     /// <summary>
@@ -38,10 +68,16 @@ public class RedBullPdfTests
         var ticket = Parse("2030211863_sscs_verified");
 
         Assert.Equal(10, ticket.Lines.Count);
-        Assert.All(ticket.Lines, l => Assert.False(l.NeedsAnything,
-            $"line {l.Position} ({l.Description}) should not need the operator"));
         Assert.Equal(145, ticket.Lines.Sum(l => l.Units!.Value));
         Assert.Equal(5, ticket.Lines.Count(l => l.IsCredit));
+
+        // Exactly two figures on this ticket are asked about, and both are money the scan destroyed
+        // with nothing on the row left to check it against. Every unit count reads and confirms.
+        Assert.All(ticket.Lines, l => Assert.False(l.NeedsUnits || l.NeedsBarcode,
+            $"line {l.Position} ({l.Description}) should not need the operator"));
+        Assert.Equal(
+            new[] { "WNTB FUJAPP 1202 LS", "PINK 120215" },
+            ticket.Lines.Where(l => l.NeedsAmount).Select(l => l.Description).ToArray());
     }
 
     /// <summary>
@@ -80,8 +116,7 @@ public class RedBullPdfTests
     public void EachLineLandsOnTheItemAndQuantitySscsShows(string sscsId, int qty, decimal exCost)
     {
         var invoice = Parse("2030211863_sscs_verified")
-            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), (_, _) => throw new Xunit.Sdk.XunitException(
-                "this ticket must convert without asking the operator anything"));
+            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), FromThePaper);
 
         var match = invoice.Lines.FirstOrDefault(l =>
             l.Gtin[..^1] == sscsId && l.Units == qty && Math.Abs(l.ExtendedCost - exCost) <= 0.01m);
@@ -102,7 +137,7 @@ public class RedBullPdfTests
     public void TheOneCentTheScannerCostsIsFlaggedRatherThanHidden()
     {
         var invoice = Parse("2030211863_sscs_verified")
-            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), (_, _) => "");
+            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), FromThePaper);
 
         var exact = LiveSscsLineItems
             .Select(row => ((string)row[0], (int)row[1], (decimal)row[2]))
@@ -122,11 +157,15 @@ public class RedBullPdfTests
     [Fact]
     public void ACreditIsPricedFromTheDeliveryPageRateNotItsOwnRoundedOne()
     {
-        var ticket = Parse("2030211863_sscs_verified");
-        var pink = ticket.Lines.Single(l => l.Gtin == "611269003123");
+        var invoice = Parse("2030211863_sscs_verified")
+            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), FromThePaper);
+        var pink = invoice.Lines.Single(l => l.Gtin == "611269003123" && l.Units == -2);
 
-        Assert.Equal(-2, pink.Units);
-        Assert.Equal(-4.45m, pink.Amount);           // 2 x 53.45/24, not 2 x the printed 2.22
+        // The paper prints ($4.45) and the scan read ($1.46), so this one is asked about now rather
+        // than rebuilt from the delivery page's rate. What matters is unchanged: SSCS holds -2 at
+        // 2.2271, which is 2 x 53.45/24 and not 2 x the credit page's rounded $2.22.
+        Assert.Equal(-4.45m, invoice.Lines.Single(l => l.Gtin == "611269003123" && l.Units == -2).ExtendedCost);
+        Assert.Equal(2.2250m, pink.UnitCost);
     }
 
     // ─────────────────────────────────────────────────────────── the sample tickets
@@ -175,8 +214,9 @@ public class RedBullPdfTests
     public void ADamagedRoaDoesNotCondemnATicketTheInvoiceLineAgreesWith()
     {
         var ticket = Parse("2034630731_roa_misread");
+        var invoice = ticket.ToInvoice("TEST", new DateOnly(2026, 7, 1), FromThePaper);
 
-        Assert.Equal(599.14m, ticket.Lines.Sum(l => l.Amount!.Value));
+        Assert.Equal(599.14m, invoice.LineTotal);
         Assert.Contains(599.14m, ticket.PrintedTotals);
         Assert.Contains(509.14m, ticket.PrintedTotals);
     }
@@ -260,10 +300,35 @@ public class RedBullPdfTests
     public void ReturnsAreNegativeUnitsOnTheSameInvoice()
     {
         var invoice = Parse("2030211863_sscs_verified")
-            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), (_, _) => "");
+            .ToInvoice("112425112379D", new DateOnly(2025, 11, 24), FromThePaper);
 
         Assert.Equal(5, invoice.Lines.Count(l => l.Units < 0));
         Assert.All(invoice.Lines, l => Assert.True(l.UnitCost > 0m, "unit costs are always positive"));
+    }
+
+    /// <summary>
+    /// A returned line stays negative however the operator types its amount.
+    ///
+    /// This is the PINK credit on the verified ticket, whose TOTAL the scan destroyed — the prompt in
+    /// front of the operator shows "($4.45)". Brackets, a minus, or plain digits all land on the same
+    /// line, because the sign comes from the row sitting on a credit page and never from the typing.
+    /// SSCS holds this one at -2 @ 2.2271.
+    /// </summary>
+    [Theory]
+    [InlineData("4.45")]
+    [InlineData("-4.45")]
+    [InlineData("(4.45)")]
+    [InlineData("($4.45)")]
+    [InlineData("$4.45")]
+    public void ATypedCreditGoesInNegativeWhicheverWayItIsWritten(string typed)
+    {
+        var invoice = Parse("2030211863_sscs_verified").ToInvoice(
+            "112425112379D", new DateOnly(2025, 11, 24),
+            (line, field) => line.Description == "PINK 120215" ? typed : FromThePaper(line, field));
+
+        var pink = invoice.Lines.Single(l => l.Gtin == "611269003123" && l.Units == -2);
+        Assert.Equal(-4.45m, pink.ExtendedCost);
+        Assert.True(pink.UnitCost > 0m, "a return is a negative quantity at a positive cost");
     }
 
     /// <summary>Retail is seeded at 45% and always ends in a 9 — the store's rule for every vendor.</summary>
@@ -271,7 +336,7 @@ public class RedBullPdfTests
     public void SeedsARetailThatAlwaysEndsInNine()
     {
         var invoice = Parse("2036629370_clean_300dpi")
-            .ToInvoice("TEST", new DateOnly(2026, 8, 3), (_, _) => "");
+            .ToInvoice("TEST", new DateOnly(2026, 8, 3), FromThePaper);
 
         Assert.All(invoice.Lines, l =>
         {

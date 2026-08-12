@@ -95,7 +95,9 @@ public class ChubiwinosPipelineTests
         Assert.Equal(460.23m, request.Total);
         Assert.Equal(8, request.LineCount);
         Assert.Equal(new DateOnly(2026, 6, 15), request.Date);
-        Assert.False(request.NeedsDate);
+        // Always a box, pre-filled with what the ticket printed.
+        Assert.True(request.NeedsDate);
+        Assert.Equal(new DateOnly(2026, 6, 15), request.DateToOffer);
     }
 
     /// <summary>

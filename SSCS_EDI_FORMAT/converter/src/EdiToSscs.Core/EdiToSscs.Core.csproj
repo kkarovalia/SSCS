@@ -8,6 +8,12 @@
 
   <ItemGroup>
     <PackageReference Include="PdfPig" Version="0.1.15" />
+    <!-- Reads the printed barcodes off the bars themselves, which is the one thing on a scanned
+         invoice that carries its own error correction. Pure managed; the Windows binding is only
+         the bridge from a decoded page image to ZXing's luminance source. -->
+    <PackageReference Include="ZXing.Net" Version="0.16.9" />
+    <PackageReference Include="ZXing.Net.Bindings.Windows.Compatibility" Version="0.16.12" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
     <!-- Windows DPAPI, used only to encrypt the sending mailbox's app password at rest. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>

@@ -207,26 +207,34 @@ public class BlueBellDamagedDateTests
     }
 
     /// <summary>
-    /// A prompt must never be able to move a date the ticket printed clearly. Only the invoice
-    /// number is ever taken from the operator on a ticket that scanned properly.
+    /// The date is typed on every ticket, and what the operator confirms is what the invoice carries
+    /// — even on a ticket that scanned perfectly.
+    ///
+    /// It used to be shown rather than asked whenever the scan produced something plausible, and a
+    /// plausible wrong date is exactly what these scanners produce: two of the store's twenty-two
+    /// samples booked themselves into 2016 and 2020, both for 2026, because the last digit was eaten.
+    /// A future date was caught; a past one never was. The box is pre-filled with what was read, so
+    /// confirming a good one costs a glance.
     /// </summary>
     [Fact]
-    public void ADateTheTicketPrintedIsNotOverwrittenByThePrompt()
+    public void TheDateIsAlwaysAskedAndWhatTheOperatorConfirmsIsWhatIsUsed()
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
         string input = Path.Combine(tmp.Path, "blue bell ticket.pdf");
         File.WriteAllBytes(input, File.ReadAllBytes(@"Fixtures\PDF\BLUEBELL_033100786112.pdf"));
 
-        var prompt = new Prompt("033100786112", new DateOnly(2001, 1, 1));
+        var prompt = new Prompt("033100786112", new DateOnly(2026, 3, 20));
         var outcome = new ConversionService(new ConversionLogger(Path.Combine(tmp.Path, "logs")), "test", prompt)
             .ConvertFile(BlueBell(input), dest);
 
         Assert.True(outcome.Success, outcome.UserMessage);
         foreach (string path in outcome.FinalOutputPaths)
-            Assert.Equal("2026-03-19", XDocument.Load(path).Descendants("InvoiceDate").Single().Value);
+            Assert.Equal("2026-03-20", XDocument.Load(path).Descendants("InvoiceDate").Single().Value);
 
-        Assert.All(prompt.Seen, r => Assert.False(r.NeedsDate));
+        // Always a box, and always pre-filled with what the ticket printed - 03/19/2026 here.
+        Assert.All(prompt.Seen, r => Assert.True(r.NeedsDate));
+        Assert.All(prompt.Seen, r => Assert.Equal(new DateOnly(2026, 3, 19), r.DateToOffer));
     }
 
     /// <summary>

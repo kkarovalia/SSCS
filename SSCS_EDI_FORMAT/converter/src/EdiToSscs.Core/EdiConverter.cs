@@ -42,7 +42,14 @@ public static class ReasonCodes
     public const string NoProductRecords = "NO_PRODUCT_RECORDS";
 }
 
-/// <summary>A non-fatal conversion note attached to a specific record.</summary>
+/// <summary>
+/// A non-fatal conversion note attached to a specific record.
+///
+/// A note is written to the log and shown beside the file in the list. It never opens a window of
+/// its own: the only thing that interrupts an operator is a question the converter cannot answer
+/// itself, and anything it *can* answer is now asked about rather than noted — so by the time a
+/// note is written there is nothing left for anyone to do about it.
+/// </summary>
 public sealed record ConversionWarning(int LineNumber, string ReasonCode, string Message);
 
 /// <summary>Result of a successful in-memory conversion.</summary>
