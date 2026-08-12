@@ -65,8 +65,6 @@ public sealed class RedBullLine
     /// <summary>Whether that page was scanned the wrong way up, so its picture needs turning.</summary>
     public bool PageUpsideDown { get; init; }
 
-    /// <summary>How far down the page the row is, 0-1000, purely to scroll the picture to it.</summary>
-    public int? VerticalPosition { get; init; }
 
     public bool NeedsBarcode => Gtin is null;
     public bool NeedsUnits => Units is null;
@@ -331,8 +329,6 @@ public static partial class RedBullPdfParser
         public required int PageIndex { get; init; }
         /// <summary>Whether that page was scanned the wrong way up. Only ever set off the picture.</summary>
         public bool PageUpsideDown { get; init; }
-        /// <summary>How far down the page the row is, 0-1000, purely to scroll the picture to it.</summary>
-        public int? VerticalPosition { get; init; }
         public required string ItemNumber { get; init; }
         public required string Description { get; init; }
         public required decimal? Qty { get; init; }
@@ -402,7 +398,6 @@ public static partial class RedBullPdfParser
             {
                 PageIndex = Math.Max(0, v.Page - 1),
                 PageUpsideDown = v.PageUpsideDown,
-                VerticalPosition = v.VerticalPosition,
                 ItemNumber = v.ItemNumber,
                 Description = v.Description,
                 Qty = v.Qty,
@@ -787,7 +782,6 @@ public static partial class RedBullPdfParser
                 HeaderLineNumber = r.HeaderLineNo,
                 Page = r.LineNo > 0 ? 0 : r.PageIndex + 1,
                 PageUpsideDown = r.PageUpsideDown,
-                VerticalPosition = r.VerticalPosition,
             });
         }
         return lines;

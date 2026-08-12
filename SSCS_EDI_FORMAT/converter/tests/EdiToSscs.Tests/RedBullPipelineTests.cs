@@ -20,12 +20,24 @@ public class RedBullPipelineTests
         /// <summary>Canned answers by field, used in order. Null means "skip the file".</summary>
         public Dictionary<LineField, Queue<string>> Answers { get; } = [];
 
+        /// <summary>
+        /// What the operator types into the date box. There is no pre-fill any more, so a test that
+        /// cares about the date has to supply one the way a person would - off the paper.
+        /// </summary>
+        public DateOnly DateTyped { get; set; }
+
+        /// <summary>Simulates the operator pressing OK with the date box still empty.</summary>
+        public bool LeavesTheDateBlank { get; set; }
+
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
         {
             Prompts.Add(request);
-            return invoiceNumber is null
-                ? null
-                : new InvoiceDetails(invoiceNumber, request.SuggestedDate ?? new DateOnly(2026, 1, 1));
+            if (invoiceNumber is null) return null;
+            DateOnly typed =
+                LeavesTheDateBlank ? default
+                : DateTyped != default ? DateTyped
+                : request.Date ?? new DateOnly(2026, 1, 1);
+            return new InvoiceDetails(invoiceNumber, typed);
         }
 
         public string? AskLineField(LineFieldRequest request)
@@ -94,22 +106,45 @@ public class RedBullPipelineTests
     /// suggestion is offered but the parsed value never wins by default.
     /// </summary>
     [Fact]
-    public void AsksForTheDateAndOffersTheCorrectedYear()
+    public void AsksForTheDateEveryTimeAndUsesWhatWasTyped()
     {
         using var tmp = new TempDir();
         string dest = tmp.Sub("out");
         var prompt = VerifiedTicketPrompt();
+        prompt.DateTyped = new DateOnly(2025, 11, 24);   // read off the paper, as it now must be
 
         var outcome = Service(tmp, prompt).ConvertFile(RedBull(Place(tmp, "2030211863_sscs_verified")), dest);
 
         Assert.True(outcome.Success, outcome.UserMessage);
         var request = Assert.Single(prompt.Prompts);
         Assert.True(request.NeedsDate);
-        Assert.Equal(new DateOnly(2025, 11, 24), request.SuggestedDate);
         Assert.Equal("Red Bull", request.Vendor);
 
         var xml = XDocument.Load(outcome.FinalOutputPaths[0]);
         Assert.Contains("2025-11-24", xml.Descendants("InvoiceDate").Single().Value);
+    }
+
+    /// <summary>
+    /// And with nothing typed the file is refused rather than dated from the scan.
+    ///
+    /// This is the half that makes the rest mean anything. The date carries no check digit and is
+    /// printed once, so a fallback to the scan's own reading is not a safety net - it is the old
+    /// behaviour with an extra window in front of it, and it is what let an invoice go out dated
+    /// 2016 on 2026-08-12.
+    /// </summary>
+    [Fact]
+    public void ATicketWithNoTypedDateIsRefused()
+    {
+        using var tmp = new TempDir();
+        var prompt = VerifiedTicketPrompt();
+        prompt.LeavesTheDateBlank = true;
+
+        var outcome = Service(tmp, prompt)
+            .ConvertFile(RedBull(Place(tmp, "2030211863_sscs_verified")), tmp.Sub("out"));
+
+        Assert.False(outcome.Success);
+        Assert.Equal(PdfReasonCodes.NoDate, outcome.ReasonCode);
+        Assert.Contains("has to be typed in", outcome.UserMessage, StringComparison.Ordinal);
     }
 
     /// <summary>

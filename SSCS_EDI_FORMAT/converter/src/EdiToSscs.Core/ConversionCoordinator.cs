@@ -77,7 +77,6 @@ public sealed record InvoiceDetailsRequest(
     int LineCount,
     int SectionIndex,
     int SectionCount,
-    DateOnly? SuggestedDate = null,
     /// <summary>The vendor whose paper the operator is holding, so the window can say whose invoice
     /// number it wants ("Type invoice for Bimbo") instead of a generic heading.</summary>
     string Vendor = "",
@@ -88,29 +87,30 @@ public sealed record InvoiceDetailsRequest(
     /// </summary>
     bool NeedsTotal = false)
 {
-    // There is deliberately no SuggestedInvoiceNumber here. The parsers can read one off a scan and
-    // some of them do (BlueBellSection.SuggestedInvoiceNumber), but it must not reach the prompt: it
-    // is wrong often enough to matter, nothing downstream can catch that, and a filled-in box turns
-    // the one field that needs a person's eyes into an Enter keypress. Leaving it out of this record
-    // is what makes that a guarantee rather than a habit.
+    // There is deliberately no SuggestedInvoiceNumber here, and since 2026-08-12 no suggested date
+    // either. The parsers can read both off a scan and some of them do
+    // (BlueBellSection.SuggestedInvoiceNumber, RedBullTicket.SuggestedDate), but neither may reach
+    // the prompt: both are wrong often enough to matter, nothing downstream can catch either, and a
+    // filled-in box turns a field that needs a person's eyes into an Enter keypress. Leaving them
+    // out of this record is what makes that a guarantee rather than a habit.
 
     /// <summary>
-    /// Always true: the date is typed on every invoice, for every vendor.
+    /// Always true: the date is typed on every invoice, for every vendor, into an empty box.
     ///
-    /// It used to be shown rather than asked whenever the scan produced something plausible, and a
-    /// plausible wrong date is exactly what this scanner produces. Two of the store's twenty-two
-    /// samples book themselves into the wrong year - one reads 07/13/2016 and another 07/20/2020,
-    /// both for 2026, because the last digit was eaten. A date in the *future* was caught; a date in
-    /// the past never was, however absurd, and it lands a delivery in the wrong period with nothing
-    /// said. The box is pre-filled with what was read (unlike the invoice number, a date is checked
-    /// at a glance against paper the operator is already holding) and <see cref="SuggestedDate"/>
-    /// falls back to it.
+    /// It is the invoice number's twin and took three goes to treat like one. First it was only
+    /// asked for when the scan failed outright - but a plausible wrong date is exactly what this
+    /// scanner produces, and two of the store's twenty-two samples booked themselves into 2016 and
+    /// 2020, both for 2026, because the last digit was eaten. Then it was always asked but the box
+    /// arrived pre-filled with the scan's reading, which Enter accepts. And underneath that,
+    /// <see cref="InvoiceDetails.Date"/> was overruled by the scan anyway, so a corrected year was
+    /// discarded - a real invoice went out dated 2016 on 2026-08-12 with the guard nominally in
+    /// place.
+    ///
+    /// A date in the *future* is caught by the app. A date in the past never is, however absurd: it
+    /// lands a delivery in the wrong period and nothing says a word. So it is typed, like the number,
+    /// off the paper in the operator's hand.
     /// </summary>
     public bool NeedsDate => true;
-
-    /// <summary>What to put in the date box: the reconstructed date if there is one, else what the
-    /// scan read, else nothing.</summary>
-    public DateOnly? DateToOffer => SuggestedDate ?? Date;
 }
 
 /// <summary>
@@ -186,6 +186,27 @@ public sealed record LineFieldRequest(
     /// </summary>
     PdfRowSnip? Header = null,
     /// <summary>
+    /// The same column names as words, for the rows where the printed header cannot be cut.
+    ///
+    /// The strip above the row is not decoration and it is not the answer to the question — it is
+    /// there so that a cut-out row means something. By item 16 the printed
+    /// "DESCRIPTION UPC/SKU / WHSLE CASES UNITS NET TAX AMOUNT" is a foot up the page and off the
+    /// top of the snip, so without it the operator is looking at a bare line of figures with no way
+    /// to tell which one is the amount. It goes missing on three real cases: a Dr Pepper header the
+    /// scan chewed up until it no longer reads as one, a Red Bull page where none was found, and a
+    /// row with no line number to cut by at all.
+    ///
+    /// So this is the fallback, and it is deliberately the weaker of the two. A cut header is
+    /// **aligned** — it comes off the same page at the same width, so UNITS sits over the units.
+    /// Typed-out names cannot be, so they read left to right as an ordered list and nothing more.
+    /// Written by the vendor's own section: Dr Pepper's credits print no WHSLE column, and
+    /// showing one over a credit row would have the operator counting to the wrong figure.
+    ///
+    /// Never marked, either way. The box goes on the figure being typed, never on a column name —
+    /// pointing at the word AMOUNT answers a question nobody asked.
+    /// </summary>
+    string ColumnLegend = "",
+    /// <summary>
     /// The heading this vendor prints over the column being asked about, which is what the whole
     /// question is reduced to: "Type the number under UNITS". It has to come from the vendor because
     /// they do not agree — Dr Pepper's last column is AMOUNT and Red Bull's is TOTAL, and sending an
@@ -198,7 +219,20 @@ public sealed record LineFieldRequest(
     /// a Dr Pepper code to type, or that UNITS means bottles rather than cases. Everything else the
     /// picture already answers, and a hint nobody needs is a hint nobody reads.
     /// </summary>
-    string Hint = "");
+    string Hint = "",
+    /// <summary>
+    /// True when <see cref="Snip"/> is the whole page rather than a cut-out row — which happens where
+    /// the text layer read nothing and the rows came off the picture, so there are no coordinates to
+    /// cut by and nothing can be marked.
+    ///
+    /// It changes what the operator has to be given. A cut-out row *is* the answer to "which row" —
+    /// it is on screen with the figure boxed, and describing it in words would be noise. A whole page
+    /// answers nothing on its own: it holds the row by construction and the operator has to find it,
+    /// which they can only do if they are told **which row they are looking for**. Getting that
+    /// backwards is the fault in the screenshot of 2026-08-12 — a page of small print, a box, and a
+    /// hint reading "find the row by its name" with the name printed nowhere on the dialog.
+    /// </summary>
+    bool WholePage = false);
 
 /// <summary>What the operator keyed for one invoice. Each field is ignored when the ticket carried a
 /// readable one of its own, so a prompt can never overwrite something that was read off the paper.</summary>

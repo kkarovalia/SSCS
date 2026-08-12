@@ -536,8 +536,6 @@ public static partial class DrPepperPdfParser
         /// <summary>Whether that page was scanned the wrong way up, so its picture needs turning.</summary>
         public bool PageUpsideDown { get; init; }
 
-        /// <summary>How far down the page the row is, 0-1000, purely to scroll the picture to it.</summary>
-        public int? VerticalPosition { get; init; }
 
         /// <summary>
         /// What a vision model read on this row, where one was consulted and its reading could be
@@ -606,7 +604,6 @@ public static partial class DrPepperPdfParser
                 LineNo = 0,
                 Page = v.Page,
                 PageUpsideDown = v.PageUpsideDown,
-                VerticalPosition = v.VerticalPosition,
                 Position = ++position,
                 PrintedCode = v.Barcode ?? "",
                 Upc = upc is { Length: 12 } && Upc.IsValidGtin(upc) ? upc : null,
@@ -926,7 +923,14 @@ public static partial class DrPepperPdfParser
             // a credit, which has no WHSLE column at all. It is still said out loud, because on a
             // new item it is the price that reaches the shelf.
             bool seedOnly = !r.IsCredit && (r.Whsle is null || r.Cases is null);
-            if (seedOnly)
+
+            // Said once per row where the scan lost the column, and **not at all** where the row came
+            // off the picture. The reader looking at the picture is deliberately not asked for WHSLE
+            // — it is a list price nothing is built from — so on a page with no text layer this is
+            // absent by design on every row, and reporting it printed twenty-two identical lines that
+            // pushed the one warning that mattered off the top of the box. A note nobody can act on,
+            // repeated per row, teaches the operator to close the notes unread.
+            if (seedOnly && r.LineNo > 0)
                 warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UnreadableLine,
                     $"{r.Description} - "
                     + (r.Whsle is null
@@ -1178,7 +1182,7 @@ public static partial class DrPepperPdfParser
 
             string typed = ask(new DrPepperUnknownField(
                 r.Position, rows.Count, r.Description, r.PrintedCode, LineField.Barcode,
-                r.PrintedCode, r.Units, r.Amount, r.LineNo, r.Page, r.PageUpsideDown, r.VerticalPosition));
+                r.PrintedCode, r.Units, r.Amount, r.LineNo, r.Page, r.PageUpsideDown, r.IsCredit));
 
             // The invoice prints "<barcode>/<SKU>", so someone copying the whole token is reading the
             // paper right, not wrong. The slash says where the barcode ends; without cutting there,
@@ -1276,7 +1280,7 @@ public static partial class DrPepperPdfParser
     {
         string typed = ask(new DrPepperUnknownField(
             r.Position, lineCount, r.Description, r.Upc ?? "", LineField.Amount,
-            r.Scanned.PrintedAmount, r.Units, null, r.LineNo, r.Page, r.PageUpsideDown, r.VerticalPosition));
+            r.Scanned.PrintedAmount, r.Units, null, r.LineNo, r.Page, r.PageUpsideDown, r.IsCredit));
 
         string cleaned = new((typed ?? "").Where(c => char.IsAsciiDigit(c) || c == '.').ToArray());
         if (!decimal.TryParse(cleaned, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal amount)
@@ -1487,7 +1491,7 @@ public static partial class DrPepperPdfParser
         string typed = ask(new DrPepperUnknownField(
             row.Position, lineCount, row.Description, row.Upc ?? "", LineField.Units,
             row.Scanned.PrintedUnits, null, row.Amount, row.LineNo, row.Page, row.PageUpsideDown,
-            row.VerticalPosition));
+            row.IsCredit));
 
         // Whatever the prompt collected still has to be a plain count; the dialog checks this too,
         // but the parser does not take a figure on trust from a caller it does not control.
@@ -1646,8 +1650,12 @@ public sealed record DrPepperUnknownField(
     int Page = 0,
     /// <summary>Whether that page went through the scanner the wrong way up.</summary>
     bool PageUpsideDown = false,
-    /// <summary>How far down the page the row is, 0-1000, purely to scroll the picture to it.</summary>
-    int? VerticalPosition = null);
+    /// <summary>
+    /// Whether this row sits under the CREDITS banner, which prints a **different column set** —
+    /// no WHSLE — so the legend shown above the row has to follow it. Sales columns over a credit
+    /// row would have the operator counting across to the figure next door.
+    /// </summary>
+    bool IsCredit = false);
 
 /// <summary>Asks for one figure on one Dr Pepper row. Returns what the operator typed.</summary>
 public delegate string AskDrPepperField(DrPepperUnknownField field);

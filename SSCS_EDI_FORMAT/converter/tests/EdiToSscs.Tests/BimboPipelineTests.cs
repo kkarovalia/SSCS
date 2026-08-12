@@ -19,12 +19,17 @@ public class BimboPipelineTests
     {
         public List<InvoiceDetailsRequest> Prompts { get; } = [];
 
+        /// <summary>What the operator types into the (always empty) date box.</summary>
+        public DateOnly DateTyped { get; set; }
+
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
         {
             Prompts.Add(request);
             return invoiceNumber is null
                 ? null
-                : new InvoiceDetails(invoiceNumber, request.SuggestedDate ?? default);
+                : new InvoiceDetails(
+                    invoiceNumber,
+                    DateTyped != default ? DateTyped : request.Date ?? default);
         }
     }
 
@@ -110,14 +115,16 @@ public class BimboPipelineTests
         Assert.Equal("Bimbo", asked.Vendor);
         Assert.Equal(335.07m, asked.Total);
         Assert.Equal(35, asked.LineCount);
-        // The date is typed on every invoice now, with what the scan read offered in the box.
+        // The date is typed on every invoice, into an empty box - the same rule as the number.
         Assert.True(asked.NeedsDate);
-        Assert.Equal(new DateOnly(2026, 7, 28), asked.DateToOffer);
 
-        // InvoiceDetailsRequest has no field that could carry a suggested number, by design.
+        // And the record has no field that could pre-fill either one. This is the guarantee: a
+        // suggestion the prompt cannot receive is a suggestion nobody can wire back in by accident.
         Assert.DoesNotContain(
             typeof(InvoiceDetailsRequest).GetProperties(),
-            p => p.Name.Contains("Invoice", StringComparison.OrdinalIgnoreCase));
+            p => p.Name.Contains("Invoice", StringComparison.OrdinalIgnoreCase)
+                 || p.Name.Contains("Suggest", StringComparison.OrdinalIgnoreCase)
+                 || p.Name.Contains("Offer", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -131,13 +138,16 @@ public class BimboPipelineTests
         string dest = tmp.Sub("out");
         string input = Place(tmp, DamagedDate);
 
-        var prompt = new ScriptedPrompt("071326130912D");
+        var prompt = new ScriptedPrompt("071326130912D") { DateTyped = new DateOnly(2026, 7, 13) };
         var outcome = Service(tmp, prompt).ConvertFile(Bimbo(input), dest);
 
         var asked = Assert.Single(prompt.Prompts);
         Assert.True(asked.NeedsDate);
         Assert.Null(asked.Date);
-        Assert.Equal(new DateOnly(2026, 7, 13), asked.SuggestedDate);
+
+        // The parser can still reconstruct 07/13/2026 out of the damage, and that reconstruction is
+        // deliberately not offered to the operator any more - it cannot even reach this record. What
+        // lands on the invoice is what the person holding the ticket typed.
 
         Assert.True(outcome.Success, outcome.UserMessage);
         var xml = XDocument.Load(outcome.FinalOutputPaths[0]);

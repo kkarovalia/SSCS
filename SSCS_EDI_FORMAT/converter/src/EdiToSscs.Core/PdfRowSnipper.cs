@@ -19,13 +19,7 @@ namespace EdiToSscs.Core;
 /// </summary>
 public sealed record PdfRowSnip(
     byte[] PagePng, int Left, int Top, int Width, int Height,
-    int FocusLeft, int FocusTop, int FocusWidth, int FocusHeight,
-    /// <summary>
-    /// Where to scroll a picture too tall to show whole, in pixels down from the top of the cut.
-    /// 0 means the top, which is what a snip that fits on screen wants anyway. Only a whole-page
-    /// snip sets this, and only ever as a hint: nothing is marked from it.
-    /// </summary>
-    int ScrollTo = 0);
+    int FocusLeft, int FocusTop, int FocusWidth, int FocusHeight);
 
 /// <summary>
 /// Cuts the picture of a printed row out of a scanned invoice.
@@ -53,13 +47,32 @@ public static class PdfRowSnipper
     /// Never throws. A snip is a courtesy on top of a message that already stands on its own, so a
     /// PDF that will not give one up must not cost the operator their conversion.
     /// </summary>
+    /// <param name="lastOfDuplicates">
+    /// When the figure appears more than once on the row, mark the **last** one rather than giving up.
+    ///
+    /// Set only for a question about the extended amount, where it is a fact about the layout rather
+    /// than a preference: both vendors print that figure in the final column — Red Bull's TOTAL after
+    /// DEP, DISC and SUGAR, Dr Pepper's AMOUNT after TAX, and Dr Pepper's credits the same with the
+    /// WHSLE column dropped. So the rightmost occurrence is the one being asked about.
+    ///
+    /// This exists because a **QTY 1 row prints its price and its total as the same characters** —
+    /// `RB36463 1 12 RED BULL 20OZ LS $42.23 $0.00 $0.00 $0.00 $42.23` — and the duplicate guard then
+    /// washed the whole row on every single-case line. Not intermittent, though it looks it from the
+    /// operator's side: exact whenever QTY is 2 or more, whole-row every time QTY is 1.
+    ///
+    /// It must stay off for UNITS. That column sits in the middle of the row with counts either side
+    /// of it, so the last "12" on the line is as likely to be the CASES figure or part of a
+    /// description as the units — and the whole-row wash is the right answer there.
+    /// </param>
     public static PdfRowSnip? TryCut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
-        string? focusText = null, int? focusLineNo = null, bool markWholeCode = false)
+        string? focusText = null, int? focusLineNo = null, bool markWholeCode = false,
+        bool lastOfDuplicates = false)
     {
         try
         {
-            return Cut(pdfBytes, firstLineNo, lastLineNo, focusText, focusLineNo, markWholeCode);
+            return Cut(pdfBytes, firstLineNo, lastLineNo, focusText, focusLineNo, markWholeCode,
+                lastOfDuplicates: lastOfDuplicates);
         }
         catch
         {
@@ -127,6 +140,9 @@ public static class PdfRowSnipper
     /// screen with the wrong figure highlighted, which is worse than no picture at all. The page
     /// contains the row by construction, the operator finds it by name, and the answer is read off
     /// the screen instead of hunted for on paper.
+    ///
+    /// The page opens at the top, every time. See the note in the body for the measurements that took
+    /// out the band, and the scrolling, that a vision model's guess at the row's position once drove.
     /// </summary>
     /// <param name="pageNumber">1-based page, as <see cref="VisionRow.Page"/> records it.</param>
     /// <param name="upsideDown">
@@ -135,8 +151,7 @@ public static class PdfRowSnipper
     /// is exactly what destroys the text layer in the first place. Showing one the wrong way up is
     /// worse than showing nothing, so this is worth the field it takes to carry.
     /// </param>
-    public static PdfRowSnip? TryCutWholePage(
-        byte[] pdfBytes, int pageNumber, bool upsideDown = false, int? verticalPosition = null)
+    public static PdfRowSnip? TryCutWholePage(byte[] pdfBytes, int pageNumber, bool upsideDown = false)
     {
         try
         {
@@ -152,29 +167,26 @@ public static class PdfRowSnipper
 
             if (upsideDown) png = Turn(png) ?? png;
 
-            // Turning the page turns the row's position with it.
-            int? down = verticalPosition is int v && upsideDown ? 1000 - v : verticalPosition;
-            int scrollTo = down is int d
-                ? (int)Math.Round(Math.Clamp(d, 0, 1000) / 1000.0 * image.HeightInSamples)
-                : 0;
-
-            // The band the row is in, marked in the same amber as every other prompt.
+            // Nothing marked, and nothing scrolled to. The page is handed over whole, the caption on
+            // the dialog says which row to look for, and the operator finds it.
             //
-            // This is a **band, never a figure**. Where the text layer read the row, the marker goes
-            // round the digits themselves because their position is known to the pixel; here it is
-            // the model's estimate, so it is drawn a couple of printed lines tall and says no more
-            // than "around here". The row's name is in the question above it and the rest of the page
-            // is still there to scroll through, which is what makes an estimate safe to draw: a
-            // marker that is out costs a glance, not a wrong figure.
-            int band = Math.Max(40, (int)Math.Round(image.HeightInSamples * 0.03));
-            int focusTop = down is null
-                ? 0
-                : Math.Clamp(scrollTo - band / 2, 0, Math.Max(0, image.HeightInSamples - band));
-
-            return new PdfRowSnip(
-                png, 0, 0, image.WidthInSamples, image.HeightInSamples,
-                0, focusTop, down is null ? 0 : image.WidthInSamples, down is null ? 0 : band,
-                scrollTo);
+            // For one day the vision model was asked where each row sat, and the answer was used to
+            // draw a band and to scroll the page to it. It was measured on 2026-08-12 by rendering
+            // every prompt the store's thirty scans raise and looking at each one: the band was on the
+            // row asked about 6 times out of 11 on Red Bull and 0 out of 8 on Dr Pepper — twice on the
+            // address block at the head of the ticket, twice on the totals at the foot. Sharpening the
+            // instruction (anchor to the whole sheet, keep the steps even, never pass the last product
+            // row) moved the numbers slightly and changed nothing about the shape: the model spaces
+            // the rows too far apart, so the error grows down the page and the last row of a ticket
+            // lands past the end of the goods.
+            //
+            // Half-right is the worst of the three outcomes. No marker costs a glance down a page that
+            // holds the row by construction; a marker on the right row saves that glance; a marker on
+            // the *wrong* row is read, typed, and books a figure belonging to another product — and
+            // every total still agrees, because it is a real figure off a real row. That is the same
+            // rule as everywhere else here: confirm a figure or ask for it, never point confidently at
+            // something worked out.
+            return new PdfRowSnip(png, 0, 0, image.WidthInSamples, image.HeightInSamples, 0, 0, 0, 0);
         }
         catch
         {
@@ -209,7 +221,8 @@ public static class PdfRowSnipper
 
     private static PdfRowSnip? Cut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
-        string? focusText, int? focusLineNo, bool markWholeCode, bool mark = true)
+        string? focusText, int? focusLineNo, bool markWholeCode, bool mark = true,
+        bool lastOfDuplicates = false)
     {
         ArgumentNullException.ThrowIfNull(pdfBytes);
         if (firstLineNo > lastLineNo) (firstLineNo, lastLineNo) = (lastLineNo, firstLineNo);
@@ -256,7 +269,7 @@ public static class PdfRowSnipper
         int focusBottom = Math.Max(focusTop + 1, Down(focus.Bottom - padding / 2));
 
         // The figure itself when it can be found on the row beyond doubt, otherwise the whole row.
-        var span = markWholeCode ? FindCodeSpan(focus) : FindSpan(focus, focusText);
+        var span = markWholeCode ? FindCodeSpan(focus) : FindSpan(focus, focusText, lastOfDuplicates);
         int focusLeft = 0, focusWidth = image.WidthInSamples;
         if (span is not null)
         {
@@ -280,12 +293,18 @@ public static class PdfRowSnipper
     /// <summary>
     /// Where on the row a figure is printed, or null when it cannot be placed beyond doubt.
     ///
-    /// Ambiguity gives up rather than guesses. "20.66" appears twice on "20.66 0.00 20.66" and there
-    /// is no telling from the text which one is meant, so the whole row is marked instead. A marker
-    /// on the wrong figure is worse than no marker: the operator reads it, types it, and every check
-    /// on the page then agrees with a number belonging to something else.
+    /// Ambiguity gives up rather than guesses. "20.66" appears twice on "20.66 0.00 20.66" and
+    /// nothing in the text says which one is meant, so the whole row is marked instead. A marker on
+    /// the wrong figure is worse than no marker: the operator reads it, types it, and every check on
+    /// the page then agrees with a number belonging to something else.
+    ///
+    /// <paramref name="lastWins"/> lifts that for the one case where the layout does say — the
+    /// extended amount is the last column on both vendors, so the rightmost match is it. See
+    /// <see cref="TryCut"/>. Without it a QTY 1 row, whose price and total are the same characters,
+    /// could never be marked at all.
     /// </summary>
-    private static (double Left, double Right)? FindSpan(PdfTextLine line, string? focusText)
+    private static (double Left, double Right)? FindSpan(
+        PdfTextLine line, string? focusText, bool lastWins = false)
     {
         string needle = (focusText ?? "").Trim();
         if (needle.Length == 0) return null;
@@ -298,10 +317,11 @@ public static class PdfRowSnipper
             // character boxes no longer line up with the print, and a marker drawn from them lands
             // a character or two off the figure it is pointing at.
             if (word.Text != needle) continue;
-            if (found is not null) return null;      // the same figure twice on one row
+            if (found is not null && !lastWins) return null;   // the same figure twice on one row
 
-            found = Span(word, 0, word.Text.Length);
-            if (found is null) return null;
+            var here = Span(word, 0, word.Text.Length);
+            if (here is null) return null;
+            found = here;                                      // lastWins: keep walking, right one wins
         }
 
         return found;

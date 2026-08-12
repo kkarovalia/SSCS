@@ -32,10 +32,9 @@ internal static class SnipView
     /// How tall the frame is when it is showing a page rather than a cut-out row.
     ///
     /// Sized to read as a band of the invoice — six or eight printed rows — rather than as a whole
-    /// document, because being handed an entire invoice to hunt through is barely better than being
-    /// handed nothing. The rest of the page stays behind it and reachable: the model's idea of where
-    /// the row is is a guess, and a window small enough to look tidy is a window that can miss.
-    /// Scrolling out of a band recovers; a band cut out of the page and the rest thrown away does not.
+    /// document, because a picture scaled to fit a shop monitor is a picture of an invoice rather
+    /// than a readable one. The whole page is behind it and reachable by scrolling, which is the
+    /// point: the row is somewhere on this page and the caption above says which one to look for.
     /// </summary>
     private const int BandHeight = 320;
 
@@ -75,56 +74,22 @@ internal static class SnipView
         };
         frame.Controls.Add(box);
 
-        // Open at the row rather than at the top of the page. Being asked to type one figure and
-        // handed a whole invoice to scroll through is barely better than being handed nothing, so
-        // the model says roughly how far down its row is and the frame starts there — the row a
-        // third of the way in, with what comes above it for context.
+        // The page opens at the top. For one day it opened at the row, from the vision model's
+        // estimate of how far down the page that row sits, and two separate things were wrong with
+        // it. The estimate is not good enough — measured across the store's thirty scans on
+        // 2026-08-12, it put the view on the right row 6 times out of 11 on Red Bull and 0 out of 8
+        // on Dr Pepper, twice landing on the address block and twice on the totals. And the scroll
+        // never happened at all: AutoScrollPosition set before the panel is laid out is clamped to
+        // zero, so every one of those runs silently opened at the top regardless. The estimate is
+        // gone; the top is where a page opens, and the caption above says which row to look for.
         //
-        // A hint, never a claim: nothing is marked, so a position that is out costs a scroll, which
-        // is what the operator faced anyway. That is why this is allowed to be a guess when marking
-        // a figure from a guess would not be.
-        int target = (int)Math.Round(snip!.ScrollTo * ((double)picture.Height / Math.Max(1, snip.Height)));
-        int top = Math.Clamp(target - BandHeight / 3, 0, Math.Max(0, picture.Height - BandHeight));
-        if (top > 0) frame.AutoScrollPosition = new Point(0, top);
-
-        // And a way to turn it over.
-        //
-        // Some of these sheets go through the scanner upside down, and the only thing that can say so
-        // is a reader looking at the picture — the text layer is debris precisely *because* the page
-        // is inverted. That reader gets it right most of the time and not all of the time, and a page
-        // shown the wrong way up is no use at all. Rather than keep pushing on the guess, the operator
-        // gets the control: one click, no consequences, and it is obvious from looking whether it is
-        // needed. Cheap to offer and it ends the problem outright.
-        var turn = new LinkLabel
-        {
-            Text = "Turn the page over",
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 10),
-        };
-        turn.LinkClicked += (_, _) =>
-        {
-            var shown = box.Image;
-            if (shown is null) return;
-            int was = frame.VerticalScroll.Value;
-            shown.RotateFlip(RotateFlipType.Rotate180FlipNone);
-            box.Image = shown;                                   // reassign so the box repaints
-            // The row that was in view is now the same distance from the other end.
-            frame.AutoScrollPosition = new Point(
-                0, Math.Clamp(picture.Height - was - frame.ClientSize.Height, 0,
-                    Math.Max(0, picture.Height - frame.ClientSize.Height)));
-        };
-
-        var stack = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(0, 0, 0, 4),
-            WrapContents = false,
-        };
-        stack.Controls.Add(frame);
-        stack.Controls.Add(turn);
-        return stack;
+        // There was a "Turn the page over" link here for a day, and it is gone (2026-08-12, at the
+        // user's request: "wtf is flip the page, that shit's useless"). It was for the sheet that
+        // went through the scanner upside down — but a page the operator cannot read is a page to
+        // re-feed at the scanner in five seconds, not one to read sideways off a screen and type
+        // from. The picture is still turned automatically where the reading says it is inverted,
+        // which costs nobody a click.
+        return frame;
     }
 
     private static Bitmap? Render(PdfRowSnip? snip)

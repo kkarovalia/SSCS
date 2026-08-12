@@ -52,7 +52,7 @@ public class DrPepperPipelineTests
             Prompts.Add(request);
             return invoiceNumber is null
                 ? null
-                : new InvoiceDetails(invoiceNumber, request.SuggestedDate ?? default);
+                : new InvoiceDetails(invoiceNumber, request.Date ?? default);
         }
 
         public string? AskLineField(LineFieldRequest request)
@@ -127,11 +127,10 @@ public class DrPepperPipelineTests
         Assert.Equal("Dr Pepper", request.Vendor);
         Assert.Equal("DR PEPPER 8-10-26.pdf", request.FileName);
 
-        // The date is asked on every invoice, with the scan's reading in the box: a wrong year
-        // is plausible, checks nothing, and files the delivery into the wrong period.
+        // The date is asked on every invoice, into an empty box: a wrong year is plausible, checks
+        // nothing, and files the delivery into the wrong period.
         Assert.Equal(new DateOnly(2026, 8, 10), request.Date);
         Assert.True(request.NeedsDate);
-        Assert.Equal(new DateOnly(2026, 8, 10), request.DateToOffer);
 
         // The total is not: AMOUNT DUE is re-added by every package subtotal, so it checks itself.
         Assert.Equal(1080.22m, request.Total);

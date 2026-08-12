@@ -26,7 +26,7 @@ public class RedBullBarcodeBarsTests
         public List<LineFieldRequest> LineFields { get; } = [];
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new("TEST-1", request.DateToOffer ?? request.Date ?? new DateOnly(2026, 1, 1));
+            new("TEST-1", request.Date ?? new DateOnly(2026, 1, 1));
 
         /// <summary>Records the question and answers it with the code the paper prints.</summary>
         public Dictionary<int, string> Paper { get; } = [];

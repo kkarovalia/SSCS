@@ -25,7 +25,7 @@ public class ChubiwinosPipelineTests
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
         {
             InvoicePrompts.Add(request);
-            return invoiceNumber is null ? null : new InvoiceDetails(invoiceNumber, request.SuggestedDate ?? default);
+            return invoiceNumber is null ? null : new InvoiceDetails(invoiceNumber, request.Date ?? default);
         }
 
         public string? AskBarcode(BarcodeRequest request)
@@ -95,9 +95,8 @@ public class ChubiwinosPipelineTests
         Assert.Equal(460.23m, request.Total);
         Assert.Equal(8, request.LineCount);
         Assert.Equal(new DateOnly(2026, 6, 15), request.Date);
-        // Always a box, pre-filled with what the ticket printed.
+        // Always a box, and always an empty one.
         Assert.True(request.NeedsDate);
-        Assert.Equal(new DateOnly(2026, 6, 15), request.DateToOffer);
     }
 
     /// <summary>
@@ -111,18 +110,24 @@ public class ChubiwinosPipelineTests
     /// caller remembering to pass null, which is why the check is on the type. A parser may still
     /// read a number off the scan for its own purposes — BlueBellSection.SuggestedInvoiceNumber
     /// exists and is tested — it just has nowhere to hand it to.
+    ///
+    /// **The date joined it on 2026-08-12.** It was the one exception: always asked, but with the
+    /// scan's reading sitting in the box. That is not a check, it is an Enter keypress, and a real
+    /// invoice went out dated 2016 with the prompt working exactly as designed. Same field, same
+    /// weakness — no check digit, printed once — so now the same rule.
     /// </summary>
     [Fact]
-    public void NoScannedInvoiceNumberCanReachThePromptForAnyVendor()
+    public void NoScannedInvoiceNumberOrDateCanReachThePromptForAnyVendor()
     {
         var offered = typeof(InvoiceDetailsRequest)
             .GetProperties()
             .Select(p => p.Name)
             .Where(n => n.Contains("Invoice", StringComparison.OrdinalIgnoreCase)
-                        || n.Contains("Suggested", StringComparison.OrdinalIgnoreCase))
+                        || n.Contains("Suggested", StringComparison.OrdinalIgnoreCase)
+                        || n.Contains("Offer", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        Assert.Equal(["SuggestedDate"], offered);
+        Assert.Empty(offered);
     }
 
     /// <summary>

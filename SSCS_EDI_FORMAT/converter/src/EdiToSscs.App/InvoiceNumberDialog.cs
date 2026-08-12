@@ -14,9 +14,14 @@ namespace EdiToSscs.App;
 /// ticket reconciles against the printed TOTAL; this one field does not, so it is typed off the
 /// paper. Offering the scan's reading as a starting point would defeat the point of asking.
 ///
-/// The date box appears only when the scan destroyed the date ("DATE 12-14-Z023"). That ticket is
-/// otherwise sound — its money still has to reconcile — so it is worth converting, and one mangled
-/// character should not cost the operator the whole delivery.
+/// **The date is the same field wearing a different hat, and is now treated identically**
+/// (2026-08-12). It carries no check digit either, it is printed once, and the scanner eats its last
+/// digit: 07/13/2016 and 07/20/2020 both for 2026, which books a delivery into the wrong period in
+/// complete silence. Two things were wrong with asking-but-offering. The box arrived pre-filled with
+/// the scan's guess, so Enter accepted it — and worse, whatever was typed **was then discarded**:
+/// this class held the scan's date and returned it in preference to the box (`_knownDate ?? typed`),
+/// so correcting a wrong year on screen changed nothing at all. Both are gone. Empty box, typed
+/// every time, and what is typed is what is used.
 /// </summary>
 internal sealed class InvoiceNumberDialog : Form
 {
@@ -25,12 +30,14 @@ internal sealed class InvoiceNumberDialog : Form
     private readonly TextBox? _input;
     private readonly TextBox? _dateInput;
     private readonly TextBox? _totalInput;
-    private readonly DateOnly? _knownDate;
 
     public string InvoiceNumber => _input?.Text.Trim() ?? "";
 
-    /// <summary>The date to use: the ticket's own when it had one, otherwise what was typed.</summary>
-    public DateOnly Date => _knownDate ?? (ParseDate(_dateInput?.Text) ?? default);
+    /// <summary>
+    /// The date the operator typed. Nothing else — the scan's own reading is not a fallback here and
+    /// is not held by this class at all, which is what stops it becoming one again.
+    /// </summary>
+    public DateOnly Date => ParseDate(_dateInput?.Text) ?? default;
 
     /// <summary>The grand total typed, when the scan lost the ticket's own. Zero otherwise.</summary>
     public decimal Total => ParseMoney(_totalInput?.Text) ?? 0m;
@@ -38,7 +45,6 @@ internal sealed class InvoiceNumberDialog : Form
     public InvoiceNumberDialog(InvoiceDetailsRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        _knownDate = request.Date;
 
         // Says whose paper to pick up, in the words the operator would use. The window title is the
         // first thing read and often the only thing read, so it carries the instruction rather than
@@ -97,15 +103,14 @@ internal sealed class InvoiceNumberDialog : Form
         if (request.NeedsDate)
         {
             layout.Controls.Add(FieldLabel("Date  (month first)"));
+            // Empty, every time, for the same reason the invoice number is. A date that is already
+            // in the box is a date nobody reads off the paper.
             _dateInput = new TextBox
             {
                 Width = 160, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
-                Text = request.DateToOffer?.ToString(DateFormat, CultureInfo.InvariantCulture) ?? "",
             };
             layout.Controls.Add(_dateInput);
-            layout.Controls.Add(Hint(request.DateToOffer is null
-                ? "The scan could not be read. Copy it from the ticket."
-                : "From the scan - check it matches the paper."));
+            layout.Controls.Add(Hint("Copy it from the top of the ticket."));
         }
 
         if (request.NeedsTotal)

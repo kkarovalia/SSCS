@@ -79,6 +79,23 @@ internal sealed class LineFieldDialog : Form
             Font = new Font("Segoe UI", 12f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 10),
         });
 
+        // Which row is meant, in words — whenever the picture does not say it for itself.
+        //
+        // A cut-out row needs no caption: it is the row, on screen, with the figure boxed. A whole
+        // page is the opposite. It is the fallback for a scan whose text layer read nothing, so
+        // there are no coordinates, so nothing can be marked — and a page of an invoice with no
+        // marker on it answers nothing at all unless the operator is told what they are looking for.
+        // Without this the dialog reads "Type the barcode", shows small print, and says "find the
+        // row by its name" with no name anywhere on it.
+        if (row is null || request.WholePage)
+            layout.Controls.Add(new Label
+            {
+                Text = Describe(request, brief: row is not null),
+                AutoSize = true, MaximumSize = new Size(textWidth, 0),
+                Font = row is not null ? new Font("Segoe UI", 10f, FontStyle.Bold) : Font,
+                Margin = new Padding(0, 0, 0, 10),
+            });
+
         if (row is not null)
         {
             // The invoice's own column names, cut from the same page at the same width, so they sit
@@ -86,7 +103,12 @@ internal sealed class LineFieldDialog : Form
             // between them, because a legend two paragraphs above a picture is a legend nobody
             // connects to it. This is what answers "which number do you mean" on a row whose marker
             // could not be trusted to a single figure.
-            var legend = SnipView.TryCreate(request.Header);
+            //
+            // Where the printed one cannot be had, the names are typed out instead rather than left
+            // off. A snip is two printed lines from the middle of a ticket, and by item 16 the
+            // header is a foot further up the page — so a row with no strip over it is a line of
+            // bare figures with nothing to say which is the NET and which the AMOUNT.
+            var legend = SnipView.TryCreate(request.Header) ?? TypedLegend(request, textWidth);
             if (legend is not null)
             {
                 legend.Margin = new Padding(legend.Margin.Left, legend.Margin.Top, legend.Margin.Right, 0);
@@ -94,15 +116,6 @@ internal sealed class LineFieldDialog : Form
             }
 
             layout.Controls.Add(row);
-        }
-        else
-        {
-            // No picture to be had, so say in words which row is meant.
-            layout.Controls.Add(new Label
-            {
-                Text = Describe(request),
-                AutoSize = true, MaximumSize = new Size(450, 0), Margin = new Padding(0, 0, 0, 10),
-            });
         }
 
         _input = new TextBox
@@ -146,10 +159,52 @@ internal sealed class LineFieldDialog : Form
     }
 
     /// <summary>
+    /// The vendor's column names typed out, for a row whose printed header could not be cut.
+    ///
+    /// Second best on purpose, and it is worth being clear about why. The cut header is taken off
+    /// the same page at the same width, so UNITS lands over the units and the operator reads
+    /// straight down. Typed names cannot line up with a scan of somebody's typewriter, so they are
+    /// an ordered list and claim nothing more than the order — which is still the difference between
+    /// a readable row and six numbers in a line.
+    ///
+    /// Set apart from the picture deliberately: grey ground, our own font. A strip that looked cut
+    /// from the invoice while not lining up with it would invite exactly the mistake of reading down
+    /// from a column name to the figure beneath it, and land on the one next door.
+    ///
+    /// Nothing here is ever marked. The box goes on the figure being typed.
+    /// </summary>
+    private static Control? TypedLegend(LineFieldRequest request, int width)
+    {
+        if (request.ColumnLegend.Length == 0) return null;
+
+        var font = new Font("Consolas", 9.5f, FontStyle.Bold);
+        int lines = request.ColumnLegend.Count(c => c == '\n') + 1;
+        return new Label
+        {
+            Text = request.ColumnLegend,
+            Font = font,
+            BackColor = Color.FromArgb(242, 242, 242),
+            ForeColor = Color.FromArgb(48, 48, 48),
+            BorderStyle = BorderStyle.FixedSingle,
+            AutoSize = false,
+            Padding = new Padding(6, 4, 6, 4),
+            Margin = new Padding(0),
+            Width = width,
+            Height = (font.Height * lines) + 10,
+        };
+    }
+
+    /// <summary>
     /// Points at the row on the paper: where to find it, what it says, and what the scan made of the
     /// figure being asked about. Two short lines — a paragraph here does not get read.
     /// </summary>
-    private static string Describe(LineFieldRequest request)
+    /// <param name="brief">
+    /// Drop the line about what the scan read. Set when a picture is being shown as well: over a
+    /// whole page this is a caption saying which row to look for, and it has to be short enough to
+    /// be read at a glance before the eye goes to the paper. What the scan made of the figure is
+    /// exactly the thing not to dwell on there — it is wrong, that is why the question exists.
+    /// </param>
+    private static string Describe(LineFieldRequest request, bool brief = false)
     {
         var parts = new List<string>();
         if (request.LineCount > 0) parts.Add($"Item {request.Position} of {request.LineCount}");
@@ -160,6 +215,8 @@ internal sealed class LineFieldDialog : Form
             parts.Add(a.ToString("C2", CultureInfo.GetCultureInfo("en-US")));
 
         string row = parts.Count > 0 ? string.Join("  -  ", parts) : "this row";
+        if (brief) return row;
+
         string scanned = request.PrintedValue.Length > 0
             ? $"\n\nThe scan read \"{request.PrintedValue}\", which does not match the rest of the invoice."
             : "\n\nThe scan could not read it at all.";

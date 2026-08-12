@@ -24,7 +24,7 @@ public class VisionOnlyPageTests
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new(invoiceNumber, request.DateToOffer ?? request.Date ?? new DateOnly(2026, 8, 11));
+            new(invoiceNumber, request.Date ?? new DateOnly(2026, 8, 11));
 
         public string? AskLineField(LineFieldRequest request)
         {
@@ -583,7 +583,8 @@ public class VisionOnlyPageTests
     /// shown, **with nothing marked**: the page holds the row by construction, and a highlight on a
     /// guessed position would put a real row on screen with the wrong figure picked out, which is
     /// worse than no picture at all. The hint says so, because otherwise the operator hunts for a
-    /// marker that is deliberately absent.
+    /// marker that is deliberately absent. It is opened at roughly the right height, which is a hint
+    /// and costs a scroll when it is wrong.
     /// </summary>
     [Fact]
     public void AQuestionAboutAPictureRowShowsTheWholePage()
@@ -599,7 +600,6 @@ public class VisionOnlyPageTests
                 new VisionRow
                 {
                     ItemNumber = "", Description = "16z12 Clam", Barcode = "not-a-barcode", Page = 1,
-                    VerticalPosition = 700,
                     Qty = 1, Units = 12, Price = 21.40m, Amount = 21.40m,
                 },
             ],
@@ -616,17 +616,25 @@ public class VisionOnlyPageTests
         Assert.NotNull(asked.Snip);
         Assert.True(asked.Snip.Width > 0 && asked.Snip.Height > 0);
 
-        // A band-level mark from the model's estimate, and no column header - that legend is cut by
-        // line number, which this row does not have. The band is a couple of printed lines tall, not
-        // a box round one figure: the position is an estimate and is drawn as one.
-        Assert.True(asked.Snip.FocusHeight > 0);
-        Assert.InRange(asked.Snip.FocusHeight, 1, (int)(asked.Snip.Height * 0.06));
+        // Nothing marked, and no column header - that legend is cut by line number, which this row
+        // does not have.
+        //
+        // The mark was tried. For one day this drew the model's estimate as a band a couple of
+        // printed lines tall, and on 2026-08-12 it was rendered for every question the store's thirty
+        // samples raise and looked at: on Red Bull it covered the row asked about 6 times out of 11,
+        // and on Dr Pepper 0 times out of 8 - twice on the address block at the head of the ticket,
+        // twice on the totals at the foot. A sharper instruction did not change the shape of it.
+        // Half-right is the one result that cannot ship: a marker on the wrong row is read, typed,
+        // and books a figure belonging to another product, and every total still agrees because it
+        // is a real figure off a real row.
+        Assert.Equal(0, asked.Snip.FocusHeight);
+        Assert.Equal(0, asked.Snip.FocusWidth);
         Assert.Null(asked.Header);
-        Assert.Contains("marked roughly", asked.Hint, StringComparison.Ordinal);
+        Assert.Contains("Nothing is marked", asked.Hint, StringComparison.Ordinal);
 
-        // And it opens at the row rather than at the top: a whole invoice to scroll through is
-        // barely better than no picture. Row at 700/1000 down a page lands about seven tenths in.
-        Assert.InRange(asked.Snip.ScrollTo, (int)(asked.Snip.Height * 0.6), (int)(asked.Snip.Height * 0.8));
+        // And the operator is told which row to look for, because the picture no longer says so.
+        Assert.True(asked.WholePage);
+        Assert.Equal("16z12 Clam", asked.Description);
     }
 
     /// <summary>
@@ -660,8 +668,8 @@ public class VisionOnlyPageTests
         Assert.True(outcome.Success, outcome.UserMessage);
         var asked = Assert.Single(prompt.LineFields);
         Assert.NotNull(asked.Snip);
-        Assert.Equal(0, asked.Snip.ScrollTo);
-        Assert.Equal(0, asked.Snip.FocusHeight);   // no position, so nothing to mark
+        Assert.Equal(0, asked.Snip.FocusHeight);   // a page holds the row; it never claims which
+        Assert.True(asked.WholePage);
     }
 
     /// <summary>

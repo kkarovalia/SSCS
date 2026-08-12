@@ -33,6 +33,78 @@ public class RedBullSnipTests
     private static byte[] Bytes(string fixture) =>
         File.ReadAllBytes(Path.Combine(Dir, $"REDBULL_{fixture}.pdf"));
 
+    /// <summary>
+    /// A one-case row gets its TOTAL boxed, not the whole row washed.
+    ///
+    /// Reported from the shop floor on 2026-08-12 as intermittent — "sometimes right sometimes
+    /// wrong" — and it is not. `RB36463 1 12 RED BULL 20OZ LS $42.23 $0.00 $0.00 $0.00 $42.23`
+    /// prints the price and the total as the same five characters, because QTY is 1. The duplicate
+    /// guard could not tell them apart and fell back to washing the row, so the marker was exact on
+    /// every QTY 2+ row and vague on every single-case one.
+    ///
+    /// The layout settles it: the extended amount is the **last** column on this vendor, after DEP,
+    /// DISC and SUGAR. So the rightmost match is the one being asked about, and this is a fact about
+    /// the ticket rather than a guess — which is the only reason it is allowed to overrule the
+    /// ambiguity rule.
+    /// </summary>
+    [Fact]
+    public void AOneCaseRowMarksItsTotalRatherThanTheWholeRow()
+    {
+        byte[] pdf = Bytes(Clean);
+        var lines = PdfTextExtractor.ExtractPositionedLines(pdf);
+
+        int marked = 0;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            // A row that prints the same money figure twice - the shape that used to defeat this.
+            var money = lines[i].Words
+                .Select(w => w.Text)
+                .Where(t => t.StartsWith('$') && t != "$0.00")
+                .ToList();
+            string? twice = money.GroupBy(t => t).FirstOrDefault(g => g.Count() > 1)?.Key;
+            if (twice is null) continue;
+
+            var snip = PdfRowSnipper.TryCut(
+                pdf, i + 1, i + 1, twice, i + 1, lastOfDuplicates: true);
+            if (snip is null) continue;
+
+            // Boxed around one figure, not washed across the sheet.
+            Assert.True(snip.FocusWidth > 0);
+            Assert.True(snip.FocusWidth < snip.Width / 2,
+                $"line {i + 1} marked {snip.FocusWidth} of {snip.Width}, which is the whole-row wash");
+
+            // And it is the right-hand one: the TOTAL column, not PRICE.
+            Assert.True(snip.FocusLeft > snip.Width / 2,
+                $"line {i + 1} marked at {snip.FocusLeft}, left of centre - that is the PRICE column");
+            marked++;
+        }
+
+        Assert.True(marked > 0, "no duplicate-money row in the fixture, so this proves nothing");
+    }
+
+    /// <summary>
+    /// The control, and the reason this is scoped to the amount. A count is printed in the middle of
+    /// the row with other counts either side of it, so the rightmost "12" is as likely to be the
+    /// UNITS figure as part of a description or a size. Those still wash the whole row.
+    /// </summary>
+    [Fact]
+    public void ADuplicatedCountStillWashesTheWholeRow()
+    {
+        byte[] pdf = Bytes(Clean);
+        var lines = PdfTextExtractor.ExtractPositionedLines(pdf);
+
+        for (int i = 0; i < lines.Count; i++)
+        {
+            var counts = lines[i].Words.Select(w => w.Text).Where(t => t is "12" or "24").ToList();
+            string? twice = counts.GroupBy(t => t).FirstOrDefault(g => g.Count() > 1)?.Key;
+            if (twice is null) continue;
+
+            var snip = PdfRowSnipper.TryCut(pdf, i + 1, i + 1, twice, i + 1);
+            if (snip is null) continue;
+            Assert.Equal(snip.Width, snip.FocusWidth);   // the whole row, as before
+        }
+    }
+
     private static RedBullTicket Parse(string fixture, out List<ConversionWarning> warnings)
     {
         warnings = [];
@@ -305,6 +377,38 @@ public class RedBullSnipTests
     }
 
     /// <summary>
+    /// The printed **bars** are never marked as if they were the code.
+    ///
+    /// Red Bull prints bars as well as digits, and on a poor scan the OCR transcribes the bars
+    /// themselves into a token on a line of their own: `1111'1"III511111` sits above the real
+    /// `611269332827` on this ticket. The parser takes that for the code — which is exactly why it
+    /// asks — and the marker then finds that token and draws a box round the bars, leaving the twelve
+    /// digits the operator has to type unmarked in the middle of the row.
+    ///
+    /// That is the worst shape a picture can take: confident, precise, and pointing at something that
+    /// cannot be read at all. A UPC-A is twelve digits, so a token carrying anything else is not the
+    /// printed code and gets no box of its own.
+    /// </summary>
+    [Fact]
+    public void TheBarsAreNeverMarkedAsIfTheyWereTheCode()
+    {
+        const string BarsAsToken = "2030959925_bars_unreadable";
+
+        // The row whose "code" is the bar pattern rather than digits.
+        var request = Ask(BarsAsToken, LineField.Barcode)
+            .First(r => r.PrintedValue.Length > 0 && r.PrintedValue.Count(char.IsDigit) != 12);
+
+        var snip = Assert.IsType<PdfRowSnip>(request.Snip);
+        Assert.Equal(0, snip.FocusLeft);
+        Assert.Equal(snip.Width, snip.FocusWidth);
+
+        // Said the other way round, because that is the failure worth naming: nothing narrow, over on
+        // the right, where the bars are printed.
+        Assert.False(snip.FocusWidth < snip.Width / 2 && snip.FocusLeft > snip.Width * 0.6,
+            "the marker is a small box in the right-hand strip - that is the bars, not the digits");
+    }
+
+    /// <summary>
     /// A column the scan did not record at all cannot be marked, so the whole row is washed instead.
     /// Marking a guess would be worse: the operator would read it, type it, and the ticket would
     /// reconcile against a figure from the wrong column.
@@ -393,7 +497,7 @@ public class RedBullSnipTests
         public List<LineFieldRequest> LineFields { get; } = [];
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new("TYPED-1", request.SuggestedDate ?? request.Date ?? new DateOnly(2026, 8, 10), request.Total);
+            new("TYPED-1", request.Date ?? new DateOnly(2026, 8, 10), request.Total);
 
         public string? AskLineField(LineFieldRequest request)
         {

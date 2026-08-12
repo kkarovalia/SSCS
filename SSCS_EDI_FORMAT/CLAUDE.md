@@ -94,14 +94,42 @@ to agree on the same digits, and that is verification rather than arithmetic.
   it (Dr Pepper's last column is AMOUNT, Red Bull's is TOTAL) and sending someone to look for a
   column that is not on their paper is worse than saying nothing. The ticket's own headings are cut
   from the same page at the same width and shown **directly on top of** the row, so UNITS sits over
-  the units. **Which lines a row spans is the parser's to say, never the snipper's:** Dr Pepper
+  the units. That strip is what makes a snip readable at all: a cut is two printed lines out of the
+  middle of a ticket, and by item 16 the printed header is a foot further up the page. It goes
+  missing three ways — a Dr Pepper header the scan damaged past `IsColumnHeader`, a Red Bull page
+  with no header line, and a row with no line number — so `LineFieldRequest.ColumnLegend` carries the
+  names as words behind it, written per vendor **and per section**: Dr Pepper's CREDITS block prints
+  no WHSLE, and a sales legend over a credit row has the operator counting across to the figure next
+  door. The typed one is deliberately second best and looks it (grey ground, our own font), because
+  it cannot align with a scan and must not invite anyone to read straight down off it. **Neither one
+  is ever marked** — the box goes on the figure being typed, never on a column name. **Which lines a row spans is the parser's to say, never the snipper's:** Dr Pepper
   prints the barcode on the product line *above* the priced row and Red Bull prints it on the line
   *below*, so "one line up" is right half the time and produces a real row of a real invoice with the
   wrong figure marked on it the other half. Nothing but a question ever opens a window — a note goes
   to the log and to the file list, because by the time one is written there is nothing left to do
   about it. Best-effort by design: `TryCut` never throws and
   returns null for a PDF that was never a scan, because the message it decorates has to stand on its
-  own.
+  own. **Where the text layer read the row the figure itself is boxed; where the row came off the
+  picture nothing is marked at all** (2026-08-12). The model's `verticalPosition` was drawn as a band
+  for a day; rendering every prompt the store's thirty samples raise and looking at each one put it on
+  the right row **6 times out of 11 on Red Bull and 0 out of 8 on Dr Pepper** — twice on the address
+  block, twice on the totals — and a sharper instruction did not change the shape. Half-right is the
+  one result that cannot ship, because a marker on the wrong row is read, typed, and books a real
+  figure off another product with every total still agreeing. `verticalPosition` is gone entirely:
+  the page opens **at the top**, and `LineFieldRequest.WholePage` makes the dialog print *which row*
+  above the picture — without that the operator gets small print, a box, and a hint reading "find the
+  row by its name" with no name anywhere on screen. A WinForms note that cost a day: a panel's
+  `AutoScrollPosition` set **before layout** is silently clamped to zero (its maximum is still the
+  default 100) and must be set again on `HandleCreated`. **Turn the page over is gone** (2026-08-12,
+  at the user's request): a page nobody can read is a page to re-feed at the scanner in five seconds,
+  not one to read sideways off a screen and type from. The picture is still turned automatically
+  where the reading says the sheet is inverted, which costs nobody a click.
+  The text-layer marker was rendered for all 170 questions the fixtures raise
+  and 31 of them were looked at (every Dr Pepper one, and Red Bull sampled across every fixture and
+  every field); 30 were right and one was not. That one is worth knowing about, because Red Bull's OCR
+  transcribes the printed **bars** into a token of ones (`1111'1"III511111` above `611269332827`) and
+  boxing it pointed confidently at something unreadable. A token that does not carry twelve digits is
+  not the code and gets no box (`RedBullSnipTests.TheBarsAreNeverMarkedAsIfTheyWereTheCode`).
 - `DrPepperPdfParser.cs` — Dr Pepper PDF → `Invoice`. Three things beyond the plain layout. **Ink:**
   invoices come back marked up in pen and OCR turns a stroke into a stray token, so a token with no
   digit in it is discarded — but only white space and the unused NET/TAX columns may absorb one. A
@@ -202,7 +230,14 @@ to agree on the same digits, and that is verification rather than arithmetic.
   exactly by a model that dropped one row and invented another.
 - `GeminiVisionReader.cs` — the Gemini implementation. One request per page, `temperature 0`, money
   returned as **text** so a cent never goes through a float, and a prompt whose first rule is *never
-  guess* — a blank sends the row to a person, a guess sends it to the register. Every failure (no
+  guess* — a blank sends the row to a person, a guess sends it to the register. **Every worked
+  example in that prompt has to be a real row that satisfies the rule printed under it** (checked
+  2026-08-12): the Dr Pepper example had the code before the name, which is backwards, and showed 2
+  cases × 21.38 landing on 21.38 directly beneath "CASES x NET = AMOUNT". And the row arithmetic is
+  now scoped to **deliveries only**, because it does not hold on a credit either way round — Dr
+  Pepper's credits print `CASES 0` against a real amount (`0 1 6.37 0.00 (6.37)`) and Red Bull's are
+  priced per unit off a fractional QTY (`0.08 (2) ... $2.22 ... ($4.45)`). A model told to check a
+  rule that cannot hold goes back and "corrects" the row, on exactly the lines the store watches. Every failure (no
   key, no network, refusal, throttling, unparseable reply) is `VisionReading.Empty`, exactly like
   `PdfBarcodeReader`'s empty list. `CheckTheKeyWorks` is the Test button, for the same reason Test
   Email exists. Key lives in `VisionSettings`, DPAPI-encrypted, behind the admin PIN; **off by
@@ -256,10 +291,19 @@ to agree on the same digits, and that is verification rather than arithmetic.
   Chubiwinos gets the 50% that reproduces the Ea List 5.59 SSCS shows against a 2.79 cost
 - `ConversionService.cs` — read / convert / atomic write (**writes N files for N invoices**);
   `ConversionCoordinator.cs` — queue; `IInvoiceDetailsPrompt` — asks the operator for the Blue Bell
-  and Chubiwinos invoice number, for **the date on every invoice** (the box is pre-filled with what
-  the scan read and what the operator confirms wins - a wrong year is the one thing these scanners
-  produce that looks entirely plausible, and two of twenty-two samples booked themselves into 2016
-  and 2020 for 2026), and for a Chubiwinos barcode that neither read nor is on record. `AskLineField`
+  and Chubiwinos invoice number, for **the date on every invoice**, and for a Chubiwinos barcode that
+  neither read nor is on record. **The date box is empty, exactly like the invoice number**
+  (2026-08-12): same weakness — no check digit, printed once — and a wrong year is the one thing
+  these scanners produce that looks entirely plausible, two of twenty-two samples booking themselves
+  into 2016 and 2020 for 2026. It took three goes. Asking only when the scan failed missed the
+  plausible-but-wrong case entirely; asking with the scan's reading *in the box* is an Enter
+  keypress; and underneath both, `InvoiceNumberDialog.Date` returned `_knownDate ?? typed`, so a
+  corrected year **was discarded** and a real invoice went out dated 2016 with the guard nominally
+  working. Now: empty box, typed every time, what is typed is what is used, and a blank is refused
+  rather than falling back to the scan. `InvoiceDetailsRequest` carries no `SuggestedDate` and no
+  `DateToOffer`, for the same reason it carries no suggested invoice number — a suggestion the
+  prompt cannot receive cannot be wired back in by accident
+  (`NoScannedInvoiceNumberOrDateCanReachThePromptForAnyVendor`). `AskLineField`
   asks for **one figure on one Dr Pepper or Red Bull row** — its UPC, units or amount — by showing
   the printed row with that figure boxed, rather than by describing it. **Never the description:** SSCS
   overrides it for a known item, so asking would be a prompt that changes nothing. **The invoice-number

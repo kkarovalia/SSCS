@@ -66,16 +66,13 @@ public sealed record VisionRow
     /// </summary>
     public bool PageUpsideDown { get; init; }
 
-    /// <summary>
-    /// How far down the page this row is printed, 0 at the top and 1000 at the bottom; null when the
-    /// model did not say.
-    ///
-    /// Used for one thing only: scrolling the picture so the row is in view when the question opens.
-    /// **Nothing is marked from it and no figure is derived from it**, because it is a guess and a
-    /// marker on the wrong row is the one mistake this whole prompt exists to prevent. Being wrong
-    /// costs a scroll, which is exactly what the operator had to do anyway.
-    /// </summary>
-    public int? VerticalPosition { get; init; }
+    // There is deliberately no "how far down the page is this row". The model was asked for one, and
+    // it was used to scroll the picture to the row and to wash a band over it. Measured on
+    // 2026-08-12 by rendering every prompt the store's thirty scans raise: the band was on the right
+    // row 6 times out of 11 on Red Bull and 0 out of 8 on Dr Pepper. A model that reads the figures
+    // on a page well does not thereby know where on the sheet they are printed, and asking it to
+    // guess produced a marker confident enough to be typed from. The page is shown whole, from the
+    // top, with the row named above it.
 }
 
 /// <summary>

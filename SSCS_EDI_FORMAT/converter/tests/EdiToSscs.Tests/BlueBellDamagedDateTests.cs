@@ -199,11 +199,11 @@ public class BlueBellDamagedDateTests
         Assert.Equal("87.30", doc.Descendants("TotalInvoiceDueAmt").Single().Value);
         Assert.Equal("30", doc.Descendants("InvoiceUnitQty").Single().Value);
 
-        // The operator was told the date was missing, and shown what the scan seemed to say.
+        // The operator was asked for the date, into an empty box. The parser's own reconstruction of
+        // "12-14-Z023" is not offered and cannot be: the record has no field to carry it.
         var seen = Assert.Single(prompt.Seen);
         Assert.True(seen.NeedsDate);
         Assert.Null(seen.Date);
-        Assert.Equal(new DateOnly(2023, 12, 14), seen.SuggestedDate);
     }
 
     /// <summary>
@@ -232,9 +232,12 @@ public class BlueBellDamagedDateTests
         foreach (string path in outcome.FinalOutputPaths)
             Assert.Equal("2026-03-20", XDocument.Load(path).Descendants("InvoiceDate").Single().Value);
 
-        // Always a box, and always pre-filled with what the ticket printed - 03/19/2026 here.
+        // Always a box, and always an empty one. This ticket prints 03/19/2026 and the operator
+        // typed 03/20/2026 - the file above says 2026-03-20, so what they typed is what was used.
+        // That used to be false: the dialog held the scan's date and returned it in preference to
+        // the box, so a corrected year was silently thrown away.
         Assert.All(prompt.Seen, r => Assert.True(r.NeedsDate));
-        Assert.All(prompt.Seen, r => Assert.Equal(new DateOnly(2026, 3, 19), r.DateToOffer));
+        Assert.All(prompt.Seen, r => Assert.Equal(new DateOnly(2026, 3, 19), r.Date));
     }
 
     /// <summary>

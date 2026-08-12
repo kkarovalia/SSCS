@@ -372,12 +372,11 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         WriteField(w, "price", "string");
         WriteField(w, "amount", "string");
         WriteField(w, "isCredit", "boolean");
-        WriteField(w, "verticalPosition", "string");
         w.WriteEndObject();
         w.WriteStartArray("propertyOrdering");
         foreach (string name in
                  new[] { "itemNumber", "description", "barcode", "qty", "units", "price", "amount",
-                         "isCredit", "verticalPosition" })
+                         "isCredit" })
             w.WriteStringValue(name);
         w.WriteEndArray();
         w.WriteStartArray("required");
@@ -435,12 +434,6 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                delivery row. This is the only thing that says which way the goods went, so do not
                leave it out.
 
-            Where each row sits. Give verticalPosition as a whole number from 0 to 1000 saying how
-            far down the page the row is printed - 0 is the very top edge, 1000 the very bottom,
-            500 halfway. It only has to be close. It is used to scroll a picture of the page to
-            that row when a person is asked about it, and for nothing else: no figure comes from
-            it.
-
             Which way up the page is. Some of these sheets go through the scanner rotated 180
             degrees, so the printing runs bottom-to-top and every character is upside down. You can
             still read them; say so by setting pageUpsideDown true. Set it false for a page the
@@ -480,60 +473,76 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
 
                 THIS IS A RED BULL DISTRIBUTION COMPANY DELIVERY TICKET.
 
-                Layout. Each product takes two printed lines - the priced row, and its barcode
-                directly underneath, printed above the bars:
+                Layout. Each product takes two printed lines - the priced row, and its barcode on
+                the line below, indented under the description with the bars off to the right:
 
-                  RB1718   1   24   RED BULL 8.4OZ LS   40.75  0.00  0.00  0.00   40.75
-                                      611269991000                            |||||||||||
+                  ID        QTY  UNITS  DESCRIPTION        PRICE   DEP    DISC   SUGAR    TOTAL
+                  RB1718     1     24   RED BULL 8.4OZ LS  $40.75  $0.00  $0.00  $0.00   $40.75
+                                          611269991000                                 ||||||||
 
                 Columns, left to right:
-                  itemNumber  - the code in the first column
+                  itemNumber  - ID: the code in the first column, RB and 4 to 6 digits
                   qty         - QTY: the number of CASES
                   units       - UNITS: individual cans or bottles. This is NOT the QTY column.
                   description - the product name
                   price       - PRICE: the cost of ONE CASE, not one can
-                  (DEP, DISC and SUGAR follow, usually 0.00 - do not report them)
+                  (DEP, DISC and SUGAR follow, always 0.00 on these tickets - do not report them)
                   amount      - TOTAL: the last money column on the row
-                  barcode     - the 12 digits on the line below, above the bars
+                  barcode     - the 12 digits on the line below, printed above the bars
 
-                How a row adds up: QTY x PRICE = TOTAL, less DEP/DISC/SUGAR where those are not
-                zero. If your reading does not add up, look at the row again - but if it still does
-                not, report what is printed.
+                The money is printed with dollar signs. Report it without them.
+
+                How a DELIVERY row adds up: QTY x PRICE = TOTAL, less DEP/DISC/SUGAR where those
+                are not zero. So 2 x $35.11 = $70.22. If your reading does not add up, look at the
+                row again - but if it still does not, report what is printed.
                 Never adjust a figure to make the row work.
 
                 Returns. A returns page or section prints the same columns with UNITS and every
-                money figure in brackets - (2) and (4.45). Set isCredit true on those rows and
-                report the figures without the brackets. A returns row is priced per UNIT rather
-                than per case, so its PRICE is a single can's price and its QTY may be a fraction.
+                money figure in brackets. Set isCredit true on those rows and report the figures
+                without the brackets:
+
+                  RB247584  0.08   (2)   PINK 12OZ LS       $2.22  $0.00  $0.00  $0.00  ($4.45)
+                                          611269003123                                 ||||||||
+
+                A returns row is priced per UNIT rather than per case, so PRICE is a single can's
+                price and QTY is a fraction of a case. THE DELIVERY ARITHMETIC ABOVE DOES NOT APPLY
+                TO A RETURNS ROW - 0.08 x $2.22 is nothing like $4.45, and that is correct. Do not
+                "fix" a returns row to make QTY x PRICE reach TOTAL. Copy what is printed.
 
                 Foot of the page: printedTotal is the INVOICE or ROA figure, and printedUnits is
-                Units Delivered. Ignore DISCOUNT, DEPOSIT and TAX.
+                Units Delivered. Ignore DISCOUNT, DEPOSIT, TAX and TOTAL DUE.
 
-                The column headings on these scans are usually unreadable. Go by position, not by
-                the heading text.
+                The column headings on these scans are usually unreadable - PRICE comes out as
+                PflICE and TOTAL as IDEAL. Go by position, not by the heading text.
                 """,
             VisionVendor.DrPepper => """
 
                 THIS IS A DR PEPPER / KEURIG DR PEPPER INVOICE.
 
-                Layout. Each product takes two printed lines - the product line carrying the code
-                and name, then the money row beneath it:
+                Layout. Each product takes two printed lines - the product line carrying the name
+                and then the code, and the money row beneath it:
 
-                  078000200287/20020468  12z12 Cn DrPep
-                       8.99    2    24    21.38   0.00   21.38
+                  DESCRIPTION          UPC/SKU
+                  WHSLE  CASES UNITS   NET     TAX     AMOUNT
+                  20z24 DrPep          078000082401/10001195
+                   56.00    4    96    32.50   0.00    130.00
+
+                The name comes FIRST on the product line and the code after it. The code is one
+                token: 12 digits, a slash, then the vendor's own item number.
 
                 Columns:
-                  barcode     - the 12 digits BEFORE the slash on the product line
+                  description - the product name, at the START of the product line
+                  barcode     - the 12 digits BEFORE the slash
                   itemNumber  - the digits AFTER the slash
-                  description - the product name
                   qty         - CASES
                   units       - UNITS: individual bottles or cans. This is NOT the CASES column.
                   price       - NET: the cost of ONE CASE
                   amount      - AMOUNT: the last money column
                   (WHSLE is the first money column and TAX the second to last - do not report them)
 
-                How a row adds up: CASES x NET = AMOUNT. If your reading does not add up, look at
-                the row again - but if it still does not, report what is printed.
+                How a DELIVERY row adds up: CASES x NET = AMOUNT. So 4 x $32.50 = $130.00. If your
+                reading does not add up, look at the row again - but if it still does not, report
+                what is printed.
                 Never adjust a figure to make the row work.
 
                 Groups. Rows are grouped by package type, and each group is closed by its own
@@ -546,9 +555,21 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 75000014 5". They have a name, a number and a count but no price and no amount.
                 They are not products and must NOT be reported as rows.
 
-                Returns. A CREDITS banner starts a section with a shorter column set - no WHSLE -
-                and the money in brackets. Set isCredit true on those rows and report the figures
-                without the brackets.
+                Returns. A CREDITS banner starts a section with a SHORTER COLUMN SET - the WHSLE
+                column is gone - and the money in brackets. Set isCredit true on those rows and
+                report the figures without the brackets:
+
+                  CREDITS
+                  DESCRIPTION          UPC/SKU
+                  CASES UNITS   NET     TAX     AMOUNT
+                  12z12p Zsgr DP       078000035261/10136728
+                      0     1    6.37   0.00    (6.37)
+
+                Count the columns on a credit row before reading it. There are five money and count
+                columns, not six, so the first figure is CASES and not WHSLE - reading it as a sales
+                row shifts every figure one place left. AND THE DELIVERY ARITHMETIC ABOVE DOES NOT
+                APPLY: a credit's CASES is routinely 0 while its AMOUNT is not, as here. Do not
+                "fix" a credit row to make CASES x NET reach AMOUNT. Copy what is printed.
 
                 Pen marks. These invoices come back marked up by hand. A pen stroke is not a digit
                 and not a decimal point, and a stroke through a figure is not a minus sign. Read the
@@ -612,7 +633,6 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 Price = price,
                 Amount = amount,
                 IsCredit = Flag(row, "isCredit"),
-                VerticalPosition = Int(Text(row, "verticalPosition")),
             });
         }
 

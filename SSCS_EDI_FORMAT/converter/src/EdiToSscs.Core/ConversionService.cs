@@ -362,7 +362,7 @@ public sealed class ConversionService : IFileConverter
         // Asking for the total does not weaken the sum-must-match gate, it restores it: a figure a
         // person read off the paper is worth more than one OCR guessed at.
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Dr Pepper", date, total ?? 0m, 0, 1, 1, null, "Dr Pepper",
+            inputFileName, "Dr Pepper", date, total ?? 0m, 0, 1, 1, "Dr Pepper",
             NeedsTotal: total is null));
 
         Invoice invoice = DrPepperPdfParser.Parse(
@@ -402,9 +402,10 @@ public sealed class ConversionService : IFileConverter
         var snip = field.LineNo > 0
             ? PdfRowSnipper.TryCut(
                 pdfBytes, Math.Max(1, field.LineNo - 1), field.LineNo,
-                field.PrintedValue, focusLine, barcode)
+                field.PrintedValue, focusLine, barcode,
+                lastOfDuplicates: field.Field == LineField.Amount)
             : PdfRowSnipper.TryCutWholePage(
-                pdfBytes, field.Page, field.PageUpsideDown, field.VerticalPosition);
+                pdfBytes, field.Page, field.PageUpsideDown);
 
         bool wholePage = field.LineNo <= 0 && snip is not null;
 
@@ -412,6 +413,7 @@ public sealed class ConversionService : IFileConverter
             inputFileName, "Dr Pepper", field.Field, field.Position, field.LineCount,
             field.Gtin, field.Description, field.PrintedValue, null, field.Amount, snip,
             snip is null || wholePage ? null : PdfRowSnipper.TryCutHeader(pdfBytes, field.LineNo),
+            ColumnLegend: ColumnLegend(PdfVendor.DrPepper, field.IsCredit),
             ColumnName: field.Field switch
             {
                 LineField.Units => "UNITS",
@@ -423,7 +425,8 @@ public sealed class ConversionService : IFileConverter
                 LineField.Units => "Cans or bottles, not cases.",
                 LineField.Barcode => "12 digits, before the slash.",
                 _ => "",
-            })));
+            }),
+            WholePage: wholePage));
 
         if (string.IsNullOrWhiteSpace(typed))
             throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
@@ -434,6 +437,35 @@ public sealed class ConversionService : IFileConverter
     }
 
     /// <summary>
+    /// The vendor's column names, in the order they are printed, for the strip above the row.
+    ///
+    /// A backstop for the printed header rather than a replacement: <see cref="PdfRowSnipper"/> cuts
+    /// the real one off the same page at the same width, which is far better because it lines up —
+    /// UNITS sits over the units. This is what gets shown when there is nothing to cut, and there
+    /// are three ways to get there. A Dr Pepper header the scan damaged until it no longer reads as
+    /// one; a Red Bull page where none was found; a row with no line number at all.
+    ///
+    /// Worth having anyway, because the strip is what makes a cut-out row readable. A snip is a
+    /// couple of printed lines out of the middle of a ticket, and by item 16 the column names are a
+    /// foot further up the page — so a row without them is a line of bare figures and no way to tell
+    /// the NET from the AMOUNT.
+    ///
+    /// <paramref name="credit"/> picks the section, which is a real difference and not a detail:
+    /// Dr Pepper's CREDITS block prints no WHSLE column, so a sales legend over a credit row would
+    /// have the operator counting across to the wrong figure. Red Bull prints one column set for
+    /// both and only brackets the figures.
+    /// </summary>
+    private static string ColumnLegend(PdfVendor vendor, bool credit) => vendor switch
+    {
+        PdfVendor.RedBull => "ID   QTY   UNITS   DESCRIPTION   PRICE   DEP   DISC   SUGAR   TOTAL",
+        PdfVendor.DrPepper when credit =>
+            "DESCRIPTION   UPC/SKU\nCASES   UNITS   NET   TAX   AMOUNT",
+        PdfVendor.DrPepper =>
+            "DESCRIPTION   UPC/SKU\nWHSLE   CASES   UNITS   NET   TAX   AMOUNT",
+        _ => "",
+    };
+
+    /// <summary>
     /// The line under the box. When the whole page is being shown rather than one cut-out row, the
     /// operator has to be told that — otherwise they look for a highlight that is deliberately not
     /// there. Said first, because it changes what they do with the picture; the field's own hint
@@ -441,8 +473,8 @@ public sealed class ConversionService : IFileConverter
     /// </summary>
     private static string Hint(bool wholePage, string usual) =>
         !wholePage ? usual
-        : usual.Length > 0 ? "The row is marked roughly - check the name matches. " + usual
-        : "The row is marked roughly - check the name matches.";
+        : usual.Length > 0 ? "Nothing is marked - find the row by its name. " + usual
+        : "Nothing is marked - find the row by its name.";
 
     /// <summary>
     /// A Blue Bell delivery ticket carries a Sales block and, when goods went back on the truck, a
@@ -463,8 +495,7 @@ public sealed class ConversionService : IFileConverter
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Blue Bell",
             sections.Select(s => s.Date).FirstOrDefault(d => d is not null),
-            total, lineCount, 1, 1,
-            sections.Select(s => s.SuggestedDate).FirstOrDefault(d => d is not null), "Blue Bell"));
+            total, lineCount, 1, 1, "Blue Bell"));
 
         var invoice = BlueBellPdfParser.Merge(sections, keyed.InvoiceNumber, keyed.Date);
         var doc = new ConvertedDocument(
@@ -485,7 +516,7 @@ public sealed class ConversionService : IFileConverter
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Chubiwinos", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1,
-            null, "Chubiwinos"));
+            "Chubiwinos"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date,
             line => AskBarcode(inputFileName, ticket, line, warnings));
@@ -510,8 +541,7 @@ public sealed class ConversionService : IFileConverter
         var ticket = BimboPdfParser.Parse(lines, warnings);
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Bimbo", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1,
-            ticket.SuggestedDate, "Bimbo"));
+            inputFileName, "Bimbo", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1, "Bimbo"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
         var doc = new ConvertedDocument(
@@ -543,7 +573,7 @@ public sealed class ConversionService : IFileConverter
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Red Bull", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1,
-            ticket.SuggestedDate, "Red Bull"));
+            "Red Bull"));
 
         // Answers are remembered so a second pass can re-use them: the operator is never asked the
         // same figure twice.
@@ -693,18 +723,26 @@ public sealed class ConversionService : IFileConverter
         // The barcode is printed on the line *under* the priced row, so that is the line to mark —
         // and it is marked by finding the token the scan actually wrote, which is not the same string
         // as the digits shown back to the operator once the scan has put a mark through it.
+        //
+        // Only when that token could be the printed code, though. Red Bull prints **bars** as well as
+        // digits, and on a poor scan the OCR transcribes the bars themselves as a token of ones and
+        // quote marks on a line of their own — `1111'1"III511111` sits above `611269332827` on
+        // REDBULL_2030959925. The parser takes that for the code, which is why it asks; the marker
+        // then finds it and draws a confident box **round the bars**, leaving the digits the operator
+        // has to type unmarked in the middle of the row. A UPC-A is twelve digits, so a token that
+        // does not carry twelve is not the printed code, and neither it nor the line it was found on
+        // may be pointed at. Marking the priced row instead says "this row" and claims nothing more.
         bool barcode = field == LineField.Barcode;
-        int focusLine = barcode && line.CodeLineNumber > 0 ? line.CodeLineNumber : line.LineNumber;
-        string? focusText = barcode
-            ? (line.CodeToken.Length > 0 ? line.CodeToken : null)
-            : printed;
+        bool codeIsPlausible = barcode && line.CodeToken.Count(char.IsDigit) == 12;
+        int focusLine = codeIsPlausible && line.CodeLineNumber > 0 ? line.CodeLineNumber : line.LineNumber;
+        string? focusText = barcode ? (codeIsPlausible ? line.CodeToken : null) : printed;
 
         var snip = line.LineNumber > 0
             ? PdfRowSnipper.TryCut(
                 pdfBytes, line.LineNumber, Math.Max(line.LineNumber, line.LastLineNumber),
-                focusText, focusLine)
+                focusText, focusLine, lastOfDuplicates: field == LineField.Amount)
             : PdfRowSnipper.TryCutWholePage(
-                pdfBytes, line.Page, line.PageUpsideDown, line.VerticalPosition);
+                pdfBytes, line.Page, line.PageUpsideDown);
 
         bool wholePage = line.LineNumber <= 0 && snip is not null;
 
@@ -714,6 +752,7 @@ public sealed class ConversionService : IFileConverter
             snip is null || wholePage || line.HeaderLineNumber <= 0
                 ? null
                 : PdfRowSnipper.TryCutHeaderLine(pdfBytes, line.HeaderLineNumber),
+            ColumnLegend: ColumnLegend(PdfVendor.RedBull, line.IsCredit),
             ColumnName: field switch
             {
                 LineField.Units => "UNITS",
@@ -725,7 +764,8 @@ public sealed class ConversionService : IFileConverter
                 LineField.Units => "Cans or bottles, not cases.",
                 LineField.Barcode => "12 digits, above the bars.",
                 _ => "",
-            })));
+            }),
+            WholePage: wholePage));
 
         if (string.IsNullOrWhiteSpace(typed))
             throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
@@ -793,19 +833,16 @@ public sealed class ConversionService : IFileConverter
             throw new EdiConversionException(PdfReasonCodes.NoInvoiceNumber,
                 "An invoice number is required.");
 
-        // What the operator confirmed wins. The date is typed on every invoice now, with the scan's
-        // own reading offered in the box: a wrong year is the one thing these scanners produce that
+        // The typed date, and nothing else. There is no fallback to what the scan read, deliberately:
+        // a fallback is what a blank box turns into, and the whole point of asking is that the
+        // scan's reading is not trusted. A wrong year is the one thing these scanners produce that
         // looks entirely plausible - two of twenty-two samples booked themselves into 2016 and 2020,
         // both for 2026 - and nothing in the file can catch one.
-        //
-        // A prompt that comes back with nothing falls back to what the scan actually read, and never
-        // to SuggestedDate: that is a reconstruction offered for a person to confirm, not evidence on
-        // its own. So a ticket whose date was destroyed and whose operator typed none is still
-        // refused, rather than quietly taking the guess.
-        DateOnly date = answer.Date != default ? answer.Date : (request.Date ?? default);
+        DateOnly date = answer.Date;
         if (date == default)
             throw new EdiConversionException(PdfReasonCodes.NoDate,
-                $"The date could not be read from this {request.Vendor} invoice and none was entered.");
+                "The date on this invoice has to be typed in. Copy it from the top of the ticket and "
+                + "convert the file again.");
 
         if (request.NeedsTotal && answer.Total <= 0m)
             throw new EdiConversionException(PdfReasonCodes.NoTotal,

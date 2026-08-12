@@ -30,7 +30,7 @@ public class DrPepperScanDamageTests
         {
             Prompts.Add(request);
             return new InvoiceDetails(
-                invoiceNumber, request.DateToOffer ?? request.Date ?? default, total);
+                invoiceNumber, request.Date ?? default, total);
         }
 
         public string? AskLineField(LineFieldRequest request)

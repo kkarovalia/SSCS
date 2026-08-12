@@ -29,7 +29,7 @@ public class BlueBellPipelineTests
         {
             Seen.Add(request);
             string? number = _next < answers.Length ? answers[_next++] : null;
-            return number is null ? null : new InvoiceDetails(number, request.SuggestedDate ?? default);
+            return number is null ? null : new InvoiceDetails(number, request.Date ?? default);
         }
     }
 
