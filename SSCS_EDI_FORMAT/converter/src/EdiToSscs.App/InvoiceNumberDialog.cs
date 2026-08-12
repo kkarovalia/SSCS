@@ -20,7 +20,7 @@ namespace EdiToSscs.App;
 /// </summary>
 internal sealed class InvoiceNumberDialog : Form
 {
-    private const string DateFormat = "MM-dd-yyyy";
+    private const string DateFormat = TypedDate.Format;
 
     private readonly TextBox? _input;
     private readonly TextBox? _dateInput;
@@ -96,7 +96,7 @@ internal sealed class InvoiceNumberDialog : Form
 
         if (request.NeedsDate)
         {
-            layout.Controls.Add(FieldLabel("Date  (mm-dd-yyyy)"));
+            layout.Controls.Add(FieldLabel("Date  (month first)"));
             _dateInput = new TextBox
             {
                 Width = 160, Font = new Font("Consolas", 12f), Margin = new Padding(0, 0, 0, 2),
@@ -178,7 +178,7 @@ internal sealed class InvoiceNumberDialog : Form
         if (_input is not null && InvoiceNumber.Length == 0)
             return "Type the invoice number, or Skip this file.";
         if (_dateInput is not null && ParseDate(_dateInput.Text) is null)
-            return "Type the date like 12-14-2023.";
+            return "That date could not be read. Month first, so 8/11/26 or 08-11-2026.";
         if (_totalInput is not null && ParseMoney(_totalInput.Text) is not > 0m)
             return "Type the amount due like 1080.22.";
         return null;
@@ -194,13 +194,8 @@ internal sealed class InvoiceNumberDialog : Form
     }
 
     /// <summary>
-    /// Parses the typed date strictly as mm-dd-yyyy, the way Blue Bell prints it. A loose parse
-    /// would read "12-14-2023" one way here and another way on a machine set to a day-first locale,
-    /// which would silently book the invoice into the wrong period.
+    /// Month, day, year in whatever punctuation the operator used. The rules live in
+    /// <see cref="TypedDate"/> in Core, where they can be tested.
     /// </summary>
-    private static DateOnly? ParseDate(string? text) =>
-        DateOnly.TryParseExact((text ?? "").Trim(), DateFormat,
-            CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
-            ? d
-            : null;
+    private static DateOnly? ParseDate(string? text) => TypedDate.TryParse(text);
 }
