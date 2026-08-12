@@ -19,7 +19,13 @@ namespace EdiToSscs.Core;
 /// </summary>
 public sealed record PdfRowSnip(
     byte[] PagePng, int Left, int Top, int Width, int Height,
-    int FocusLeft, int FocusTop, int FocusWidth, int FocusHeight);
+    int FocusLeft, int FocusTop, int FocusWidth, int FocusHeight,
+    /// <summary>
+    /// Where to scroll a picture too tall to show whole, in pixels down from the top of the cut.
+    /// 0 means the top, which is what a snip that fits on screen wants anyway. Only a whole-page
+    /// snip sets this, and only ever as a hint: nothing is marked from it.
+    /// </summary>
+    int ScrollTo = 0);
 
 /// <summary>
 /// Cuts the picture of a printed row out of a scanned invoice.
@@ -129,7 +135,8 @@ public static class PdfRowSnipper
     /// is exactly what destroys the text layer in the first place. Showing one the wrong way up is
     /// worse than showing nothing, so this is worth the field it takes to carry.
     /// </param>
-    public static PdfRowSnip? TryCutWholePage(byte[] pdfBytes, int pageNumber, bool upsideDown = false)
+    public static PdfRowSnip? TryCutWholePage(
+        byte[] pdfBytes, int pageNumber, bool upsideDown = false, int? verticalPosition = null)
     {
         try
         {
@@ -145,10 +152,29 @@ public static class PdfRowSnipper
 
             if (upsideDown) png = Turn(png) ?? png;
 
-            // Zero focus height is how this record says "no marker" - the same thing a column
-            // header snip does.
+            // Turning the page turns the row's position with it.
+            int? down = verticalPosition is int v && upsideDown ? 1000 - v : verticalPosition;
+            int scrollTo = down is int d
+                ? (int)Math.Round(Math.Clamp(d, 0, 1000) / 1000.0 * image.HeightInSamples)
+                : 0;
+
+            // The band the row is in, marked in the same amber as every other prompt.
+            //
+            // This is a **band, never a figure**. Where the text layer read the row, the marker goes
+            // round the digits themselves because their position is known to the pixel; here it is
+            // the model's estimate, so it is drawn a couple of printed lines tall and says no more
+            // than "around here". The row's name is in the question above it and the rest of the page
+            // is still there to scroll through, which is what makes an estimate safe to draw: a
+            // marker that is out costs a glance, not a wrong figure.
+            int band = Math.Max(40, (int)Math.Round(image.HeightInSamples * 0.03));
+            int focusTop = down is null
+                ? 0
+                : Math.Clamp(scrollTo - band / 2, 0, Math.Max(0, image.HeightInSamples - band));
+
             return new PdfRowSnip(
-                png, 0, 0, image.WidthInSamples, image.HeightInSamples, 0, 0, 0, 0);
+                png, 0, 0, image.WidthInSamples, image.HeightInSamples,
+                0, focusTop, down is null ? 0 : image.WidthInSamples, down is null ? 0 : band,
+                scrollTo);
         }
         catch
         {

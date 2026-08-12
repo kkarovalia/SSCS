@@ -403,7 +403,8 @@ public sealed class ConversionService : IFileConverter
             ? PdfRowSnipper.TryCut(
                 pdfBytes, Math.Max(1, field.LineNo - 1), field.LineNo,
                 field.PrintedValue, focusLine, barcode)
-            : PdfRowSnipper.TryCutWholePage(pdfBytes, field.Page, field.PageUpsideDown);
+            : PdfRowSnipper.TryCutWholePage(
+                pdfBytes, field.Page, field.PageUpsideDown, field.VerticalPosition);
 
         bool wholePage = field.LineNo <= 0 && snip is not null;
 
@@ -440,8 +441,8 @@ public sealed class ConversionService : IFileConverter
     /// </summary>
     private static string Hint(bool wholePage, string usual) =>
         !wholePage ? usual
-        : usual.Length > 0 ? "Find the row on the page above. " + usual
-        : "Find the row on the page above.";
+        : usual.Length > 0 ? "The row is marked roughly - check the name matches. " + usual
+        : "The row is marked roughly - check the name matches.";
 
     /// <summary>
     /// A Blue Bell delivery ticket carries a Sales block and, when goods went back on the truck, a
@@ -702,7 +703,8 @@ public sealed class ConversionService : IFileConverter
             ? PdfRowSnipper.TryCut(
                 pdfBytes, line.LineNumber, Math.Max(line.LineNumber, line.LastLineNumber),
                 focusText, focusLine)
-            : PdfRowSnipper.TryCutWholePage(pdfBytes, line.Page, line.PageUpsideDown);
+            : PdfRowSnipper.TryCutWholePage(
+                pdfBytes, line.Page, line.PageUpsideDown, line.VerticalPosition);
 
         bool wholePage = line.LineNumber <= 0 && snip is not null;
 

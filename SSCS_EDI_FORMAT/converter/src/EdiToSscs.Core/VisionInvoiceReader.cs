@@ -65,6 +65,17 @@ public sealed record VisionRow
     /// rotated page on screen, since no figure is derived from this and none is marked.
     /// </summary>
     public bool PageUpsideDown { get; init; }
+
+    /// <summary>
+    /// How far down the page this row is printed, 0 at the top and 1000 at the bottom; null when the
+    /// model did not say.
+    ///
+    /// Used for one thing only: scrolling the picture so the row is in view when the question opens.
+    /// **Nothing is marked from it and no figure is derived from it**, because it is a guess and a
+    /// marker on the wrong row is the one mistake this whole prompt exists to prevent. Being wrong
+    /// costs a scroll, which is exactly what the operator had to do anyway.
+    /// </summary>
+    public int? VerticalPosition { get; init; }
 }
 
 /// <summary>

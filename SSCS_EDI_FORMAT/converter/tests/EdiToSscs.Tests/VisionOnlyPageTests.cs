@@ -130,8 +130,8 @@ public class VisionOnlyPageTests
     /// would be on a ticket the text layer had read.
     ///
     /// The question carries the whole page rather than a cut-out row: with no text layer there are no
-    /// coordinates, and a line number invented here would mark a figure on some other row. So nothing
-    /// is marked (<c>FocusHeight</c> 0) and the operator finds the row by name.
+    /// coordinates, so the model's estimate of where the row sits is what opens the picture at it and
+    /// marks the band it is in — never a box round one figure, which would need a position nobody has.
     /// </summary>
     [Fact]
     public void ARowThePicturesOwnArithmeticRejectsIsStillAskedAbout()
@@ -149,8 +149,7 @@ public class VisionOnlyPageTests
         var asked = Assert.Single(prompt.LineFields);
         Assert.Equal("RED BULL 8.4OZ LS", asked.Description);
         Assert.Equal(LineField.Amount, asked.Field);
-        Assert.NotNull(asked.Snip);
-        Assert.Equal(0, asked.Snip.FocusHeight);   // the page, with nothing marked on it
+        Assert.NotNull(asked.Snip);   // the page, opened at the row
 
         Assert.Equal("134.95", XDocument.Load(outcome.FinalOutputPaths[0])
             .Descendants("TotalInvoiceDueAmt").Single().Value);
@@ -600,6 +599,7 @@ public class VisionOnlyPageTests
                 new VisionRow
                 {
                     ItemNumber = "", Description = "16z12 Clam", Barcode = "not-a-barcode", Page = 1,
+                    VerticalPosition = 700,
                     Qty = 1, Units = 12, Price = 21.40m, Amount = 21.40m,
                 },
             ],
@@ -616,10 +616,52 @@ public class VisionOnlyPageTests
         Assert.NotNull(asked.Snip);
         Assert.True(asked.Snip.Width > 0 && asked.Snip.Height > 0);
 
-        // Nothing marked, and no column header either - that legend is cut by line number too.
-        Assert.Equal(0, asked.Snip.FocusHeight);
+        // A band-level mark from the model's estimate, and no column header - that legend is cut by
+        // line number, which this row does not have. The band is a couple of printed lines tall, not
+        // a box round one figure: the position is an estimate and is drawn as one.
+        Assert.True(asked.Snip.FocusHeight > 0);
+        Assert.InRange(asked.Snip.FocusHeight, 1, (int)(asked.Snip.Height * 0.06));
         Assert.Null(asked.Header);
-        Assert.Contains("Find the row on the page", asked.Hint, StringComparison.Ordinal);
+        Assert.Contains("marked roughly", asked.Hint, StringComparison.Ordinal);
+
+        // And it opens at the row rather than at the top: a whole invoice to scroll through is
+        // barely better than no picture. Row at 700/1000 down a page lands about seven tenths in.
+        Assert.InRange(asked.Snip.ScrollTo, (int)(asked.Snip.Height * 0.6), (int)(asked.Snip.Height * 0.8));
+    }
+
+    /// <summary>
+    /// A row the model gave no position for still shows the page, opened at the top. The scroll is a
+    /// convenience layered on the picture, not a condition of getting one.
+    /// </summary>
+    [Fact]
+    public void APictureRowWithNoPositionStillGetsThePage()
+    {
+        using var tmp = new TempDir();
+        var prompt = new ScriptedPrompt("4642411699");
+        prompt.Paper["16z12 Clam"] = "014800511758";
+
+        var reading = new VisionReading
+        {
+            Rows =
+            [
+                new VisionRow
+                {
+                    ItemNumber = "", Description = "16z12 Clam", Barcode = "nope", Page = 1,
+                    Qty = 1, Units = 12, Price = 21.40m, Amount = 21.40m,
+                },
+            ],
+            PrintedTotal = 21.40m,
+            PrintedUnits = 12,
+        };
+
+        var outcome = Service(tmp, prompt, new FakeVision(reading))
+            .ConvertFile(DrPepper(Place(tmp, "DRPEPPER_upside_down.pdf", "dp.pdf")), tmp.Sub("out"));
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        var asked = Assert.Single(prompt.LineFields);
+        Assert.NotNull(asked.Snip);
+        Assert.Equal(0, asked.Snip.ScrollTo);
+        Assert.Equal(0, asked.Snip.FocusHeight);   // no position, so nothing to mark
     }
 
     /// <summary>

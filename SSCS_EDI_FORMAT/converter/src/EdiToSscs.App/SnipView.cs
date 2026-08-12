@@ -28,6 +28,17 @@ internal static class SnipView
     /// </summary>
     private const int MaxHeight = 460;
 
+    /// <summary>
+    /// How tall the frame is when it is showing a page rather than a cut-out row.
+    ///
+    /// Sized to read as a band of the invoice — six or eight printed rows — rather than as a whole
+    /// document, because being handed an entire invoice to hunt through is barely better than being
+    /// handed nothing. The rest of the page stays behind it and reachable: the model's idea of where
+    /// the row is is a guess, and a window small enough to look tidy is a window that can miss.
+    /// Scrolling out of a band recovers; a band cut out of the page and the rest thrown away does not.
+    /// </summary>
+    private const int BandHeight = 320;
+
     /// <summary>Builds the control, or null when there is no picture to show.</summary>
     public static Control? TryCreate(PdfRowSnip? snip)
     {
@@ -58,12 +69,62 @@ internal static class SnipView
         {
             AutoScroll = true,
             Width = picture.Width + SystemInformation.VerticalScrollBarWidth + 2,
-            Height = MaxHeight,
+            Height = BandHeight,
             BorderStyle = BorderStyle.FixedSingle,
             Margin = new Padding(0, 0, 0, 10),
         };
         frame.Controls.Add(box);
-        return frame;
+
+        // Open at the row rather than at the top of the page. Being asked to type one figure and
+        // handed a whole invoice to scroll through is barely better than being handed nothing, so
+        // the model says roughly how far down its row is and the frame starts there — the row a
+        // third of the way in, with what comes above it for context.
+        //
+        // A hint, never a claim: nothing is marked, so a position that is out costs a scroll, which
+        // is what the operator faced anyway. That is why this is allowed to be a guess when marking
+        // a figure from a guess would not be.
+        int target = (int)Math.Round(snip!.ScrollTo * ((double)picture.Height / Math.Max(1, snip.Height)));
+        int top = Math.Clamp(target - BandHeight / 3, 0, Math.Max(0, picture.Height - BandHeight));
+        if (top > 0) frame.AutoScrollPosition = new Point(0, top);
+
+        // And a way to turn it over.
+        //
+        // Some of these sheets go through the scanner upside down, and the only thing that can say so
+        // is a reader looking at the picture — the text layer is debris precisely *because* the page
+        // is inverted. That reader gets it right most of the time and not all of the time, and a page
+        // shown the wrong way up is no use at all. Rather than keep pushing on the guess, the operator
+        // gets the control: one click, no consequences, and it is obvious from looking whether it is
+        // needed. Cheap to offer and it ends the problem outright.
+        var turn = new LinkLabel
+        {
+            Text = "Turn the page over",
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 10),
+        };
+        turn.LinkClicked += (_, _) =>
+        {
+            var shown = box.Image;
+            if (shown is null) return;
+            int was = frame.VerticalScroll.Value;
+            shown.RotateFlip(RotateFlipType.Rotate180FlipNone);
+            box.Image = shown;                                   // reassign so the box repaints
+            // The row that was in view is now the same distance from the other end.
+            frame.AutoScrollPosition = new Point(
+                0, Math.Clamp(picture.Height - was - frame.ClientSize.Height, 0,
+                    Math.Max(0, picture.Height - frame.ClientSize.Height)));
+        };
+
+        var stack = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 0, 0, 4),
+            WrapContents = false,
+        };
+        stack.Controls.Add(frame);
+        stack.Controls.Add(turn);
+        return stack;
     }
 
     private static Bitmap? Render(PdfRowSnip? snip)

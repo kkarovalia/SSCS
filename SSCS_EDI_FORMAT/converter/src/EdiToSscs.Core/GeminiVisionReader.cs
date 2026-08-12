@@ -372,10 +372,12 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         WriteField(w, "price", "string");
         WriteField(w, "amount", "string");
         WriteField(w, "isCredit", "boolean");
+        WriteField(w, "verticalPosition", "string");
         w.WriteEndObject();
         w.WriteStartArray("propertyOrdering");
         foreach (string name in
-                 new[] { "itemNumber", "description", "barcode", "qty", "units", "price", "amount", "isCredit" })
+                 new[] { "itemNumber", "description", "barcode", "qty", "units", "price", "amount",
+                         "isCredit", "verticalPosition" })
             w.WriteStringValue(name);
         w.WriteEndArray();
         w.WriteStartArray("required");
@@ -432,6 +434,12 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                heading - and report its figures without the brackets. Set it false for a normal
                delivery row. This is the only thing that says which way the goods went, so do not
                leave it out.
+
+            Where each row sits. Give verticalPosition as a whole number from 0 to 1000 saying how
+            far down the page the row is printed - 0 is the very top edge, 1000 the very bottom,
+            500 halfway. It only has to be close. It is used to scroll a picture of the page to
+            that row when a person is asked about it, and for nothing else: no figure comes from
+            it.
 
             Which way up the page is. Some of these sheets go through the scanner rotated 180
             degrees, so the printing runs bottom-to-top and every character is upside down. You can
@@ -604,6 +612,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 Price = price,
                 Amount = amount,
                 IsCredit = Flag(row, "isCredit"),
+                VerticalPosition = Int(Text(row, "verticalPosition")),
             });
         }
 
