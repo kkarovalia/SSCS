@@ -323,29 +323,29 @@ public class BimboPdfTests
         var t = Parse("84294890013239_sscs_verified", out _);
 
         Assert.Equal(new DateOnly(2026, 7, 28), t.Date);
-        Assert.Null(t.SuggestedDate);
     }
 
     /// <summary>
-    /// The older 200 dpi scans turn the separators into digits ("711312026" for 7/13/2026). The
-    /// reading is recoverable — the shape is fixed and only one calendar date fits — but it is
-    /// arithmetic on damage, so it is offered as a suggestion to check rather than used.
+    /// The older 200 dpi scans turn the separators into digits ("711312026" for 7/13/2026), and that
+    /// reading is **not** kept.
+    ///
+    /// The token is recoverable — the shape is fixed and only one calendar date fits — and the
+    /// reconstruction used to come back as a suggestion to pre-fill the operator's date box with.
+    /// It does not any more (2026-08-12): it is arithmetic on damage, the box is empty for every
+    /// vendor, and a pre-filled date is what let an invoice go out dated 2016. So a damaged token
+    /// reads as no date at all, and the person holding the ticket supplies it.
     /// </summary>
     [Theory]
-    [InlineData("84294890013091_zero_money_row", 2026, 7, 13)]
-    [InlineData("84294890012926_no_qty_column", 2026, 6, 26)]
-    [InlineData("84294890012769", 2026, 6, 12)]
-    [InlineData("84294890012641", 2026, 6, 2)]
-    [InlineData("84294890013154_bad_section_count", 2026, 7, 20)]
-    [InlineData("84294890012057", 2026, 6, 20)]
-    [InlineData("84294890013046", 2026, 7, 7)]
-    public void A200DpiScanOffersItsDateAsASuggestionRatherThanUsingIt(
-        string ticket, int year, int month, int day)
+    [InlineData("84294890013091_zero_money_row")]
+    [InlineData("84294890012926_no_qty_column")]
+    [InlineData("84294890012769")]
+    [InlineData("84294890012641")]
+    [InlineData("84294890013154_bad_section_count")]
+    [InlineData("84294890012057")]
+    [InlineData("84294890013046")]
+    public void A200DpiScanKeepsNoDateAtAllRatherThanAGuessedOne(string ticket)
     {
-        var t = Parse(ticket, out _);
-
-        Assert.Null(t.Date);
-        Assert.Equal(new DateOnly(year, month, day), t.SuggestedDate);
+        Assert.Null(Parse(ticket, out _).Date);
     }
 
     // ─────────────────────────────────────────────────────────────────── retail

@@ -18,12 +18,6 @@ public sealed class BimboTicket
     /// <summary>The printed date, or null when the scan destroyed it and the operator must key one.</summary>
     public required DateOnly? Date { get; init; }
 
-    /// <summary>
-    /// A date recovered from a scan whose separators came back as digits ("711312026" for 7/13/2026).
-    /// Only ever offered to the operator as a suggestion to check against the paper — never used on
-    /// its own, because the recovery is arithmetic on a damaged reading rather than a reading.
-    /// </summary>
-    public DateOnly? SuggestedDate { get; init; }
 
     /// <summary>The ticket's own TICKET TOTALS wholesale figure. Negative if returns outweighed the drop.</summary>
     public required decimal Total { get; init; }
@@ -221,7 +215,7 @@ public static partial class BimboPdfParser
         decimal lineTotal = rows.Sum(r => r.Extended);
         decimal total = CheckTicketTotal(ticketAmount, lineTotal, rows.Count, warnings);
 
-        var (date, suggested) = FindDate(lines);
+        var date = FindDate(lines);
         var items = rows.Select(r => BuildLine(r, warnings)).ToList();
 
         int credits = items.Count(l => l.Units < 0);
@@ -231,7 +225,7 @@ public static partial class BimboPdfParser
                 + "truck. They are sent as negative quantities on the same invoice, which is how the "
                 + "ticket's own total is worked out."));
 
-        return new BimboTicket { Date = date, SuggestedDate = suggested, Total = total, Lines = items };
+        return new BimboTicket { Date = date, Total = total, Lines = items };
     }
 
     /// <summary>
@@ -709,25 +703,26 @@ public static partial class BimboPdfParser
     // ────────────────────────────────────────────────────────────────────── date
 
     /// <summary>
-    /// The ticket's own SOD date, and separately a reading recovered from a damaged one.
+    /// The ticket's own SOD date, or null where the scan damaged it.
     ///
     /// A date read with its separators intact ("SOD: 7-28-2026 3:07:49 PM", which is what the 300 dpi
-    /// scans give) is used directly. When the scanner turned the separators into digits — which is
-    /// what the older 200 dpi scans do, "711312026" for 7/13/2026 — the reading is reconstructed and
-    /// returned only as a *suggestion*: it is arithmetic on damage, so the operator checks it against
-    /// the paper rather than having it chosen for them.
+    /// scans give) is used. When the scanner turned the separators into digits — what the older
+    /// 200 dpi scans do, "711312026" for 7/13/2026 — the token can be reconstructed, and the
+    /// reconstruction is deliberately **thrown away**: it is arithmetic on damage, and the operator
+    /// types the date off the paper on every invoice regardless. It used to come back as a suggestion
+    /// to pre-fill the box with, which is the habit that let an invoice go out dated 2016.
     /// </summary>
-    private static (DateOnly? Date, DateOnly? Suggested) FindDate(IReadOnlyList<string> lines)
+    private static DateOnly? FindDate(IReadOnlyList<string> lines)
     {
         foreach (string line in lines)
         {
             var m = DateToken().Match(line);
             if (!m.Success) continue;
             if (ReadDateToken(m.Groups["tok"].Value) is not (DateOnly date, bool repaired)) continue;
-            return repaired ? (null, date) : (date, null);
+            return repaired ? null : date;
         }
 
-        return (null, null);
+        return null;
     }
 
     /// <summary>

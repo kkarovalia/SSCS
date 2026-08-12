@@ -350,25 +350,28 @@ public class RedBullPdfTests
     /// <summary>
     /// The verified ticket is dated 11/24/2025 and its text layer says 11/24/2026 — the same 5-read-
     /// as-6 that turns a 75320 ZIP into 76320. A ticket cannot be dated in the future, so the parser
-    /// declines to use it and offers the year before as a suggestion for the operator to confirm.
+    /// keeps no date and says why.
+    ///
+    /// It used to hand back the year before as a suggestion to fill the date box with. The box is
+    /// empty for every vendor now, so the note is what survives — and the note was always the useful
+    /// half: it tells the operator the scan is wrong before they read the paper.
     /// </summary>
     [Fact]
-    public void WillNotPostAFutureDateButOffersTheObviousCorrection()
+    public void WillNotPostAFutureDateAndSaysSo()
     {
         var ticket = Parse("2030211863_sscs_verified", out var warnings);
 
         Assert.Null(ticket.Date);
-        Assert.Equal(new DateOnly(2025, 11, 24), ticket.SuggestedDate);
-        Assert.Contains(warnings, w => w.ReasonCode == PdfReasonCodes.NoDate);
+        Assert.Contains(warnings, w =>
+            w.ReasonCode == PdfReasonCodes.NoDate
+            && w.Message.Contains("in the future", StringComparison.Ordinal));
     }
 
-    /// <summary>A date that is not in the future is used as printed, with nothing to confirm.</summary>
+    /// <summary>A date that is not in the future is read as printed.</summary>
     [Fact]
     public void UsesAPlausibleDateWithoutAsking()
     {
-        var ticket = Parse("2036629370_clean_300dpi");
-        Assert.Equal(new DateOnly(2026, 8, 3), ticket.Date);
-        Assert.Null(ticket.SuggestedDate);
+        Assert.Equal(new DateOnly(2026, 8, 3), Parse("2036629370_clean_300dpi").Date);
     }
 
     // ─────────────────────────────────────────────────────────────── refusing badly

@@ -80,9 +80,6 @@ public sealed class RedBullTicket
     /// <summary>The printed date, or null when it was unreadable or impossible and must be keyed.</summary>
     public required DateOnly? Date { get; init; }
 
-    /// <summary>A reconstructed date to offer as a suggestion, never used on its own.</summary>
-    public required DateOnly? SuggestedDate { get; init; }
-
     /// <summary>The sum of the lines that read cleanly — what the operator sees on the number prompt.</summary>
     public required decimal Total { get; init; }
 
@@ -296,7 +293,7 @@ public static partial class RedBullPdfParser
                 + $"{seen.Rows.Count}. A line is probably missing - count them against the paper "
                 + "before sending."));
 
-        var (date, suggested) = ReadDate(pages, warnings);
+        var date = ReadDate(pages, warnings);
 
         // Rows that came off the picture must not then be "corroborated" by the picture — that is one
         // reader agreeing with itself, and it would wave every figure through unchecked.
@@ -309,7 +306,6 @@ public static partial class RedBullPdfParser
         return new RedBullTicket
         {
             Date = date,
-            SuggestedDate = suggested,
             Total = known,
             PrintedTotal = printed,
             PrintedTotals = PrintedTargets(rows, figures).Select(c => c / 100m).ToList(),
@@ -1383,7 +1379,18 @@ public static partial class RedBullPdfParser
 
     // ────────────────────────────────────────────────────────────────────────────── date
 
-    private static (DateOnly? Date, DateOnly? Suggested) ReadDate(
+    /// <summary>
+    /// The ticket's own printed date, or null where it cannot be trusted.
+    ///
+    /// Null is not a failure — the operator types the date on every invoice anyway, so this only
+    /// decides whether the scan's reading is worth recording alongside it. A date in the future is
+    /// not: Red Bull's scans read 5 as 6 all over the page (a 75320 ZIP comes back as 76320), so a
+    /// year one ahead is almost certainly that, and "almost certainly" is not something to post a
+    /// delivery on. It used to hand back the year before as a suggestion to pre-fill the box with;
+    /// nothing pre-fills a date box any more, so the note is all that is left, and the note is the
+    /// part that was worth having.
+    /// </summary>
+    private static DateOnly? ReadDate(
         IReadOnlyList<PdfPage> pages, List<ConversionWarning> warnings)
     {
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -1396,18 +1403,14 @@ public static partial class RedBullPdfParser
                 if (!TryDate(m.Groups["m"].Value, m.Groups["d"].Value, m.Groups["y"].Value, out var d))
                     continue;
 
-                if (d <= today) return (d, null);
+                if (d <= today) return d;
 
-                // A ticket cannot be dated in the future. Red Bull's scans read 5 as 6 all over the
-                // page (a $75320 ZIP comes back as 76320), so a year one ahead is almost always this
-                // - but "almost always" is not good enough to post a date on, so it is offered.
-                var earlier = d.AddYears(-1);
                 warnings.Add(new ConversionWarning(0, PdfReasonCodes.NoDate,
-                    $"The ticket's date reads {d:MM/dd/yyyy}, which is in the future. "
-                    + $"You will be asked to confirm it; {earlier:MM/dd/yyyy} is offered as a suggestion."));
-                return (null, earlier);
+                    $"The ticket's date reads {d:MM/dd/yyyy}, which is in the future - the scan has "
+                    + "probably misread a digit. Take the date off the paper when you are asked for it."));
+                return null;
             }
-        return (null, null);
+        return null;
     }
 
     private static bool TryDate(string month, string day, string year, out DateOnly date)

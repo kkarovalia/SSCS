@@ -13,8 +13,9 @@ namespace EdiToSscs.Tests;
 /// it alongside the invoice number they were going to type anyway.
 ///
 /// What must NOT happen is the converter quietly deciding the year is 2023 on its own. 'Z' to '2'
-/// is guesswork about a field with no checksum behind it, so the repaired reading is only ever
-/// offered as a suggestion for the operator to check against the paper.
+/// is guesswork about a field with no checksum behind it. It used to be offered as a suggestion in
+/// the operator's date box; since 2026-08-12 the repaired reading is discarded outright and the box
+/// is empty for every vendor, because a pre-filled date is a date nobody reads off the paper.
 ///
 /// Fixture lines are PdfPig's real output, damage included.
 /// </summary>
@@ -86,18 +87,29 @@ public class BlueBellDamagedDateTests
         Assert.Equal(section.Total, section.Lines.Sum(l => l.ExtendedCost));
     }
 
-    /// <summary>The suggestion the operator is shown, so they have something to compare rather than
-    /// having to work out what the smudge said.</summary>
+    /// <summary>
+    /// A damaged date is kept as no date, not as a repaired one.
+    ///
+    /// "DATE 12-14-Z023" can be mapped back to 12-14-2023 and used to be, as a suggestion filling
+    /// the operator's date box. Since 2026-08-12 that box is empty for every vendor and the repair
+    /// is thrown away — it is a guess at damage, and a pre-filled date is what let an invoice go out
+    /// dated 2016. The mapping itself survives, because finding a damaged date is also how one
+    /// ticket is told from the next; it just no longer produces a date anybody types from.
+    /// </summary>
     [Fact]
-    public void TheDamagedDateIsOfferedAsASuggestionToCheck()
+    public void TheDamagedDateIsNotKeptAsARepairedOne()
     {
         var section = Assert.Single(BlueBellPdfParser.ParseAll(TicketLines, []));
-        Assert.Equal(new DateOnly(2023, 12, 14), section.SuggestedDate);
+        Assert.Null(section.Date);
+        Assert.DoesNotContain(
+            typeof(BlueBellSection).GetProperties(),
+            p => p.Name.Contains("Suggested", StringComparison.OrdinalIgnoreCase)
+                 && p.PropertyType == typeof(DateOnly?));
     }
 
-    /// <summary>A ticket that read cleanly must offer no suggestion — there is nothing to check.</summary>
+    /// <summary>A ticket whose date read cleanly still reads cleanly.</summary>
     [Fact]
-    public void ATicketWithAReadableDateOffersNoSuggestion()
+    public void ATicketWithAReadableDateKeepsIt()
     {
         string[] lines =
         [
@@ -111,7 +123,6 @@ public class BlueBellDamagedDateTests
         var section = Assert.Single(BlueBellPdfParser.ParseAll(lines, []));
 
         Assert.Equal(new DateOnly(2026, 1, 8), section.Date);
-        Assert.Null(section.SuggestedDate);
     }
 
     /// <summary>
@@ -143,7 +154,6 @@ public class BlueBellDamagedDateTests
         Assert.Equal(new DateOnly(2026, 1, 8), sections[0].Date);
         Assert.Equal(-2.98m, sections[1].Total);
         Assert.Null(sections[1].Date);                                   // "Ol-08-2026" is not trusted
-        Assert.Equal(new DateOnly(2026, 1, 8), sections[1].SuggestedDate);
     }
 
     /// <summary>

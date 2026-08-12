@@ -88,11 +88,15 @@ public sealed record InvoiceDetailsRequest(
     bool NeedsTotal = false)
 {
     // There is deliberately no SuggestedInvoiceNumber here, and since 2026-08-12 no suggested date
-    // either. The parsers can read both off a scan and some of them do
-    // (BlueBellSection.SuggestedInvoiceNumber, RedBullTicket.SuggestedDate), but neither may reach
-    // the prompt: both are wrong often enough to matter, nothing downstream can catch either, and a
-    // filled-in box turns a field that needs a person's eyes into an Enter keypress. Leaving them
-    // out of this record is what makes that a guarantee rather than a habit.
+    // either. A parser can still read a number off a scan for its own purposes
+    // (BlueBellSection.SuggestedInvoiceNumber), but it may not reach the prompt: it is wrong often
+    // enough to matter, nothing downstream can catch it, and a filled-in box turns a field that
+    // needs a person's eyes into an Enter keypress. Leaving it out of this record is what makes that
+    // a guarantee rather than a habit.
+    //
+    // The date's repaired readings are gone entirely rather than merely unwired - a damaged date now
+    // parses as no date on all three vendors that used to reconstruct one. A dead prefill source is
+    // the kind of thing that gets helpfully reconnected later.
 
     /// <summary>
     /// Always true: the date is typed on every invoice, for every vendor, into an empty box.

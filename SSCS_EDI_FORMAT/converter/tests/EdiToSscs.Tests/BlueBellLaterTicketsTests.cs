@@ -427,7 +427,6 @@ public class BlueBellLaterTicketsTests
         var section = Assert.Single(BlueBellPdfParser.ParseAll(lines, []));
 
         Assert.Null(section.Date);            // no date was invented from either number
-        Assert.Null(section.SuggestedDate);
         Assert.Equal(29.80m, section.Total);  // the rest of the ticket still parsed
     }
 

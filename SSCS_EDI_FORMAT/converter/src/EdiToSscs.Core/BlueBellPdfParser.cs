@@ -21,17 +21,14 @@ public sealed class BlueBellSection
     /// <summary>
     /// The ticket's printed date, or null when the scan destroyed it. Null is not a parse failure:
     /// everything else on the ticket still reconciles against its own printed TOTAL, so the invoice
-    /// is worth converting and the operator is asked to key the date — see
-    /// <see cref="SuggestedDate"/>.
+    /// is worth converting and the operator keys the date — which they do on every ticket anyway.
+    ///
+    /// A damaged date ("DATE 12-14-Z023") can be mapped back to what it probably said, and that
+    /// reading is deliberately not kept: it is a guess at damage, and the date box is empty for
+    /// every vendor. `ReadDamagedDate` survives because it is also how a section's boundary is
+    /// found, which is a different job.
     /// </summary>
     public required DateOnly? Date { get; init; }
-
-    /// <summary>
-    /// What the date column appears to say once the letters the scanner substitutes for digits are
-    /// mapped back ("12-14-Z023" → 12-14-2023). A hint for the operator to confirm against the
-    /// paper, never used on its own — set only when <see cref="Date"/> is null.
-    /// </summary>
-    public DateOnly? SuggestedDate { get; init; }
 
     /// <summary>Printed TOTAL for this section. Negative for a Returns section.</summary>
     public required decimal Total { get; init; }
@@ -325,7 +322,6 @@ public static partial class BlueBellPdfParser
         string kind = "Sales";
         bool sawBanner = false;
         DateOnly? date = null;
-        DateOnly? damagedDate = null;   // offered to the operator only if `date` never turns up
         decimal? total = null;
         decimal? balanceDue = null;
         decimal? printedQtyTotal = null;      // the TOTAL row's QTY column, in the invoice's own units
@@ -347,7 +343,6 @@ public static partial class BlueBellPdfParser
                 return null;
 
             date ??= ReadDate(u);
-            damagedDate ??= ReadDamagedDate(u);
             if (!sawBanner)
             {
                 if (Regex.IsMatch(u, @"\bRETURNS?\b")) { kind = "Returns"; sawBanner = true; }
@@ -503,7 +498,6 @@ public static partial class BlueBellPdfParser
         {
             Kind = kind,
             Date = date,
-            SuggestedDate = date is null ? damagedDate : null,
             Total = total.Value,
             Lines = items,
             SuggestedInvoiceNumber = suggested,
