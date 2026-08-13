@@ -35,9 +35,10 @@ document:
 | **before 07-27, OCR off** | 879 px, image named `Im1.tiff` | **none at all** | refused with "turn OCR on" |
 | **from 07-27** | 1323 px wide ≈ **300 dpi** | clean | reads straight through, date included |
 
-Two of the nine samples (examples 2 and 7) have **no text layer whatsoever** — the scanner's OCR was
-switched off. `PdfTextExtractor` already refuses those with a plain "re-scan with the OCR setting
-turned on" message, which is the right answer: the pages themselves are perfectly legible.
+Two of the thirteen samples have **no text layer whatsoever** — the scanner's OCR was switched off.
+That used to be the end of the road, with a plain "re-scan with the OCR setting turned on" message.
+Since 2026-08-12 the picture is read instead — see §10 — because those pages are perfectly legible
+and the message was asking the store to re-feed paper it had already fed.
 
 At 300 dpi the damage largely disappears. Everything below about tolerating damage is written for the
 200 dpi backlog; it stays in because those tickets still get converted.
@@ -182,6 +183,24 @@ at all, and Bimbo's own `DELIVERY TOTAL` excludes it from both the 88 units and 
 row is skipped. That is safe precisely because both band gates would fail if the row had really
 carried money.
 
+### A row whose quantity will not come out is no longer dropped
+
+A row that carries money but whose quantity none of the three readings could produce is a different
+thing entirely, and until 2026-08-12 it was treated the same way — warned about and dropped. That is
+silent damage: the row's units and its money leave the ticket **together**, so all three gates fail
+at once and the whole delivery is refused over one figure.
+
+Ticket 84294890010234 is the case. Forty rows, and the scan breaks two of them:
+
+```
+line 16   3.0100 comes apart into  3 .01 00     ← no divisible pair, and the QTY column is gone too
+line 44   the row loses RETAIL AMOUNT and PRICE, leaving only 2.99 and 16.73
+```
+
+Both keep a clean `AMOUNT`. Dropping them left the ticket at 225 units against its own printed 236,
+and it was refused. The rows are now kept unsettled and taken to the picture, and failing that to the
+operator — one question about one row instead of a lost delivery.
+
 ---
 
 ## 5. Retail — the printed column is the wrong one
@@ -286,7 +305,9 @@ own description, retail and department, but honours the **file's** cost.
 
 ## 9. Samples
 
-All nine live in `converter/tests/EdiToSscs.Tests/Fixtures/PDF/`, unmodified.
+All thirteen live in `converter/tests/EdiToSscs.Tests/Fixtures/PDF/`, unmodified. The store supplied
+four more on 2026-08-12; two of those four had already been filed under different names, and the two
+that had not are the two this vendor could not convert.
 
 | Fixture | Date | Total | Units | Lines | What it proves |
 |---|---|---|---|---|---|
@@ -298,13 +319,164 @@ All nine live in `converter/tests/EdiToSscs.Tests/Fixtures/PDF/`, unmodified.
 | `BIMBO_84294890012057` | 06-20 | 174.84 | 81 | 19 | catalogue corrects `74323-09783` |
 | `BIMBO_84294890012641` | 06-02 | 128.64 | 61 | 18 | prefix repair `70810` ×2 |
 | `BIMBO_84294890013046` | 07-07 | 65.96 | 34 | 14 | catalogue corrects `74323-09635` |
-| `BIMBO_84294890012930_image_only` | 06-26 | — | — | — | OCR off: refused with a fixable message |
+| `BIMBO_84294890012978_split_upc_column` | 07-01 | 39.27 | 16 | 9 | the UPC column drifts a row clear of the item numbers |
+| `BIMBO_84294890012811_displaced_money_row` | 06-16 | 53.46 | 27 | 5 | a row's money lands on the line below; `13.50` for 13.58 |
+| `BIMBO_84294890010234_deliveries_only` | 09-08-**2025** | 443.68 | 236 | 40 | §10 — two rows destroyed; **no returns block at all** |
+| `BIMBO_84294890013049_image_only_with_returns` | 07-07 | 48.00 | 23 | 11 | §10 — no text layer; deliveries *and* returns off the picture |
+| `BIMBO_84294890012930_image_only` | 06-26 | — | — | — | OCR off, and no second reader configured: still refused |
 
 Every one reconciles to its own printed `CASH DUE` and `TICKET TOTALS` count.
 
+Two of them are worth calling out. **84294890010234 is the oldest ticket the store has** (September
+2025, the other store BS10) and the only sample with **no RETURNS block** — a returns-free ticket
+prints no `DELIVERY TOTAL` row either, going straight from its last row to `TICKET TOTALS`, so the
+band gates have nothing to check and the ticket's own 236 is the only count there is. And
+**84294890013049 carries returns on a page with no text layer**, which is the combination that makes
+`isCredit` load-bearing: with no bands to read a row's sign from, the model's own flag is the only
+thing saying which way the goods went, and a row facing the wrong way misses the ticket total by
+twice its value.
+
 ---
 
-## 10. Gotchas
+## 10. The picture as a second reader
+
+Added 2026-08-12, after Dr Pepper and Red Bull. Same contract as theirs, and the same posture: it may
+**confirm a figure, never supply one**. Off by default, behind the admin PIN, and an empty reading —
+no key, no network, a refused request — leaves the parse exactly as it was. `VisionVendor.Bimbo`.
+
+### Bimbo does not get the shared barcode instructions
+
+This is the one thing about this vendor that had to change in `GeminiVisionReader` rather than be
+added to it. The prompt the other two share tells the model the barcode is a UPC-A: count to twelve,
+work the last digit out from the other eleven, and drop any code that will not add up. **Bimbo prints
+`74323-09183` — the body, with the leading zero and the check digit both left off.** Handed those
+instructions, a model told to reach twelve digits and make them sum will pad a ten-digit body into a
+plausible code, and §3 is the whole argument for why nothing downstream would catch it.
+
+So the barcode rules are now per-vendor. Bimbo's say ten digits, exactly as printed, no leading zero,
+no check digit, no padding, and leave the field empty rather than tidy one up. Red Bull's and Dr
+Pepper's are the same characters they always were, which is pinned by
+`SplittingTheBarcodeRulesOutLeftTheOtherTwoPromptsUntouched` — both prompts were tuned against the
+store's own scans and a prompt that drifts while nobody is watching is a reader that quietly starts
+making different mistakes.
+
+The rest of the briefing is this vendor's own: eight columns, `QTY x PRICE = AMOUNT`, four decimal
+places on `PRICE` that are not padding, no cases anywhere (`SS2P` is one thing, not two), returns
+under a letter-spaced `**RETURNS**` banner with a minus on every figure, and `printedTotal` /
+`printedUnits` off `TICKET TOTALS`. Unlike Dr Pepper and Red Bull, **the row arithmetic holds on a
+credit too** — `-2 × 1.9400 = -3.88` — so the model is told to check those the same way.
+
+### What a reading is allowed to do
+
+**Supply a quantity the text layer lost**, on terms strict enough to be confirmation. Three things
+have to hold together: the model read all of `QTY`, `PRICE` and `AMOUNT` on that row; those three
+multiply out; and its `AMOUNT` is the figure the text layer already read in that column. Nothing is
+worked out — the quantity is *read* by a second reader whose other two figures are corroborated, one
+of them by the first reader. That is exactly the shape of both rows 84294890010234 loses.
+
+**Disagree out loud about a quantity the text layer settled.** Never override one: `AMOUNT / PRICE`
+dividing to a whole number is a strong reading, and it is what nine tickets and a live SSCS round
+trip were checked against. What the picture adds is a voice, and the band and ticket gates are still
+what refuse a wrong one.
+
+**Break a tie on a barcode the catalogue could not.** §3 leaves two cases warned-about rather than
+corrected: a code more than one digit from the catalogue's, and a catalogue entry only one ticket has
+ever confirmed. Where the picture reads the catalogue's code off the paper, two things that share no
+machinery agree on digits the OCR does not have, and the recorded code is used. This is the only
+corroboration a Bimbo barcode can ever get.
+
+**Be the whole invoice, on a page with no text layer.** Then it is one reader with nothing to check
+it, and it is not pretended otherwise — the reading is *not* also used to corroborate itself. What
+checks those rows is `QTY x PRICE = AMOUNT` over three separately-read figures and the count and
+total the ticket prints for itself lower down the page; a row that does not multiply out goes to the
+operator. There are no bands on this path, so a row's sign comes from `isCredit` and one section
+carries the lot.
+
+### Questions
+
+Bimbo asks about two things and no more.
+
+**The quantity**, because it is the one figure here the money cannot check — misread it and the unit
+cost absorbs the difference, so the invoice balances to the penny while the stock is wrong. The
+question names the column (`QTY`, not the `UNITS` both other vendors print) and shows the printed row
+cut out of the scan with the figure boxed. **Bimbo prints one line per product**, which is the whole
+difference from the other two: Dr Pepper carries the barcode on the line above the priced row and Red
+Bull on the line below, so both cut a two-line band and have to say which line to mark. Here the row
+is the line. No hint under the box, because there are no cases to convert and nothing to get wrong.
+
+**The barcode**, but only on a row that came off the picture with no code on it. A row read out of the
+text layer always carries ten digits — `SplitCode` counted them — and the prefix rule and the
+catalogue are what stand behind those.
+
+Not the unit price: it is recovered as `AMOUNT / QTY` once the quantity is known, and the band and
+ticket totals then prove it. Not the description: SSCS keeps its own wording for an item it already
+has.
+
+### The heading strip, and why it was missing for a day
+
+The strip above the row has to be the **cut from the ticket itself**, not the typed
+`ColumnLegend` fallback. On this vendor that matters more than on the other two, because Bimbo prints
+**two AMOUNT columns side by side** — a suggested-retail one the store does not use, and the
+wholesale one it does — and only an aligned strip says which of the two the question is about.
+
+It shipped falling through to the typed legend. `PdfRowSnipper.IsColumnHeader` matched a line
+carrying `UNITS` and `AMOUNT`, which are Dr Pepper's words:
+
+- Bimbo prints **QTY**, not UNITS, so the first half never matched at all;
+- and its scans wreck the second half — across the eleven readable samples `AMOUNT` reaches the text
+  layer as `ANOLNT`, `AHRUNT`, `AH00NT`, `AHUUNI`, `ANOUNT`, `ANO NT`, `AMONT` and `ANDUTI`.
+
+`RETAIL` and `PRICE` both survive on **all eleven**, on the same line, and neither word appears on a
+product row. That is the pattern now.
+
+The heading is also **two printed lines**, which no other vendor's is:
+
+```
+             ITEM                              SUGG   RETAIL    WHOLESALE
+     UPC     No                          QTY  RETAIL  AMOUNT  PRICE   AMOUNT
+```
+
+Cutting the lower line alone gives `RETAIL AMOUNT PRICE AMOUNT` over four figures — it names two of
+them twice and resolves nothing. So the band is extended upward one line when that line carries
+`RETAIL` **without** `PRICE`, which is true of Bimbo's upper line and of nothing on a Dr Pepper page.
+The nearest heading above the row wins, so a returned line is shown the RETURNS band's own copy.
+
+> The lesson worth keeping: **a missing cut looks fine.** The typed legend renders in its place, so
+> the dialog is populated and plausible — it simply cannot line up over a scan. It reads as a
+> cosmetic complaint rather than as the invoice's own header being absent from the screen.
+
+### A figure the scan destroyed is marked by its column
+
+Where the text layer never read the figure being asked about there is no token to find, and the row
+used to be washed end to end. That is common on this vendor rather than rare, because QTY is exactly
+the column the 200 dpi scans delete: ticket 84294890010234 lost it on **all forty rows**. A washed
+882-pixel line on a row of eight figures, two of them headed AMOUNT, is not a marker.
+
+So the column is marked instead. It is located from the printed heading — specifically as the
+heading word **immediately left of `RETAIL`**, because QTY's own heading is what the scan mangles
+(`UTY`, `OTY`, `OW`, `UN`, `RTY` across the samples) while `RETAIL` survives on all eleven. The
+vertical extent is the row's own line, which is exact; only the horizontal comes from the heading.
+The figure is legible in the picture even where the text layer never got it, which is the whole
+premise of `PdfRowSnipper`.
+
+The box is the heading's span opened out by one width to the left and three quarters to the right.
+Both margins are needed and the right-hand one especially: the column is right-aligned and a
+**returned** line runs furthest of all, since the minus sign pushes the digits along. Measured —
+heading `OTY` at 162.1–171.9 carries `1` at 168.6–171.9, `8` at 167.6–172.6 and `12` at 165.4–172.5;
+the returns band's heading at 165.0–174.8 carries `-1` at 170.7–178.1. The resulting box clears the
+description (ends ~150) and the SUGG RETAIL figures (start ~187) at both ends, so it cannot spill
+onto a neighbour.
+
+A token the scan *did* read is still marked directly — tighter and safer than its column — so this
+is a fallback, never the first choice.
+
+> Beware the scale when checking this by hand. These are till rolls: the page is 315.72 or 317.52
+> points wide, not a standard size, and a check that assumes ~306 comes out several pixels adrift.
+> That is how a first pass "found" a clipped marker on the returns row that was nothing of the sort.
+
+---
+
+## 11. Gotchas
 
 - **`SS2P` is one unit, not two.** No case arithmetic on this vendor at all.
 - **Never use `SUGG RETAIL`.** §5.

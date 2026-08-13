@@ -188,12 +188,24 @@ public static partial class BimboPdfParser
     /// ticket's own printed figures — and records everything else a person should look at in
     /// <paramref name="warnings"/>.
     /// </summary>
-    public static BimboTicket Parse(IReadOnlyList<string> lines, List<ConversionWarning> warnings)
+    public static BimboTicket Parse(
+        IReadOnlyList<string> lines,
+        List<ConversionWarning> warnings,
+        Func<BimboUnknownField, string>? ask = null,
+        VisionReading? vision = null)
     {
         ArgumentNullException.ThrowIfNull(lines);
         ArgumentNullException.ThrowIfNull(warnings);
 
-        if (!LooksLikeBimbo(lines))
+        var seen = vision ?? VisionReading.Empty;
+
+        // The vendor guard runs on the text layer, and only where there is one. A page with no
+        // searchable text at all is the OCR-off scan, which is perfectly legible as a picture and is
+        // exactly what the second reader is for; the vendor is then the one the operator chose in the
+        // dropdown, which is the same trust the other two vendors' picture paths rest on. A text
+        // layer that *is* present still has to look like this vendor's ticket.
+        bool noTextLayer = lines.Count == 0;
+        if (!noTextLayer && !LooksLikeBimbo(lines))
             throw new EdiConversionException(PdfReasonCodes.VendorMismatch,
                 "This PDF does not look like a Bimbo delivery ticket - none of the things one always "
                 + "has (BAKERIES or CASH STOPS in the heading, a DELIVERIES or RETURNS banner, a "
@@ -201,22 +213,58 @@ public static partial class BimboPdfParser
                 + "vendor is selected in the dropdown. If it really is a Bimbo ticket, the scan is too "
                 + "faint to read - re-scan the whole page and try again.");
 
-        var sections = ReadSections(lines, warnings);
+        var sections = noTextLayer ? [] : ReadSections(lines, warnings);
+
+        bool fromThePicture = sections.Sum(s => s.Rows.Count) == 0 && seen.Rows.Count > 0;
+        if (fromThePicture)
+        {
+            sections = SectionsFromThePicture(seen);
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                $"Nothing could be read from the text in this PDF, so all {sections[0].Rows.Count} "
+                + "lines were read off the picture of the page instead. Check them against the paper "
+                + "before sending."));
+        }
+
         var rows = sections.SelectMany(s => s.Rows).ToList();
         if (rows.Count == 0)
             throw new EdiConversionException(PdfReasonCodes.NoLineItems,
                 "No line items were found on this Bimbo ticket. If the PDF is a photo or a scan with "
                 + "no searchable text, re-scan it with the scanner's OCR setting turned on.");
 
-        var (ticketUnits, ticketAmount) = ReadTicketTotals(lines);
+        // Both readers found rows but not the same number of them, so the text layer has lost one -
+        // and a lost row takes its money with it, which is why no total on the page can notice.
+        if (!fromThePicture && seen.Rows.Count > rows.Count)
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.NoLineItems,
+                $"The text in this PDF gives {rows.Count} lines but the picture of the page shows "
+                + $"{seen.Rows.Count}. A line may be missing - count them against the paper before "
+                + "sending."));
+
+        Settle(rows, seen, fromThePicture, ask, warnings);
+
+        // A row nobody could settle leaves the ticket, and the gates below then refuse it. That is
+        // deliberate: a delivery short one line books the wrong money, and by this point the picture
+        // has been consulted and the operator has been asked.
+        rows = rows.Where(r => r.IsSettled).ToList();
+        foreach (var s in sections) s.Rows.RemoveAll(r => !r.IsSettled);
+
+        // Both figures fall back to the picture, because on a page with no text layer there is
+        // nowhere else for them to come from and on one that lost only its totals row they are the
+        // difference between a gate and no gate at all. They are checks either way round: a wrong one
+        // refuses the ticket, which is recoverable, where no gate lets wrong quantities through
+        // silently, which is not. Neither is ever asked for: TICKET TOTALS is the largest print on
+        // the page, so a ticket that has lost it has lost more than one figure and wants re-scanning.
+        var (textUnits, textAmount) = fromThePicture ? (null, null) : ReadTicketTotals(lines);
+        int? ticketUnits = textUnits ?? seen.PrintedUnits;
+        decimal? ticketAmount = textAmount ?? seen.PrintedTotal;
+
         CheckUnits(sections, rows, ticketUnits, warnings);
         CheckSectionAmounts(sections, warnings);
 
         decimal lineTotal = rows.Sum(r => r.Extended);
         decimal total = CheckTicketTotal(ticketAmount, lineTotal, rows.Count, warnings);
 
-        var date = FindDate(lines);
-        var items = rows.Select(r => BuildLine(r, warnings)).ToList();
+        var date = fromThePicture ? null : FindDate(lines);
+        var items = rows.Select(BuildLine).ToList();
 
         int credits = items.Count(l => l.Units < 0);
         if (credits > 0)
@@ -257,12 +305,65 @@ public static partial class BimboPdfParser
         public required string Upc10 { get; init; }
         public required string ItemNumber { get; init; }
         public required string Description { get; init; }
-        /// <summary>Signed units: negative for a row in the RETURNS band.</summary>
-        public required int Units { get; init; }
-        /// <summary>Cost of one unit, always positive, four decimals.</summary>
-        public required decimal UnitCost { get; init; }
+
+        /// <summary>
+        /// Whether the row went back on the truck. The sign comes from here and never from a printed
+        /// minus: on the text path it is the band the row was found in, which the scan cannot drop the
+        /// way it drops a minus sign; on the picture path it is what the model said.
+        /// </summary>
+        public required bool IsCredit { get; init; }
+
+        /// <summary>
+        /// How many, unsigned — **null until it has been settled**, which is the whole reason this is
+        /// a property rather than an init-only field.
+        ///
+        /// A row whose quantity the scan destroyed used to be dropped here and warned about, and a
+        /// dropped row takes its units and its money out of the ticket with it, so both band gates and
+        /// the ticket gate then failed and the whole delivery was refused. Ticket 84294890010234 loses
+        /// two rows out of forty that way and is refused over 11 units of 236. Keeping the row lets the
+        /// picture be consulted about it and, failing that, lets one question be asked about one row.
+        /// </summary>
+        public int? Qty { get; set; }
+
+        /// <summary>Cost of one unit, always positive, four decimals. Null until settled.</summary>
+        public decimal? UnitCost { get; set; }
+
+        /// <summary>What the scan read in the AMOUNT column, kept as the thing a second reader is
+        /// checked against and as the context a question carries.</summary>
+        public decimal? PrintedAmount { get; init; }
+
+        /// <summary>What the scan made of the QTY column, or empty where it lost the column outright.</summary>
+        public string PrintedQty { get; init; } = "";
+
+        /// <summary>
+        /// What a vision model read on this row, where one was consulted and its reading could be tied
+        /// here beyond doubt. Null is the normal case and must leave every rule unchanged.
+        /// </summary>
+        public VisionRow? Vision { get; set; }
+
+        /// <summary>1-based page, for a row off the picture that has no line number to cut by.</summary>
+        public int Page { get; init; }
+
+        /// <summary>Whether that page went through the scanner the wrong way up.</summary>
+        public bool PageUpsideDown { get; init; }
+
+        /// <summary>
+        /// The whole barcode to send, settled during <see cref="Settle"/> rather than when the line
+        /// is built — because a row with no usable code has to leave the ticket *before* the gates
+        /// run, so that the ticket's own count is what refuses it. Dropping a line after the gates
+        /// would take its money out of an invoice that had already been proved to add up.
+        /// </summary>
+        public string? Gtin { get; set; }
+
+        /// <summary>Signed units: negative for a row that went back.</summary>
+        public int Units => (IsCredit ? -1 : 1) * (Qty ?? 0);
+
         /// <summary>Computed as units x cost, the way SSCS computes it — not the printed AMOUNT.</summary>
-        public decimal Extended => decimal.Round(Units * UnitCost, 2, MidpointRounding.AwayFromZero);
+        public decimal Extended =>
+            decimal.Round(Units * (UnitCost ?? 0m), 2, MidpointRounding.AwayFromZero);
+
+        /// <summary>True once everything the line needs is known and the row can be billed.</summary>
+        public bool IsSettled => Qty is > 0 && UnitCost is > 0m && Gtin is not null;
     }
 
     /// <summary>The rows of one printed band, with the totals row that closes it.</summary>
@@ -362,6 +463,12 @@ public static partial class BimboPdfParser
     /// TOTAL excludes it from both the unit count (88) and the money ($178.28). Skipping it is
     /// therefore what makes the ticket reconcile, and the section gates prove it: had the row really
     /// carried money, both of them would fail.
+    ///
+    /// A row that carries money but whose **quantity** would not come out is a different thing
+    /// entirely, and it is no longer dropped — it comes back unsettled for <see cref="Settle"/> to
+    /// take to the picture and then to the operator. Dropping it was silent damage: the row's units
+    /// and its money left the ticket together, so all three gates failed at once and a delivery that
+    /// needed one number typed was refused whole.
     /// </summary>
     private static Row? ReadRow(
         string upc10, string item, string rest, int lineNo, Band band, List<ConversionWarning> warnings)
@@ -380,27 +487,29 @@ public static partial class BimboPdfParser
         // A row whose only numbers are a bare quantity is the no-money case above, not a product.
         if (!amount.HasFraction && !price.HasFraction) return null;
 
-        int? qty = ResolveQty(amount, price, retailAmount, suggRetail, printedQty, lineNo, warnings);
-        if (qty is null or 0)
-        {
-            warnings.Add(new ConversionWarning(lineNo, PdfReasonCodes.UnreadableLine,
-                $"The quantity on the line for \"{Describe(rest, nums)}\" could not be worked out from "
-                + "the scan. Check this line against the paper in SSCS."));
-            return null;
-        }
-
-        decimal unitCost = ResolveUnitCost(price, amount, qty.Value, lineNo, warnings);
-        if (unitCost <= 0m) return null;
-
-        return new Row
+        var row = new Row
         {
             LineNo = lineNo,
             Upc10 = upc10,
             ItemNumber = item,
             Description = Describe(rest, nums),
-            Units = band == Band.Returns ? -qty.Value : qty.Value,
-            UnitCost = unitCost,
+            IsCredit = band == Band.Returns,
+            PrintedAmount = amount.Value,
+            // Only a whole number is offered back as "what the scan read" — where the column was lost
+            // the figure sitting in its place belongs to some other column, and showing that as the
+            // machine's reading of the quantity invites it to be confirmed.
+            PrintedQty = printedQty is { HasFraction: false }
+                ? printedQty.Value.ToString("0", CultureInfo.InvariantCulture)
+                : "",
         };
+
+        int? qty = ResolveQty(amount, price, retailAmount, suggRetail, printedQty, lineNo, warnings);
+        if (qty is null or 0) return row;                        // unsettled — see Settle
+
+        row.Qty = qty;
+        decimal unitCost = ResolveUnitCost(price, amount, qty.Value, lineNo, warnings);
+        if (unitCost > 0m) row.UnitCost = unitCost;
+        return row;
     }
 
     /// <summary>
@@ -470,6 +579,232 @@ public static partial class BimboPdfParser
         int n = (int)decimal.Round(q, 0, MidpointRounding.AwayFromZero);
         if (n is <= 0 or > 9999) return null;
         return Math.Abs(n * b - a) <= 0.005m ? n : null;
+    }
+
+    // ────────────────────────────────────────────────────────────────────── second reader
+
+    /// <summary>Two money figures that are the same figure to the cent.</summary>
+    private static bool Near(decimal? a, decimal? b) =>
+        a is not null && b is not null && Math.Abs(a.Value - b.Value) <= 0.005m;
+
+    /// <summary>
+    /// Ties a vision reading to the rows and settles what the text layer could not — by confirming,
+    /// and where nothing confirms, by asking.
+    ///
+    /// The tie is <see cref="VisionReading.AlignTo"/>'s and it declines rather than guesses, for the
+    /// reason set out there: a reading attached to the wrong row puts one product's figures onto
+    /// another and every total on the page still adds up.
+    /// </summary>
+    private static void Settle(
+        List<Row> rows, VisionReading vision, bool fromThePicture,
+        Func<BimboUnknownField, string>? ask, List<ConversionWarning> warnings)
+    {
+        // Rows that came off the picture must not then be "corroborated" by the picture — one reader
+        // agreeing with itself waves every figure through. What checks those is the row's own
+        // arithmetic over three separately-read figures, and the count and total the ticket prints
+        // for itself lower down the page.
+        if (!fromThePicture)
+        {
+            var aligned = vision.AlignTo(
+                [.. rows.Select(r => new VisionAnchor(r.ItemNumber, r.Qty, r.PrintedAmount))]);
+            for (int i = 0; i < rows.Count; i++) rows[i].Vision = aligned[i];
+        }
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            if (r.Qty is > 0 && r.UnitCost is > 0m) NoteAnyDisagreement(r, warnings);
+            else SettleUnreadQuantity(r, i + 1, rows.Count, ask, warnings);
+
+            r.Gtin = SettleBarcode(r, i + 1, rows.Count, ask, warnings);
+        }
+    }
+
+    /// <summary>
+    /// The whole barcode to send, or null where the row has no code anything could stand behind.
+    ///
+    /// On the text path this is what it has always been: the column holds ten digits because
+    /// <see cref="SplitCode"/> counted them, so the prefix rule and <see cref="BimboCatalog"/> do the
+    /// work and nothing is ever asked. Only a row read off the picture can arrive without a code at
+    /// all — the model is told to leave the field empty rather than tidy a half-read one, since
+    /// nothing on a Bimbo ticket can catch a wrong barcode — and that row is the one worth a question.
+    /// </summary>
+    private static string? SettleBarcode(
+        Row r, int position, int lineCount,
+        Func<BimboUnknownField, string>? ask, List<ConversionWarning> warnings)
+    {
+        if (r.Upc10.Length == 10) return Upc.AppendCheckDigit("0" + ResolveUpc(r, warnings));
+
+        if (ask is null)
+        {
+            warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.BarcodeRequired,
+                $"No barcode could be read for \"{r.Description}\", so that line was left off. Check "
+                + "this ticket against the paper in SSCS."));
+            return null;
+        }
+
+        string typed = ask(new BimboUnknownField(
+            position, lineCount, r.Description, r.Upc10, r.ItemNumber,
+            LineField.Barcode, r.Upc10, r.PrintedAmount, r.LineNo, r.Page, r.PageUpsideDown));
+
+        string digits = Upc.DigitsOnly(typed);
+
+        // Bimbo prints the body only, so ten digits is the whole of what is on the paper. Someone
+        // reading a barcode off a different part of the box may type the full twelve, and that is the
+        // same code — dropping back to the body keeps both spellings landing on one SSCS item.
+        if (digits.Length == 12 && Upc.IsValidGtin(digits)) digits = digits[1..^1];
+        else if (digits.Length == 11) digits = digits[1..];
+
+        if (digits.Length != 10)
+        {
+            warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.BarcodeRequired,
+                $"The barcode typed in for \"{r.Description}\" was not the ten digits this vendor "
+                + "prints, so that line was left off. Check this ticket against the paper in SSCS."));
+            return null;
+        }
+
+        warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UpcCheckDigit,
+            $"The barcode for \"{r.Description}\" could not be read off the picture and was typed in "
+            + $"as {digits}."));
+        return Upc.AppendCheckDigit("0" + digits);
+    }
+
+    /// <summary>
+    /// Says so when the two readers disagree about a quantity the text layer settled on its own.
+    ///
+    /// Not an override. `AMOUNT / PRICE` dividing to a whole number is a strong reading — a damaged
+    /// digit in either column almost never divides — and it is what nine tickets and a live SSCS
+    /// round trip were checked against. What the picture adds here is a voice: where the two differ,
+    /// one of them is wrong, and the band and ticket gates below will refuse the ticket if it is
+    /// this one. Saying it out loud is what turns "this ticket does not add up" into a row to look at.
+    /// </summary>
+    private static void NoteAnyDisagreement(Row r, List<ConversionWarning> warnings)
+    {
+        if (r.Vision?.Units is not int seen || seen <= 0) return;
+        if (seen == r.Qty) return;
+
+        warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.QtyMismatch,
+            $"On the line for \"{r.Description}\" the text in the PDF gives a quantity of {r.Qty} and "
+            + $"the picture of the page reads {seen}. The text was used - check this line against the "
+            + "paper in SSCS."));
+    }
+
+    /// <summary>
+    /// Settles a row whose quantity none of the three printed readings could produce.
+    ///
+    /// The picture may supply one, and only on terms strict enough that it is confirmation rather
+    /// than a second guess. Three things have to hold together: the model read all of QTY, PRICE and
+    /// AMOUNT on that row; those three multiply out; and its AMOUNT is the figure the text layer
+    /// already read in that column. So the quantity is not worked out from anything — it is read off
+    /// the paper by a second reader whose other two figures on the same row are corroborated, one of
+    /// them by the first reader.
+    ///
+    /// That is exactly the shape of the two rows ticket 84294890010234 loses. The scan breaks
+    /// `3.0100` into `3 .01 00`, which leaves the row no divisible pair and no printed QTY column
+    /// either, while `12.04` in the AMOUNT column survives intact; the picture reads 4, 3.0100 and
+    /// 12.04, and 4 x 3.0100 is the 12.04 both readers agree on.
+    ///
+    /// Anything short of that goes to the operator with the row on screen. Nothing here may invent a
+    /// count: a quantity is the one figure on this vendor the money cannot check, because a wrong one
+    /// is absorbed by the unit cost and the invoice still balances to the penny.
+    /// </summary>
+    private static void SettleUnreadQuantity(
+        Row r, int position, int lineCount,
+        Func<BimboUnknownField, string>? ask, List<ConversionWarning> warnings)
+    {
+        if (r.Vision is { Units: int units and > 0, Price: > 0m, Amount: > 0m } v
+            && Near(units * v.Price!.Value, v.Amount)
+            && (r.PrintedAmount is null || Near(v.Amount, r.PrintedAmount)))
+        {
+            r.Qty = units;
+            r.UnitCost = v.Price.Value;
+            warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UnreadableLine,
+                $"The quantity on the line for \"{r.Description}\" was destroyed in the scan and read "
+                + $"off the picture of the page as {units} at {v.Price.Value:0.0000}. That comes to the "
+                + $"{v.Amount!.Value:0.00} the row prints - check this line in SSCS."));
+            return;
+        }
+
+        if (ask is null)
+        {
+            // No way to ask — the row leaves the ticket, and the gates below refuse it rather than
+            // let a delivery go out short. This is what the parser has always done here.
+            warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UnreadableLine,
+                $"The quantity on the line for \"{r.Description}\" could not be worked out from the "
+                + "scan. Check this line against the paper in SSCS."));
+            return;
+        }
+
+        string typed = ask(new BimboUnknownField(
+            position, lineCount, r.Description, r.Upc10, r.ItemNumber,
+            LineField.Units, r.PrintedQty, r.PrintedAmount, r.LineNo, r.Page, r.PageUpsideDown));
+
+        if (!int.TryParse(typed?.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int keyed)
+            || keyed <= 0)
+        {
+            warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UnreadableLine,
+                $"The quantity typed in for \"{r.Description}\" was not a whole number, so that line "
+                + "was left off. Check this ticket against the paper in SSCS."));
+            return;
+        }
+
+        r.Qty = keyed;
+        if (r.PrintedAmount is decimal printed && printed > 0m)
+            r.UnitCost = decimal.Round(printed / keyed, 4, MidpointRounding.AwayFromZero);
+
+        warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UnreadableLine,
+            $"{r.Description} - the quantity was typed in as {keyed}"
+            + (r.PrintedQty.Length > 0 ? $" (the scan read \"{r.PrintedQty}\")." : ".")));
+    }
+
+    /// <summary>
+    /// Turns a reading taken off the picture into the ticket's rows, for a PDF whose text layer gave
+    /// up nothing at all — the scanner's OCR setting switched off, which two of the store's thirteen
+    /// samples have.
+    ///
+    /// One section, not two. The bands are a feature of the printed page and the model was not asked
+    /// where they start, so there are no band totals to check against here; what a row's sign comes
+    /// from instead is the model's own isCredit, and what catches a row facing the wrong way is the
+    /// ticket's own total, which a flipped row misses by twice its value.
+    ///
+    /// **Line number 0 throughout, deliberately.** These rows have no place on the page as far as the
+    /// text layer is concerned, so no question about one can cut its picture out — and a line number
+    /// invented here would mark a figure on whatever stray text happened to be at that position.
+    /// </summary>
+    private static List<Section> SectionsFromThePicture(VisionReading seen)
+    {
+        var section = new Section { Band = Band.Deliveries };
+        foreach (var v in seen.Rows)
+        {
+            var row = new Row
+            {
+                LineNo = 0,
+                Upc10 = new string((v.Barcode ?? "").Where(char.IsAsciiDigit).ToArray()),
+                ItemNumber = new string(v.ItemNumber.Where(char.IsAsciiDigit).ToArray()),
+                Description = v.Description,
+                IsCredit = v.IsCredit,
+                PrintedAmount = v.Amount,
+                PrintedQty = v.Units?.ToString(CultureInfo.InvariantCulture) ?? "",
+                // At least 1. The reader stamps the page it asked about, but a row that arrived
+                // without one would ask for page 0, which cuts nothing — and a question with no
+                // picture on this path has nothing else to offer, since there is no line to describe.
+                Page = Math.Max(1, v.Page),
+                PageUpsideDown = v.PageUpsideDown,
+            };
+
+            // The row is taken only where its own three figures agree with each other. One reader
+            // reporting a count with nothing behind it is exactly what a person is for, so a row that
+            // does not multiply out arrives unsettled and is asked about.
+            if (v.Units is int units and > 0 && v.Price is > 0m && v.Amount is > 0m
+                && Near(units * v.Price.Value, v.Amount))
+            {
+                row.Qty = units;
+                row.UnitCost = v.Price.Value;
+            }
+
+            section.Rows.Add(row);
+        }
+        return [section];
     }
 
     // ────────────────────────────────────────────────────────────────────── gates
@@ -610,18 +945,16 @@ public static partial class BimboPdfParser
     /// exactly the id this store already holds the item under (verified on all 26 lines of the
     /// 07-28-2026 ticket).
     /// </summary>
-    private static InvoiceLine BuildLine(Row row, List<ConversionWarning> warnings)
+    private static InvoiceLine BuildLine(Row row)
     {
-        string upc10 = ResolveUpc(row, warnings);
-        string gtin = Upc.AppendCheckDigit("0" + upc10);
-
+        decimal cost = row.UnitCost!.Value;
         return new InvoiceLine
         {
-            Gtin = gtin,
+            Gtin = row.Gtin!,
             Description = row.Description,
             Units = row.Units,
-            UnitCost = row.UnitCost,
-            RetailPrice = RetailSeed.FromCost(row.UnitCost, RetailMargin),
+            UnitCost = cost,
+            RetailPrice = RetailSeed.FromCost(cost, RetailMargin),
         };
     }
 
@@ -633,16 +966,44 @@ public static partial class BimboPdfParser
     {
         string upc = RepairPrefix(row.Upc10, row.Description, row.LineNo, warnings);
 
+        // What the picture made of the same column, where a second reader was consulted and read ten
+        // digits. It is never the answer on its own — one reader of a code that cannot check itself
+        // is exactly the situation this vendor is already in — but it is an independent voice, and
+        // below it is what lets a catalogue entry too thin to correct a code on its own do so.
+        string? fromPicture = row.Vision?.Barcode is string b && b.Length == 10 ? b : null;
+
         var known = BimboCatalog.Find(row.ItemNumber);
-        if (known is null || known.Value.Upc10 == upc) return upc;
+        if (known is null || known.Value.Upc10 == upc)
+        {
+            if (fromPicture is not null && fromPicture != upc)
+                warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
+                    $"On the line for \"{row.Description}\" the text in the PDF gives the barcode {upc} "
+                    + $"and the picture of the page reads {fromPicture}. Nothing on a Bimbo ticket can "
+                    + "settle which is right, so the text was used - check this line in SSCS."));
+            return upc;
+        }
 
         int differences = CountDifferences(known.Value.Upc10, upc);
 
         // More than one digit apart means the *item number* is the damaged column, not the UPC —
         // a mis-read item number lands on some other product's record, and following it would swap
         // one good barcode for a completely unrelated one. The barcode as printed is safer.
+        //
+        // Unless the picture read the catalogue's code off the paper. Then it is not the item number
+        // that is damaged: two things that share no machinery — a record built from other tickets,
+        // and a reader looking at the photograph — agree on digits the OCR does not have, which is
+        // the corroboration this vendor otherwise never gets.
         if (differences > 1)
         {
+            if (fromPicture == known.Value.Upc10)
+            {
+                warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
+                    $"The barcode on the line for \"{row.Description}\" scanned as {upc}, but the "
+                    + $"picture of the page reads {known.Value.Upc10} and that is what Bimbo's item "
+                    + $"number {row.ItemNumber} is on record with. The recorded one was used."));
+                return known.Value.Upc10;
+            }
+
             warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
                 $"On the line for \"{row.Description}\" the barcode {upc} and Bimbo's item number "
                 + $"{row.ItemNumber} point at different products. The barcode was used as printed - "
@@ -650,7 +1011,7 @@ public static partial class BimboPdfParser
             return upc;
         }
 
-        if (!known.Value.Trusted)
+        if (!known.Value.Trusted && fromPicture != known.Value.Upc10)
         {
             warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
                 $"On the line for \"{row.Description}\" the barcode reads {upc} but item number "
@@ -875,3 +1236,44 @@ public static partial class BimboPdfParser
 
     private static string Digits(string s) => new(s.Where(char.IsAsciiDigit).ToArray());
 }
+
+/// <summary>
+/// One figure on one Bimbo row that the scan destroyed, that the picture could not confirm, and that
+/// none of the ticket's own arithmetic could recover. Described well enough for the operator to find
+/// the row on the paper without counting down it.
+///
+/// Bimbo asks about two things and no more. **The quantity**, because it is the one figure here the
+/// money cannot check — misread it and the unit cost absorbs the difference, so the invoice balances
+/// to the penny while the store's stock is wrong. And **the barcode**, but only on a row that came
+/// off the picture with no code on it, since a row read out of the text layer always carries ten
+/// digits and the prefix rule and <see cref="BimboCatalog"/> are what stand behind those.
+///
+/// Deliberately not the unit price: it is recovered as AMOUNT / QTY once the quantity is known, and
+/// the band and ticket totals then prove it. Nor the description — SSCS keeps its own wording for an
+/// item it already has, so asking would be a prompt that changes nothing.
+/// </summary>
+public sealed record BimboUnknownField(
+    /// <summary>1-based position among the ticket's rows — how the operator counts down it.</summary>
+    int Position,
+    /// <summary>How many rows the ticket has, so the prompt can say "3 of 27".</summary>
+    int LineCount,
+    string Description,
+    /// <summary>The ten digits under UPC, which is how the operator matches the row to the paper.</summary>
+    string Upc10,
+    /// <summary>Bimbo's own item number, the second column and the other half of that match.</summary>
+    string ItemNumber,
+    LineField Field,
+    /// <summary>What the scan made of the field, or empty where it lost the column outright.</summary>
+    string PrintedValue,
+    /// <summary>The row's amount, when it read — context, never the field being asked about.</summary>
+    decimal? Amount,
+    /// <summary>
+    /// 1-based line number of the row in the extracted text, so the caller can cut that row out of
+    /// the scanned picture and show the operator the paper rather than describe it. Zero for a row
+    /// that came off the picture, which has no place in the text layer to cut by.
+    /// </summary>
+    int LineNo = 0,
+    /// <summary>1-based page this row is on, for a row read off the picture.</summary>
+    int Page = 0,
+    /// <summary>Whether that page went through the scanner the wrong way up.</summary>
+    bool PageUpsideDown = false);

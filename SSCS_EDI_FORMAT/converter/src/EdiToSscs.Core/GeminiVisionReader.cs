@@ -117,14 +117,42 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
     private (string Key, string Model) Pair(int index) =>
         (_keys[index / _models.Length], _models[index % _models.Length]);
 
+    /// <summary>
+    /// What one read cost, tallied as it happens so <see cref="VisionReading.Note"/> can say where
+    /// the time went. Per call rather than per instance: one reader serves every file in the queue.
+    /// </summary>
+    private sealed class Tally
+    {
+        public int Pages, Requests, Throttled, TimedOut;
+        public double Waited;
+
+        public string Describe(long ms, int rows)
+        {
+            var parts = new List<string>
+            {
+                $"{Pages} page{(Pages == 1 ? "" : "s")}",
+                $"{Requests} request{(Requests == 1 ? "" : "s")}",
+                $"{rows} row{(rows == 1 ? "" : "s")} read",
+            };
+            if (Throttled > 0) parts.Add($"{Throttled} throttled");
+            if (TimedOut > 0) parts.Add($"{TimedOut} timed out");
+            if (Waited > 0) parts.Add($"waited {Waited:0}s on the free allowance");
+            parts.Add($"{ms / 1000.0:0.0}s total");
+            return string.Join(", ", parts);
+        }
+    }
+
     public VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor)
     {
         if (!IsConfigured || pdfBytes is null || pdfBytes.Length == 0) return VisionReading.Empty;
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
         try
         {
             var pages = PdfPageImages.TryReadAll(pdfBytes);
             if (pages.Count == 0) return VisionReading.Empty;
+            tally.Pages = pages.Count;
 
             var rows = new List<VisionRow>();
             decimal? total = null;
@@ -132,7 +160,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
 
             for (int number = 1; number <= pages.Count; number++)
             {
-                var page = ReadPage(pages[number - 1], vendor);
+                var page = ReadPage(pages[number - 1], vendor, tally);
                 if (page is null) continue;
 
                 // Stamped here because this is the only place that knows: one request is one page,
@@ -144,9 +172,16 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 if (page.PrintedUnits is not null) units = (units ?? 0) + page.PrintedUnits.Value;
             }
 
+            // A read that found nothing still says how long it spent finding nothing, which is the
+            // case most worth seeing in the log: two minutes and an empty reading is a different
+            // problem from two minutes and forty rows.
+            string note = tally.Describe(clock.ElapsedMilliseconds, rows.Count);
             return rows.Count == 0
-                ? VisionReading.Empty
-                : new VisionReading { Rows = rows, PrintedTotal = total, PrintedUnits = units };
+                ? VisionReading.Empty with { Note = note }
+                : new VisionReading
+                {
+                    Rows = rows, PrintedTotal = total, PrintedUnits = units, Note = note,
+                };
         }
         catch
         {
@@ -243,7 +278,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
     /// A 400 or a 403 is different: it says the request or the key is wrong, not early. That
     /// combination is skipped and never waited on.
     /// </summary>
-    private VisionReading? ReadPage(byte[] png, VisionVendor vendor)
+    private VisionReading? ReadPage(byte[] png, VisionVendor vendor, Tally tally)
     {
         if (Combinations == 0) return null;
         string body = BuildBody(png, vendor);
@@ -257,7 +292,10 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 int index = (_at + tried) % Combinations;
                 var (key, model) = Pair(index);
 
-                var reading = TryOnce(body, key, model, out bool throttled);
+                tally.Requests++;
+                var reading = TryOnce(body, key, model, out bool throttled, out bool timedOut);
+                if (throttled) tally.Throttled++;
+                if (timedOut) tally.TimedOut++;
                 if (reading is not null)
                 {
                     _at = index;          // start here next page rather than re-probing empty quotas
@@ -269,6 +307,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
             // Every key on every model is empty. Waiting is the only thing left, and only for as
             // long as the quota window - beyond that the conversion goes on without a second reader.
             if (!anythingWorthWaitingFor || round >= _backoff.Length) return null;
+            tally.Waited += _backoff[round].TotalSeconds;
             Thread.Sleep(_backoff[round]);
         }
     }
@@ -277,9 +316,11 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
     /// One request against one key and model. Null for any failure; <paramref name="throttled"/>
     /// says whether asking again later could plausibly work.
     /// </summary>
-    private VisionReading? TryOnce(string body, string key, string model, out bool throttled)
+    private VisionReading? TryOnce(
+        string body, string key, string model, out bool throttled, out bool timedOut)
     {
         throttled = false;
+        timedOut = false;
         try
         {
             using var request = new HttpRequestMessage(
@@ -304,7 +345,14 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         {
             // A dropped line is worth another go; the next key is on the same wire, so this is the
             // one case where moving on will not help and waiting might.
+            //
+            // Counted separately from a real 429 because the two look identical from here and cost
+            // wildly different amounts of time: a throttle answers in milliseconds and is paid for
+            // in the sleep below, while a request that runs out the 90-second clock has already
+            // spent that before anything is retried. On a long ticket that is most of the wait, and
+            // the log is the only place the difference shows.
             throttled = true;
+            timedOut = ex is TaskCanceledException or OperationCanceledException;
             return null;
         }
         catch
@@ -345,7 +393,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
             // Reading printed digits is not a creative task; nothing here should vary run to run.
             w.WriteNumber("temperature", 0);
             w.WriteString("responseMimeType", "application/json");
-            WriteSchema(w);
+            WriteSchema(w, vendor);
             w.WriteEndObject();
 
             w.WriteEndObject();
@@ -353,8 +401,24 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         return Encoding.UTF8.GetString(buffer.ToArray());
     }
 
-    private static void WriteSchema(Utf8JsonWriter w)
+    /// <summary>
+    /// The reply's shape. Vendor-aware for exactly one reason, and it is not efficiency.
+    ///
+    /// **Bimbo must not be offered a `qty` field.** Red Bull and Dr Pepper print a case count beside
+    /// a unit count and need both. Bimbo has neither cases nor case prices — its one count column is
+    /// headed **QTY** and holds individual units, which is `units` here. Offer a model a field
+    /// spelled `qty` and a column headed QTY and it will put one in the other, whatever the prompt
+    /// says; `units` then comes back null, every row arrives with no count, and the operator is asked
+    /// about all of them. Measured on ticket 84294890013049: eleven rows, eleven questions, each one
+    /// already carrying the description and the amount the model had read perfectly well.
+    ///
+    /// One name for the count is the fix. The prompt naming the field is not, on its own — this is
+    /// the schema contradicting the prompt, and the schema is what the reply is validated against.
+    /// </summary>
+    private static void WriteSchema(Utf8JsonWriter w, VisionVendor vendor)
     {
+        bool cases = vendor is not VisionVendor.Bimbo;
+
         w.WriteStartObject("responseSchema");
         w.WriteString("type", "object");
         w.WriteStartObject("properties");
@@ -367,7 +431,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         WriteField(w, "itemNumber", "string");
         WriteField(w, "description", "string");
         WriteField(w, "barcode", "string");
-        WriteField(w, "qty", "string");
+        if (cases) WriteField(w, "qty", "string");
         WriteField(w, "units", "string");
         WriteField(w, "price", "string");
         WriteField(w, "amount", "string");
@@ -375,8 +439,11 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         w.WriteEndObject();
         w.WriteStartArray("propertyOrdering");
         foreach (string name in
-                 new[] { "itemNumber", "description", "barcode", "qty", "units", "price", "amount",
-                         "isCredit" })
+                 cases
+                     ? ["itemNumber", "description", "barcode", "qty", "units", "price", "amount",
+                        "isCredit"]
+                     : new[] { "itemNumber", "description", "barcode", "units", "price", "amount",
+                               "isCredit" })
             w.WriteStringValue(name);
         w.WriteEndArray();
         w.WriteStartArray("required");
@@ -439,32 +506,6 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
             still read them; say so by setting pageUpsideDown true. Set it false for a page the
             right way up. This does not change anything you report - read the page as it is meant to
             be read either way, and report the figures normally.
-
-            The barcode, which is the one field that can check itself.
-
-            It is a UPC-A: exactly 12 digits, and the last one is arithmetic on the other eleven.
-            Add the digits in positions 1, 3, 5, 7, 9 and 11, multiply that sum by 3, then add the
-            digits in positions 2, 4, 6, 8 and 10. The check digit is whatever number takes that
-            grand total up to a multiple of 10.
-
-            So, for every barcode, before you report it:
-
-              a. Count the digits. There must be exactly 12. Eleven means you have dropped one -
-                 almost always a zero out of a run of zeros, so 078000082166 comes back as
-                 07800082166. Look at the printed digits again and count them one at a time.
-              b. Work out the check digit and compare it with the last digit printed. If they
-                 match, report the code.
-              c. If they do not match, you have misread a digit somewhere. Look at the code again,
-                 character by character.
-              d. If it still does not come out, leave the barcode field empty.
-
-            An empty barcode is fine - a person reads it off the paper in a couple of seconds.
-
-            What you must NOT do is change a digit so that the sum works. A code you have adjusted
-            into adding up is far worse than no code at all: it looks correct to everything
-            downstream and quietly books the delivery onto a product that was never delivered.
-            Nothing else on the invoice can catch that - the money adds up the same either way. So
-            report the digits you can actually see, or report nothing.
             """;
 
         string columns = vendor switch
@@ -578,11 +619,153 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
                 Foot of the page: printedTotal is AMOUNT DUE, printedUnits is the TOT SALE unit
                 count.
                 """,
+            VisionVendor.Bimbo => """
+
+                THIS IS A BIMBO BAKERIES DELIVERY TICKET - a narrow till-roll receipt headed
+                "BIMBO BAKERIES USA, INC. - CASH STOPS".
+
+                Layout. One printed line per product, under a "**DELIVERIES**" banner whose letters
+                are spaced far apart:
+
+                              ITEM                               SUGG  RETAIL    WHOLESALE
+                      UPC     No      DESCRIPTION           QTY RETAIL AMOUNT  PRICE   AMOUNT
+                  74323-09183 008788  BIM PANQUE NUE FS FC    4   3.19  12.76 3.0100    12.04
+
+                Columns, left to right:
+                  barcode     - UPC: the ten digits in the first column, with a hyphen after five
+                  itemNumber  - ITEM No: Bimbo's own six-digit product number, the second column
+                  description - the product name
+                  units       - the QTY column. Note the field is called "units" and the column is
+                                headed QTY: they are the same number. There is no separate case
+                                count on this vendor and no field to put one in.
+                  price       - PRICE: the second-to-last column, printed to FOUR decimal places
+                  amount      - the LAST column on the row, the one under WHOLESALE
+
+                THERE ARE TWO COLUMNS HEADED "AMOUNT" and you want the right-hand one. The heading
+                spans two printed lines and reads, across the row:
+
+                  ... QTY | SUGG RETAIL | RETAIL AMOUNT | WHOLESALE PRICE | WHOLESALE AMOUNT
+
+                So there are FOUR money figures after QTY. Counting them left to right: the first
+                (SUGG RETAIL) and the second (RETAIL AMOUNT) are reported nowhere, the third is
+                `price` and the fourth and last is `amount`. On the example row above that is
+                price 3.0100 and amount 12.04 - not 3.19 and not 12.76, which are the retail pair
+                and belong to no field here.
+
+                The tell, if you are unsure which pair you are looking at: `price` is the only figure
+                on the row printed to four decimal places, and `amount` is the one immediately to its
+                right at the very end of the line.
+
+                There are no cases on this vendor and no case prices. QTY is already the number of
+                individual packets the store sells, and PRICE is already the cost of one of them.
+                "SS2P" in a description means a single serve two-pack, which is ONE thing the store
+                sells and not two, so it changes nothing about QTY. Report QTY exactly as printed.
+
+                PRICE carries four decimal places and the last two are not padding - 3.0100, 1.9400,
+                2.3900. Report all four digits after the point.
+
+                How a row adds up: QTY x PRICE = AMOUNT. So 4 x 3.0100 = 12.04. If your reading does
+                not add up, look at the row again - but if it still does not, report what is
+                printed. Never adjust a figure to make the row work.
+
+                Returns. Lower down, a "**RETURNS**" banner starts a second block with the same
+                columns and its own header, and every figure on those rows carries a MINUS SIGN:
+
+                  74323-09145 008783  BIM CONCHAS SS2P FC    -2   1.99  -3.98 1.9400    -3.88
+
+                Set isCredit true on those rows and report their figures without the minus signs.
+                The row arithmetic above still holds on a returns row - 2 x 1.9400 = 3.88 - so check
+                it the same way you would a delivery.
+
+                Foot of the page: printedUnits is the count on the "TICKET TOTALS" row and
+                printedTotal is the LAST money figure on that same row, which is the figure repeated
+                below as "CASH DUE". The ticket also prints a "DELIVERY TOTAL" row and a "RETURNS
+                TOTAL" row; those are each one band's own total, they are not the ticket's, and none
+                of these lines is a product row.
+                """,
             _ => "",
         };
 
-        return Common + columns;
+        // No separator here on purpose. Both pieces below open with their own blank line, the way the
+        // column blocks always have, so every line ending in the finished prompt comes from the
+        // source file and they are all the same. A "\n\n" joined onto CRLF literals would leave one
+        // odd seam in the middle of a prompt that was tuned character by character against the
+        // store's own scans.
+        return Common + BarcodeRules(vendor) + columns;
     }
+
+    /// <summary>
+    /// What the model is told about the one field that identifies the product.
+    ///
+    /// Per vendor rather than shared, because the vendors do not print the same thing. Red Bull and
+    /// Dr Pepper print a whole UPC-A whose last digit is arithmetic on the other eleven, so the code
+    /// can be checked before it is reported and a code that will not check out can be dropped.
+    ///
+    /// **Bimbo prints neither the leading zero nor the check digit** — `74323-09183` for the UPC-A
+    /// `074323091830` — so there is no arithmetic to do and nothing to check. Handing it the UPC-A
+    /// instructions would be worse than saying nothing at all: told to count to twelve and make the
+    /// digits add up, a model pads a ten-digit body into a plausible twelve-digit code, and on this
+    /// vendor nothing downstream can catch that. The money reconciles either way and SSCS opens a new
+    /// item under an id belonging to nothing.
+    /// </summary>
+    private static string BarcodeRules(VisionVendor vendor) => vendor switch
+    {
+        VisionVendor.Bimbo => """
+
+
+            The barcode, which on this vendor cannot check itself.
+
+            The UPC column prints TEN digits with a hyphen after the fifth: 74323-09183. That is not
+            a whole barcode - this vendor leaves off both the leading zero and the final check digit
+            - so there is no sum you can do on it and nothing about it that tells you whether you
+            read it correctly.
+
+            Report exactly the ten printed digits, without the hyphen: 7432309183.
+
+              a. Count them. There must be exactly ten. Nine or eleven means you have dropped or
+                 doubled one - look at the printed digits again and count them one at a time.
+              b. Do NOT add a leading zero, do NOT work out a check digit, and do NOT pad the code
+                 to twelve digits. Ten digits, exactly as they are printed.
+              c. If any digit is unclear, leave the barcode field empty.
+
+            An empty barcode is fine - a person reads it off the paper in a couple of seconds, and
+            the item number in the next column identifies the product on its own.
+
+            What you must NOT do is tidy a code up into something that looks more like a barcode.
+            Nothing on this ticket can catch a wrong one: the money adds up the same either way, and
+            the delivery is quietly booked onto a product that was never delivered. So report the
+            digits you can actually see, or report nothing.
+            """,
+        _ => """
+
+
+            The barcode, which is the one field that can check itself.
+
+            It is a UPC-A: exactly 12 digits, and the last one is arithmetic on the other eleven.
+            Add the digits in positions 1, 3, 5, 7, 9 and 11, multiply that sum by 3, then add the
+            digits in positions 2, 4, 6, 8 and 10. The check digit is whatever number takes that
+            grand total up to a multiple of 10.
+
+            So, for every barcode, before you report it:
+
+              a. Count the digits. There must be exactly 12. Eleven means you have dropped one -
+                 almost always a zero out of a run of zeros, so 078000082166 comes back as
+                 07800082166. Look at the printed digits again and count them one at a time.
+              b. Work out the check digit and compare it with the last digit printed. If they
+                 match, report the code.
+              c. If they do not match, you have misread a digit somewhere. Look at the code again,
+                 character by character.
+              d. If it still does not come out, leave the barcode field empty.
+
+            An empty barcode is fine - a person reads it off the paper in a couple of seconds.
+
+            What you must NOT do is change a digit so that the sum works. A code you have adjusted
+            into adding up is far worse than no code at all: it looks correct to everything
+            downstream and quietly books the delivery onto a product that was never delivered.
+            Nothing else on the invoice can catch that - the money adds up the same either way. So
+            report the digits you can actually see, or report nothing.
+            """,
+    };
 
     // ───────────────────────────────────────────────────────────────────────── the reply
 

@@ -91,7 +91,8 @@ to agree on the same digits, and that is verification rather than arithmetic.
   wrong**, so a question shows the row rather than describing it. The question is five words —
   "Type the number under
   UNITS" — naming the column from `LineFieldRequest.ColumnName`, because the vendors disagree about
-  it (Dr Pepper's last column is AMOUNT, Red Bull's is TOTAL) and sending someone to look for a
+  it (Dr Pepper's last column is AMOUNT, Red Bull's is TOTAL, and Bimbo calls its count QTY where the
+  other two call theirs UNITS) and sending someone to look for a
   column that is not on their paper is worse than saying nothing. The ticket's own headings are cut
   from the same page at the same width and shown **directly on top of** the row, so UNITS sits over
   the units. That strip is what makes a snip readable at all: a cut is two printed lines out of the
@@ -100,7 +101,18 @@ to agree on the same digits, and that is verification rather than arithmetic.
   with no header line, and a row with no line number — so `LineFieldRequest.ColumnLegend` carries the
   names as words behind it, written per vendor **and per section**: Dr Pepper's CREDITS block prints
   no WHSLE, and a sales legend over a credit row has the operator counting across to the figure next
-  door. The typed one is deliberately second best and looks it (grey ground, our own font), because
+  door. **`IsColumnHeader` needs a pattern per vendor and it is not obvious that it does**
+  (2026-08-12): it matched on `UNITS` + `AMOUNT`, which are Dr Pepper's words, so every Bimbo question
+  silently fell through to the typed legend and shipped that way. Bimbo prints QTY rather than UNITS,
+  and its scans render AMOUNT as `ANOLNT`, `AHRUNT`, `AH00NT`, `AHUUNI`, `ANOUNT`, `ANO NT`, `AMONT`
+  and `ANDUTI` — matching on it finds the header on four samples out of eleven. `RETAIL` + `PRICE`
+  survives on all eleven and appears on no product row. Bimbo also splits its headings over **two**
+  printed lines (`ITEM / SUGG RETAIL / WHOLESALE` above `UPC No QTY RETAIL AMOUNT PRICE AMOUNT`), and
+  the lower one alone reads "RETAIL AMOUNT PRICE AMOUNT" over four figures — naming two of them twice
+  on the one vendor with two adjacent AMOUNT columns. The band is extended upward when the line above
+  carries RETAIL without PRICE, which is true of Bimbo's upper line and of nothing on Dr Pepper's
+  page. The failure mode to remember is that a missing cut **looks fine**: the typed legend renders,
+  it just cannot line up, so it reads as a cosmetic complaint rather than as the header being absent. The typed one is deliberately second best and looks it (grey ground, our own font), because
   it cannot align with a scan and must not invite anyone to read straight down off it. **Neither one
   is ever marked** — the box goes on the figure being typed, never on a column name. **Which lines a row spans is the parser's to say, never the snipper's:** Dr Pepper
   prints the barcode on the product line *above* the priced row and Red Bull prints it on the line
@@ -188,6 +200,13 @@ to agree on the same digits, and that is verification rather than arithmetic.
   thing that catches the four mis-reads the money cannot see. Three checksums (row, band, ticket); a
   band's unit count is overruled by the ticket's own when the two disagree. **Do not use its printed
   `SUGG RETAIL`** — Bimbo suggests 1.99 where the store rings 3.59; retail is seeded at 45%.
+  **A row whose quantity will not come out is no longer dropped** (2026-08-12): dropping one took its
+  units *and* its money out together, so all three gates failed at once and a forty-row ticket was
+  refused over two figures (84294890010234, 225 units against its own 236). The row is kept unsettled,
+  offered to the picture, and failing that asked about — one question instead of a lost delivery. It
+  is the third vendor with a second reader, and the only one whose **barcode instructions had to be
+  different**: it prints the ten-digit body with no check digit, so a model told to reach twelve and
+  make them sum pads one, and nothing on the page catches that.
   See [analysis/vendors/BIMBO.md](./analysis/vendors/BIMBO.md).
 - `RedBullPdfParser.cs` — Red Bull delivery ticket → `RedBullTicket`. **Round-tripped through live
   SSCS 2025-11-24**, which booked a two-page ticket (a $367.00 delivery invoice and a −$24.50 credit
@@ -230,7 +249,16 @@ to agree on the same digits, and that is verification rather than arithmetic.
   exactly by a model that dropped one row and invented another.
 - `GeminiVisionReader.cs` — the Gemini implementation. One request per page, `temperature 0`, money
   returned as **text** so a cent never goes through a float, and a prompt whose first rule is *never
-  guess* — a blank sends the row to a person, a guess sends it to the register. **Every worked
+  guess* — a blank sends the row to a person, a guess sends it to the register. **The barcode rules
+  are per vendor, not shared** (2026-08-12, when Bimbo was added): Red Bull and Dr Pepper print a
+  whole UPC-A and are told to count to twelve and check the last digit against the other eleven, and
+  giving Bimbo the same instructions would be worse than saying nothing — it prints the body only, so
+  a model told to reach twelve digits pads one into a plausible code and §3 of its vendor doc is why
+  nothing downstream would notice. Splitting that block out left the other two prompts character for
+  character as they were, which `SplittingTheBarcodeRulesOutLeftTheOtherTwoPromptsUntouched` pins;
+  both were tuned against the store's own scans and neither may drift by accident. The blocks
+  concatenate with no separator in code — each opens with its own blank line — so every line ending
+  in a prompt comes from the source file and they are all the same. **Every worked
   example in that prompt has to be a real row that satisfies the rule printed under it** (checked
   2026-08-12): the Dr Pepper example had the code before the name, which is backwards, and showed 2
   cases × 21.38 landing on 21.38 directly beneath "CASES x NET = AMOUNT". And the row arithmetic is
@@ -242,9 +270,34 @@ to agree on the same digits, and that is verification rather than arithmetic.
   `PdfBarcodeReader`'s empty list. `CheckTheKeyWorks` is the Test button, for the same reason Test
   Email exists. Key lives in `VisionSettings`, DPAPI-encrypted, behind the admin PIN; **off by
   default**, and off means the converter behaves exactly as it did before this existed.
+  **The response schema is per vendor too, and for a sharper reason than the prompt**
+  (2026-08-12). A schema field whose name matches a column heading the vendor does not mean by it
+  **silently steals that column**, and the prompt loses the argument — the schema is what the reply
+  is validated against. Bimbo's one count column is headed `QTY` and holds individual units, which
+  this contract calls `units`; while a field spelled `qty` was also on offer the model filled that
+  instead, `units` came back null on every row, and nothing settled. Ticket 84294890013049 asked
+  **eleven questions on eleven rows**, each one already carrying the description and the amount the
+  model had read perfectly well. Bimbo is now offered exactly one count field; Red Bull and Dr Pepper
+  bill in cases and keep both. Pinned by
+  `OnlyTheVendorsThatBillInCasesAreOfferedACaseCountField`. The general rule when adding a vendor:
+  **read the schema's field names next to that vendor's printed column headings and look for a pair
+  that collide.** Bimbo's other near-miss is `amount` against its *two* columns headed AMOUNT (retail
+  and wholesale) — that one is disambiguated in the prompt by position and by PRICE being the row's
+  only four-decimal figure, and it fails safe besides, since a retail amount fails
+  `QTY x PRICE = AMOUNT` and sends the row to a person rather than to the register.
+  **What a read cost goes to the log** (`VisionReading.Note` → `LogEntry.visionRead`): pages,
+  requests, rows, how many came back throttled, how many ran out the 90-second clock, and seconds
+  spent asleep on the free allowance. The second reader runs *before* the first prompt opens, so its
+  time is time the operator spends watching a window that has not appeared yet — and "the AI took two
+  minutes" has four causes that need telling apart and cannot be told apart from outside: a long
+  reply, a request that hit the timeout **and was then retried** (a timeout is counted as throttled,
+  so one slow page can cost 90s twice over), a genuine 429 costing a 20- or 50-second sleep, or a
+  slow line. A read that comes back empty still writes its note, because two minutes and nothing is a
+  different fault from two minutes and forty rows.
 - **A page the text layer cannot read is no longer a lost file.** Where the OCR found no product
   rows and the picture did, the picture *is* the invoice: `RowsFromThePicture` builds the rows on
-  both vendors, `PdfTextExtractor`'s `PDF_NO_TEXT_LAYER` refusal is deferred (`ConversionService.
+  Red Bull and Dr Pepper and `SectionsFromThePicture` on Bimbo, `PdfTextExtractor`'s
+  `PDF_NO_TEXT_LAYER` refusal is deferred (`ConversionService.
   TextOr`), and Dr Pepper's `LooksReadable` gate now **discards the text layer whole** rather than
   merely tolerating it — the upside-down scan is not blank, it has 136 lines and some of them match
   as product rows (`SO'6Z ZI T 9Yd`), so leaving them in would put garbage in beside the reading.
@@ -304,8 +357,11 @@ to agree on the same digits, and that is verification rather than arithmetic.
   `DateToOffer`, for the same reason it carries no suggested invoice number — a suggestion the
   prompt cannot receive cannot be wired back in by accident
   (`NoScannedInvoiceNumberOrDateCanReachThePromptForAnyVendor`). `AskLineField`
-  asks for **one figure on one Dr Pepper or Red Bull row** — its UPC, units or amount — by showing
-  the printed row with that figure boxed, rather than by describing it. **Never the description:** SSCS
+  asks for **one figure on one Dr Pepper, Red Bull or Bimbo row** — its UPC, units or amount — by
+  showing the printed row with that figure boxed, rather than by describing it. Bimbo prints **one
+  line per product**, so its snip is a single line where the other two cut a two-line band and have
+  to say which of the two carries the barcode; and it asks about `QTY`, not the `UNITS` both the
+  others print, which is exactly what `LineFieldRequest.ColumnName` exists for. **Never the description:** SSCS
   overrides it for a known item, so asking would be a prompt that changes nothing. **The invoice-number
   box is never pre-filled from a scan, for any vendor** — `InvoiceDetailsRequest` deliberately has no
   suggestion field, so it cannot be

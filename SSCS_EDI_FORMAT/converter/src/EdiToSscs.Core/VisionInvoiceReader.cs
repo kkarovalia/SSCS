@@ -98,6 +98,19 @@ public sealed record VisionReading
     /// <summary>The unit count the ticket prints for itself, when it was legible.</summary>
     public int? PrintedUnits { get; init; }
 
+    /// <summary>
+    /// One line for the log saying what the read cost — pages, requests, how many came back
+    /// throttled, how long was spent waiting on a quota, and the wall clock for the lot.
+    ///
+    /// Here because a slow read is otherwise invisible and indistinguishable from a slow one for a
+    /// different reason. The second reader runs *before* the first prompt opens, so its time is time
+    /// the operator spends looking at a window that has not appeared yet, and "the AI took two
+    /// minutes" has at least four causes that need telling apart: a long reply, a request that hit
+    /// the 90-second timeout and was retried, a free-tier throttle costing a 20- or 50-second sleep,
+    /// or simply a slow line. Guessing between them from the outside is how the wrong one gets fixed.
+    /// </summary>
+    public string Note { get; init; } = "";
+
     /// <summary>An empty reading, which is what every failure produces.</summary>
     public static VisionReading Empty { get; } = new() { Rows = [] };
 
@@ -131,7 +144,7 @@ public sealed record VisionReading
     /// another satisfies it exactly while tying the wrong two together.
     /// </summary>
     /// <param name="keyOf">
-    /// Which field of a vision row an anchor's key is compared against. Red Bull ties on the
+    /// Which field of a vision row an anchor's key is compared against. Red Bull and Bimbo tie on the
     /// vendor's item number; Dr Pepper's priced row has no such column and ties on the UPC.
     /// </param>
     public VisionRow?[] AlignTo(IReadOnlyList<VisionAnchor> anchors, Func<VisionRow, string?>? keyOf = null)
@@ -220,6 +233,15 @@ public enum VisionVendor
 {
     RedBull,
     DrPepper,
+
+    /// <summary>
+    /// Bimbo Bakeries. The odd one out: its printed code is a ten-digit body with no check digit,
+    /// so the barcode instructions the other two share — count to twelve, work the last digit out,
+    /// drop the code if it does not add up — are not merely useless here but actively harmful.
+    /// A model told to make a code reach twelve digits will pad one, and nothing on a Bimbo ticket
+    /// can catch a wrong barcode. See <see cref="GeminiVisionReader"/>.
+    /// </summary>
+    Bimbo,
 }
 
 /// <summary>

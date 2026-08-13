@@ -63,6 +63,9 @@ public class ColumnLegendTests
     private static QueuedFile RedBull(string path) =>
         new() { InputPath = path, Kind = ConversionKind.Pdf, Vendor = PdfVendor.RedBull };
 
+    private static QueuedFile Bimbo(string path) =>
+        new() { InputPath = path, Kind = ConversionKind.Pdf, Vendor = PdfVendor.Bimbo };
+
     // ──────────────────────────────────────────────────────────────────────── Dr Pepper, sales
 
     /// <summary>
@@ -186,6 +189,99 @@ public class ColumnLegendTests
             foreach (string column in new[] { "ID", "QTY", "UNITS", "PRICE", "SUGAR", "TOTAL" })
                 Assert.Contains(column, f.ColumnLegend, StringComparison.Ordinal);
             Assert.DoesNotContain("WHSLE", f.ColumnLegend, StringComparison.Ordinal);
+        });
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────── Bimbo
+
+    /// <summary>
+    /// Bimbo's columns, which are a third arrangement again: eight of them, the barcode first rather
+    /// than under the description, and **two money pairs** — a suggested-retail pair the store does
+    /// not use and a wholesale pair it does. That last part is why the legend has to be right here.
+    /// Both pairs are printed as "AMOUNT", the two sit side by side, and the one being asked about is
+    /// always the wholesale one on the right.
+    ///
+    /// One legend for both bands, unlike Dr Pepper: the RETURNS block repeats the same headings and
+    /// only puts a minus in front of the figures.
+    /// </summary>
+    [Fact]
+    public void ABimboQuestionCarriesBimbosOwnColumns()
+    {
+        using var tmp = new TempDir();
+        var prompt = new ScriptedPrompt("090825143000D");
+        prompt.Paper["BIN PANOUE Il1E FS FC 3.19"] = "4";
+        prompt.Paper["NLA RVORO F515P FC"] = "7";
+
+        var outcome = Service(tmp, prompt).ConvertFile(
+            Bimbo(Place(tmp, "BIMBO_84294890010234_deliveries_only.pdf", "bb.pdf")), tmp.Sub("out"));
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        Assert.NotEmpty(prompt.LineFields);
+
+        Assert.All(prompt.LineFields, f =>
+        {
+            foreach (string column in new[] { "UPC", "ITEM", "QTY", "RETAIL", "WHOLESALE", "PRICE" })
+                Assert.Contains(column, f.ColumnLegend, StringComparison.Ordinal);
+
+            // Neither of the other two vendors' vocabularies has leaked in.
+            Assert.DoesNotContain("WHSLE", f.ColumnLegend, StringComparison.Ordinal);
+            Assert.DoesNotContain("SUGAR", f.ColumnLegend, StringComparison.Ordinal);
+            Assert.DoesNotContain("CASES", f.ColumnLegend, StringComparison.Ordinal);
+
+            // And the question names the column the operator has to find, which on this vendor is
+            // QTY — not the UNITS both the others print.
+            Assert.Equal("QTY", f.ColumnName);
+        });
+    }
+
+    /// <summary>
+    /// A Bimbo question shows the ticket's **own** printed header, not our typed-out list of names.
+    ///
+    /// This shipped wrong once and looked plausible from the inside: `IsColumnHeader` matched on
+    /// UNITS and AMOUNT, which are Dr Pepper's words. Bimbo prints QTY rather than UNITS, and its
+    /// scans render AMOUNT as `ANOLNT`, `AHRUNT`, `AH00NT`, `AHUUNI`, `ANOUNT`, `ANO NT`, `AMONT` and
+    /// `ANDUTI`, so nothing matched, the cut came back null, and every question fell through to the
+    /// typed legend — grey, in our own font, and by design not aligned to anything. The operator sees
+    /// a row of eight figures and a list of eight names that does not line up over them, on a vendor
+    /// whose two AMOUNT columns sit side by side.
+    ///
+    /// So the cut has to exist, and it has to be **both** printed lines: Bimbo splits its headings
+    /// over two, "ITEM / SUGG RETAIL / WHOLESALE" above "UPC No QTY RETAIL AMOUNT PRICE AMOUNT". The
+    /// lower line alone reads "RETAIL AMOUNT PRICE AMOUNT" over four figures and names two of them
+    /// twice, which is the ambiguity the upper line exists to resolve.
+    /// </summary>
+    [Fact]
+    public void ABimboQuestionShowsTheTicketsOwnHeaderAndBothLinesOfIt()
+    {
+        using var tmp = new TempDir();
+        var prompt = new ScriptedPrompt("090825143000D");
+        prompt.Paper["BIN PANOUE Il1E FS FC 3.19"] = "4";
+        prompt.Paper["NLA RVORO F515P FC"] = "7";
+
+        var outcome = Service(tmp, prompt).ConvertFile(
+            Bimbo(Place(tmp, "BIMBO_84294890010234_deliveries_only.pdf", "bb.pdf")), tmp.Sub("out"));
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        Assert.NotEmpty(prompt.LineFields);
+
+        Assert.All(prompt.LineFields, f =>
+        {
+            Assert.NotNull(f.Snip);
+            Assert.NotNull(f.Header);
+
+            // Cut from the same page at the same width, which is the whole reason it is worth more
+            // than the typed names: QTY lands over the quantity rather than beside it.
+            Assert.Equal(f.Snip!.PagePng.Length, f.Header!.PagePng.Length);
+            Assert.Equal(f.Snip.Width, f.Header.Width);
+
+            // Two printed lines against the row's one. Compared to the row rather than to a pixel
+            // count so this does not become a test about scanner resolution.
+            Assert.True(f.Header.Height > f.Snip.Height,
+                $"header {f.Header.Height}px is not taller than the row's {f.Snip.Height}px, so only "
+                + "one of the two heading lines was cut");
+
+            // Never marked. The box goes on the figure being typed, never on a column name.
+            Assert.Equal(0, f.Header.FocusHeight);
         });
     }
 

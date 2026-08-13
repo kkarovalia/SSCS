@@ -21,8 +21,6 @@ namespace EdiToSscs.App;
 /// </summary>
 internal sealed class VisionSettingsDialog : Form
 {
-    private readonly VisionSettings _original;
-
     /// <summary>The working list, held **encrypted** exactly as it will be saved.</summary>
     private readonly List<string> _protectedKeys;
 
@@ -38,7 +36,6 @@ internal sealed class VisionSettingsDialog : Form
     public VisionSettingsDialog(VisionSettings current)
     {
         ArgumentNullException.ThrowIfNull(current);
-        _original = current.Clone();
         _protectedKeys = [.. current.AllProtectedKeys];
 
         Text = "AI reading";
@@ -99,7 +96,12 @@ internal sealed class VisionSettingsDialog : Form
         layout.Controls.Add(_keyCount);
 
         _keyList = new ListBox { Width = 460, Height = 92, IntegralHeight = false };
-        _keyList.SelectedIndexChanged += (_, _) => UpdateKeyList(keepSelection: true);
+        // Selecting a key changes nothing about the list, so this must not rebuild it. It did, and
+        // rebuilding starts with Items.Clear(), which raises this same event — so one click on a
+        // saved key recursed until the stack ran out and Windows killed the process outright. A
+        // StackOverflowException cannot be caught in .NET, so there was no dialog and no log entry,
+        // just the application vanishing. All a selection decides is whether Remove is available.
+        _keyList.SelectedIndexChanged += (_, _) => UpdateRemoveButton();
         layout.Controls.Add(_keyList);
 
         var keyButtons = new FlowLayoutPanel
@@ -158,11 +160,13 @@ internal sealed class VisionSettingsDialog : Form
     /// <summary>
     /// Redraws the list from the working set. Shows the position and the last four characters of
     /// each key — enough to tell two accounts apart, and not enough to be a credential.
+    ///
+    /// <paramref name="select"/> is the row to leave highlighted afterwards; -1 for none. It is
+    /// passed in rather than read back off the list because clearing the list has already thrown the
+    /// old selection away by the time anything here could look at it.
     /// </summary>
-    private void UpdateKeyList(bool keepSelection = false)
+    private void UpdateKeyList(int select = -1)
     {
-        int selected = keepSelection ? _keyList.SelectedIndex : -1;
-
         _keyList.BeginUpdate();
         _keyList.Items.Clear();
         for (int i = 0; i < _protectedKeys.Count; i++)
@@ -175,7 +179,7 @@ internal sealed class VisionSettingsDialog : Form
         }
         _keyList.EndUpdate();
 
-        if (selected >= 0 && selected < _keyList.Items.Count) _keyList.SelectedIndex = selected;
+        if (select >= 0 && select < _keyList.Items.Count) _keyList.SelectedIndex = select;
 
         _keyCount.Text = _protectedKeys.Count switch
         {
@@ -183,8 +187,10 @@ internal sealed class VisionSettingsDialog : Form
             1 => "1 key saved. Add a second and it will be used when the first runs out.",
             _ => $"{_protectedKeys.Count} keys saved. They are tried in this order.",
         };
-        _removeKey.Enabled = _keyList.SelectedIndex >= 0;
+        UpdateRemoveButton();
     }
+
+    private void UpdateRemoveButton() => _removeKey.Enabled = _keyList.SelectedIndex >= 0;
 
     /// <summary>
     /// Adds a key without touching the ones already there — which is the whole point of this screen
@@ -212,16 +218,20 @@ internal sealed class VisionSettingsDialog : Form
         }
 
         _protectedKeys.Add(encrypted);
-        UpdateKeyList();
+        UpdateKeyList(select: _protectedKeys.Count - 1);
     }
 
+    /// <summary>
+    /// Takes the highlighted key out. The row that slides up into its place is highlighted after,
+    /// so clearing out several old keys is one button press each rather than a press and a click.
+    /// </summary>
     private void OnRemoveKey(object? sender, EventArgs e)
     {
         int index = _keyList.SelectedIndex;
         if (index < 0 || index >= _protectedKeys.Count) return;
 
         _protectedKeys.RemoveAt(index);
-        UpdateKeyList();
+        UpdateKeyList(select: Math.Min(index, _protectedKeys.Count - 1));
     }
 
     /// <summary>A single-field prompt for one key, masked as it is typed.</summary>

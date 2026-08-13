@@ -25,6 +25,13 @@ public sealed class LogEntry
     [JsonPropertyName("exceptionDetail")] public string? ExceptionDetail { get; set; }
     [JsonPropertyName("inputSha256")] public string? InputSha256 { get; set; }
     [JsonPropertyName("outputSha256")] public string? OutputSha256 { get; set; }
+
+    /// <summary>
+    /// What the second reader cost on this file — see <see cref="VisionReading.Note"/>. Absent when
+    /// the vendor has no vision path or no key is configured, which is also the answer to "was it
+    /// even switched on".
+    /// </summary>
+    [JsonPropertyName("visionRead")] public string? VisionRead { get; set; }
 }
 
 /// <summary>

@@ -26,6 +26,7 @@ internal sealed class PinDialog : Form
         _storedHash = storedHash;
 
         Text = setting ? "Set an admin PIN" : "Admin PIN";
+        AppIcon.ApplyTo(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;

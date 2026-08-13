@@ -460,10 +460,13 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         VisionSettings s;
         lock (_visionLock) s = _vision;
 
+        // Every key configured, not just the one field an older build wrote. The settings screen
+        // saves into the list and clears that field, so asking it whether a key exists answered "no"
+        // for a store that had just added one — and then told them to go and get a free Google key.
         _visionValueLabel.Text = s.IsActive
             ? "On. Scanned invoices are read twice - from the PDF and from the picture - so you are only\n"
               + "asked about a figure when nothing on the page can settle it."
-            : string.IsNullOrWhiteSpace(s.ProtectedApiKey)
+            : s.AllProtectedKeys.Count == 0
                 ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
                   + "Open AI Reading Settings to switch it on with a free Google key."
                 : "Off. A key is saved but not being used - open AI Reading Settings to switch it back on.";
@@ -759,7 +762,11 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
             listHeaderRow.Controls.Add(new Label
             {
-                Text = "Converted files - click one to view its XML", AutoSize = true, ForeColor = ThemeMuted,
+                // What the buttons actually do. It read "click one to view its XML", and a single
+                // click does nothing — the viewer is on double-click, because opening a modal window
+                // every time an arrow key moves the highlight would be unusable.
+                Text = "Converted files - double-click one, or pick it and press View XML",
+                AutoSize = true, ForeColor = ThemeMuted,
                 Anchor = AnchorStyles.Left, Margin = new Padding(2, 8, 0, 0),
             }, 0, 0);
 

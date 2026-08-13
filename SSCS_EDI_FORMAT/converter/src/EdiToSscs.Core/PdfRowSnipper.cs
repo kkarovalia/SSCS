@@ -64,15 +64,32 @@ public static class PdfRowSnipper
     /// of it, so the last "12" on the line is as likely to be the CASES figure or part of a
     /// description as the units — and the whole-row wash is the right answer there.
     /// </param>
+    /// <param name="columnLeftOf">
+    /// The heading word that the wanted column sits immediately to the left of — a fallback for when
+    /// the figure being asked about is **not in the text layer at all**, so there is no token to find
+    /// and the whole row would otherwise be washed.
+    ///
+    /// Bimbo needs this and the other two vendors do not, because their damaged figures are usually
+    /// still *present* and merely mangled, which <see cref="FindSpan"/> can locate. Bimbo's QTY column
+    /// is the one the 200 dpi scans delete outright — ticket 84294890010234 lost it on all forty rows
+    /// — so the marker had nothing to attach to and every question arrived with the entire line lit
+    /// up. The figure is plainly there in the *picture*, which is the whole premise of this file.
+    ///
+    /// The column is found by position rather than by its own heading text, because that heading is
+    /// exactly what the scan destroys: QTY reads as `UTY`, `OTY`, `OW`, `UN` and `RTY` across the
+    /// samples. `RETAIL` survives on all eleven and QTY is always the word before it, so the anchor is
+    /// the neighbour rather than the thing itself. Used only when the figure could not be found on the
+    /// row; a token that *was* found is always marked in preference to a column.
+    /// </param>
     public static PdfRowSnip? TryCut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
         string? focusText = null, int? focusLineNo = null, bool markWholeCode = false,
-        bool lastOfDuplicates = false)
+        bool lastOfDuplicates = false, string? columnLeftOf = null)
     {
         try
         {
             return Cut(pdfBytes, firstLineNo, lastLineNo, focusText, focusLineNo, markWholeCode,
-                lastOfDuplicates: lastOfDuplicates);
+                lastOfDuplicates: lastOfDuplicates, columnLeftOf: columnLeftOf);
         }
         catch
         {
@@ -96,7 +113,18 @@ public static class PdfRowSnipper
         {
             var lines = PdfTextExtractor.ExtractPositionedLines(pdfBytes);
             for (int i = Math.Min(beforeLineNo, lines.Count) - 1; i >= 0; i--)
-                if (IsColumnHeader(lines[i].Text)) return TryCutHeaderLine(pdfBytes, i + 1);
+            {
+                if (!IsColumnHeader(lines[i].Text)) continue;
+
+                // Bimbo splits its column names over two printed lines - "ITEM / SUGG RETAIL /
+                // WHOLESALE" sits above "UPC No QTY RETAIL AMOUNT PRICE AMOUNT", and which money
+                // column is which is only legible with both. Cutting the lower line alone gives a
+                // strip reading "RETAIL AMOUNT PRICE AMOUNT" over four figures, which names two of
+                // them twice. The upper line carries RETAIL on all eleven readable samples and no
+                // other vendor's header has a second line above it, so this stays off Dr Pepper.
+                int first = i > 0 && Continues(lines[i - 1].Text) ? i : i + 1;
+                return Cut(pdfBytes, first, i + 1, null, i + 1, false, mark: false);
+            }
             return null;
         }
         catch
@@ -214,15 +242,39 @@ public static class PdfRowSnipper
         }
     }
 
-    /// <summary>The row of column names, on either the SALES or the CREDITS half of the ticket.</summary>
+    /// <summary>
+    /// The row of column names, on whichever half of the ticket the row sits in — Dr Pepper's SALES
+    /// or CREDITS block, Bimbo's DELIVERIES or RETURNS block. The nearest one above a row wins, which
+    /// is what puts a credit row under the header its own section prints.
+    ///
+    /// Two patterns because the vendors name their columns differently, and each is chosen from what
+    /// actually survived the scans rather than from what the paper says. Dr Pepper's `UNITS` and
+    /// `AMOUNT` came through intact. Bimbo's did not: `AMOUNT` reaches the text layer as `ANOLNT`,
+    /// `AHRUNT`, `AH00NT`, `AHUUNI`, `ANOUNT`, `ANO NT`, `AMONT` and `ANDUTI` across the samples, so
+    /// matching on it would find the header on four tickets out of eleven. `RETAIL` and `PRICE` both
+    /// survive on all eleven, and no Bimbo product row carries either word.
+    /// </summary>
     private static bool IsColumnHeader(string line) =>
-        line.Contains("UNITS", StringComparison.OrdinalIgnoreCase)
-        && line.Contains("AMOUNT", StringComparison.OrdinalIgnoreCase);
+        (line.Contains("UNITS", StringComparison.OrdinalIgnoreCase)
+         && line.Contains("AMOUNT", StringComparison.OrdinalIgnoreCase))
+        || (line.Contains("RETAIL", StringComparison.OrdinalIgnoreCase)
+            && line.Contains("PRICE", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Whether the line above a column header is the top half of the same header — Bimbo prints
+    /// "ITEM / SUGG RETAIL / WHOLESALE" over "UPC No QTY RETAIL AMOUNT PRICE AMOUNT", and the pair is
+    /// what tells the two AMOUNT columns apart. `RETAIL` is the word that survived on all eleven
+    /// readable samples; `PRICE` is deliberately not accepted here, because it appears only on the
+    /// lower line and matching it would pull in a product row.
+    /// </summary>
+    private static bool Continues(string line) =>
+        line.Contains("RETAIL", StringComparison.OrdinalIgnoreCase)
+        && !line.Contains("PRICE", StringComparison.OrdinalIgnoreCase);
 
     private static PdfRowSnip? Cut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
         string? focusText, int? focusLineNo, bool markWholeCode, bool mark = true,
-        bool lastOfDuplicates = false)
+        bool lastOfDuplicates = false, string? columnLeftOf = null)
     {
         ArgumentNullException.ThrowIfNull(pdfBytes);
         if (firstLineNo > lastLineNo) (firstLineNo, lastLineNo) = (lastLineNo, firstLineNo);
@@ -268,8 +320,10 @@ public static class PdfRowSnipper
         int focusTop = Down(focus.Top + padding / 2);
         int focusBottom = Math.Max(focusTop + 1, Down(focus.Bottom - padding / 2));
 
-        // The figure itself when it can be found on the row beyond doubt, otherwise the whole row.
+        // The figure itself when it can be found on the row beyond doubt; failing that the column it
+        // belongs to, where the caller can name one; failing both, the whole row.
         var span = markWholeCode ? FindCodeSpan(focus) : FindSpan(focus, focusText, lastOfDuplicates);
+        span ??= FindColumnSpan(lines, focus, columnLeftOf);
         int focusLeft = 0, focusWidth = image.WidthInSamples;
         if (span is not null)
         {
@@ -289,6 +343,60 @@ public static class PdfRowSnipper
     /// <summary>The line with that 1-based number, or null when there is no such line.</summary>
     private static PdfTextLine? LineAt(IReadOnlyList<PdfTextLine> lines, int? lineNo) =>
         lineNo is int n && n >= 1 && n <= lines.Count ? lines[n - 1] : null;
+
+    /// <summary>
+    /// Where the wanted column runs, taken off the heading printed above this row — for a figure the
+    /// scan deleted, where there is no token on the row to mark.
+    ///
+    /// The column is identified as the heading word immediately left of <paramref name="rightOf"/>,
+    /// not by its own text, because its own text is what the scan destroys. See
+    /// <see cref="TryCut"/>'s `columnLeftOf`.
+    ///
+    /// The span is the heading's own, opened out — one heading width to the left and three quarters
+    /// of one to the right. Bimbo's figures are **right-aligned** just past the heading's right edge
+    /// and grow leftward with their digit count, so a box drawn tight to the heading clips both ends.
+    /// Measured across the samples: heading `OTY` at 162.1–171.9 carries counts at 168.6–171.9 (`1`),
+    /// 167.6–172.6 (`8`) and 165.4–172.5 (`12`), and the returns band's 165.0–174.8 carries
+    /// 170.7–178.1 (`-1`). A **returned** line runs furthest right of all, because the minus sign
+    /// pushes the digits along, so the right-hand margin is the one that has to be generous.
+    ///
+    /// The box holds every one of them and still clears its neighbours at both ends: the description
+    /// finishes by ~150 and the SUGG RETAIL figures start at ~187, against a box running roughly
+    /// 152–186. It cannot spill onto the column either side, which is the property that matters — a
+    /// confident marker on the wrong figure is read, typed, and booked.
+    ///
+    /// Null whenever anything is not exactly as expected — no heading above the row, no such
+    /// neighbour, nothing to its left — and the caller then washes the whole row as before. A wrong
+    /// box is worse than a wide one.
+    /// </summary>
+    private static (double Left, double Right)? FindColumnSpan(
+        IReadOnlyList<PdfTextLine> lines, PdfTextLine row, string? rightOf)
+    {
+        if (string.IsNullOrWhiteSpace(rightOf)) return null;
+
+        for (int i = Math.Min(row.LineNumber, lines.Count) - 1; i >= 0; i--)
+        {
+            var line = lines[i];
+            if (line.PageNumber != row.PageNumber) return null;
+            if (!IsColumnHeader(line.Text)) continue;
+
+            int at = -1;
+            for (int w = 0; w < line.Words.Count; w++)
+                if (line.Words[w].Text.Contains(rightOf, StringComparison.OrdinalIgnoreCase))
+                {
+                    at = w;
+                    break;
+                }
+
+            if (at <= 0) return null;
+
+            var heading = line.Words[at - 1];
+            double width = Math.Max(1.0, heading.Right - heading.Left);
+            return (heading.Left - width, heading.Right + width * 0.75);
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Where on the row a figure is printed, or null when it cannot be placed beyond doubt.

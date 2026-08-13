@@ -50,6 +50,7 @@ internal sealed class LineFieldDialog : Form
         int textWidth = row?.Width ?? 450;
 
         Text = $"{request.Vendor} - item {request.Position} of {request.LineCount}";
+        AppIcon.ApplyTo(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;

@@ -16,7 +16,14 @@ public class BimboPdfTests
 {
     private const string Dir = @"Fixtures\PDF";
 
-    /// <summary>Every readable sample, with the figures printed on the paper.</summary>
+    /// <summary>
+    /// Every sample the text layer alone can carry, with the figures printed on the paper.
+    ///
+    /// Two of the store's thirteen are deliberately not here, because neither converts off its text
+    /// layer and both are proved in <see cref="BimboVisionTests"/> instead: 84294890010234 loses two
+    /// rows outright and is eleven units short of its own count, and 84294890013049 went through the
+    /// scanner with its OCR switched off and has no text layer at all.
+    /// </summary>
     public static TheoryData<string, decimal, int, int> Samples => new()
     {
         // file,                             CASH DUE, TICKET TOTALS units, product lines
@@ -28,6 +35,12 @@ public class BimboPdfTests
         { "84294890013154_bad_section_count", 209.32m, 104, 27 },
         { "84294890012057",                   174.84m,  81, 19 },
         { "84294890013046",                    65.96m,  34, 14 },
+        // The UPC column drifts a whole row clear of the item numbers beside it, so pdftotext pairs
+        // every code with the wrong product; PdfPig's line grouping puts them back together.
+        { "84294890012978_split_upc_column",   39.27m,  16,  9 },
+        // One row's money lands on the line below it and another reads 13.50 for a printed 13.58.
+        // Both survive because the extended amount is recomputed rather than copied.
+        { "84294890012811_displaced_money_row", 53.46m, 27,  5 },
     };
 
     public static TheoryData<string> SampleNames

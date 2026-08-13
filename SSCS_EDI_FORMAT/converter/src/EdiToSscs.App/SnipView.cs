@@ -54,6 +54,12 @@ internal static class SnipView
             Margin = new Padding(0),
         };
 
+        // A PictureBox does not own its Image, so closing the dialog frees the control and leaves the
+        // bitmap behind. That is not a rounding error here: a whole page drawn at reading width is
+        // 860 x 5216, about 18 MB, and a bad Red Bull batch asks sixty-odd questions in a row. Tie
+        // the picture's life to the control that shows it.
+        box.Disposed += (_, _) => picture.Dispose();
+
         if (picture.Height <= MaxHeight)
         {
             box.BorderStyle = BorderStyle.FixedSingle;

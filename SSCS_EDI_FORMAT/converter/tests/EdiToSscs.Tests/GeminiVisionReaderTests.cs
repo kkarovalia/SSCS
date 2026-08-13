@@ -385,9 +385,12 @@ public class GeminiVisionReaderTests
 
         string RedBull() => Ask(VisionVendor.RedBull);
         string DrPepper() => Ask(VisionVendor.DrPepper);
+        string Bimbo() => Ask(VisionVendor.Bimbo);
 
-        string rb = RedBull(), dp = DrPepper();
+        string rb = RedBull(), dp = DrPepper(), bb = Bimbo();
         Assert.NotEqual(rb, dp);
+        Assert.NotEqual(rb, bb);
+        Assert.NotEqual(dp, bb);
 
         // Where the figures are, how the row proves itself, and how a return is printed.
         Assert.Contains("QTY x PRICE = TOTAL", rb, StringComparison.Ordinal);
@@ -401,9 +404,161 @@ public class GeminiVisionReaderTests
         Assert.Contains("CREDITS banner", dp, StringComparison.Ordinal);
         Assert.Contains("pen stroke is not a digit", dp, StringComparison.Ordinal);
 
-        // Neither is told to make a row work. That instruction is what turns a second reader into a
-        // machine for producing plausible wrong answers.
-        Assert.All(new[] { rb, dp }, p =>
+        Assert.Contains("QTY x PRICE = AMOUNT", bb, StringComparison.Ordinal);
+        Assert.Contains("TICKET TOTALS", bb, StringComparison.Ordinal);
+        Assert.Contains("MINUS SIGN", bb, StringComparison.Ordinal);
+        // The one thing about this vendor a model would otherwise get exactly backwards.
+        Assert.Contains("no cases on this vendor", bb, StringComparison.Ordinal);
+
+        // None of them is told to make a row work. That instruction is what turns a second reader
+        // into a machine for producing plausible wrong answers.
+        Assert.All(new[] { rb, dp, bb }, p =>
             Assert.Contains("Never adjust a figure", p, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Bimbo does not get the UPC-A instructions, and that is not a detail.
+    ///
+    /// Red Bull and Dr Pepper print a whole twelve-digit code whose last digit is arithmetic on the
+    /// other eleven, so the model is told to count to twelve, work the check digit out, and drop any
+    /// code that will not add up. Bimbo prints `74323-09183` — the body, with both the leading zero
+    /// and the check digit left off. Told to reach twelve digits and make them sum, a model pads a
+    /// ten-digit body into a plausible code, and on this vendor **nothing downstream can catch that**:
+    /// the money reconciles either way and SSCS opens a new item under an id belonging to nothing.
+    /// </summary>
+    [Fact]
+    public void OnlyTheVendorsThatPrintACheckDigitAreToldToUseOne()
+    {
+        string Ask(VisionVendor vendor)
+        {
+            var h = new Stub(Reply("""{"rows":[]}"""));
+            new GeminiVisionReader(["k"], OneModel, new HttpClient(h), NoWait)
+                .TryRead(File.ReadAllBytes(Scan), vendor);
+            return h.Sent[0];
+        }
+
+        string bb = Ask(VisionVendor.Bimbo);
+        Assert.DoesNotContain("exactly 12 digits", bb, StringComparison.Ordinal);
+        Assert.DoesNotContain("check digit and compare", bb, StringComparison.Ordinal);
+        Assert.Contains("There must be exactly ten", bb, StringComparison.Ordinal);
+        Assert.Contains("do NOT pad the code", bb, StringComparison.Ordinal);
+
+        Assert.All(new[] { VisionVendor.RedBull, VisionVendor.DrPepper }, v =>
+        {
+            string p = Ask(v);
+            Assert.Contains("It is a UPC-A: exactly 12 digits", p, StringComparison.Ordinal);
+            Assert.DoesNotContain("There must be exactly ten", p, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// Splitting the barcode rules out of the shared preamble left the two shipped vendors' briefings
+    /// **exactly** as they were. Both were tuned against the store's own scans, and a prompt that
+    /// drifts while nobody is looking is a reader that quietly starts making different mistakes.
+    ///
+    /// The seam is what this guards: the common rules, then the barcode block, then the vendor's
+    /// columns, joined the way they were when the three were one string.
+    /// </summary>
+    [Fact]
+    public void SplittingTheBarcodeRulesOutLeftTheOtherTwoPromptsUntouched()
+    {
+        // The prompt itself, out of the request envelope, so the seam is checked as the model sees
+        // it rather than as JSON happens to escape it.
+        static string Prompt(VisionVendor vendor)
+        {
+            var h = new Stub(Reply("""{"rows":[]}"""));
+            new GeminiVisionReader(["k"], OneModel, new HttpClient(h), NoWait)
+                .TryRead(File.ReadAllBytes(Scan), vendor);
+
+            using var doc = System.Text.Json.JsonDocument.Parse(h.Sent[0]);
+            string text = doc.RootElement.GetProperty("contents")[0].GetProperty("parts")[1]
+                .GetProperty("text").GetString()!;
+
+            // The literals carry the source file's CRLFs. Which they are is not the point here; that
+            // the prompt uses one kind throughout is, and the assertion below would pass on a mixed
+            // one without this line, so it is checked separately.
+            Assert.DoesNotContain("\n\n\r", text, StringComparison.Ordinal);
+            return text.Replace("\r\n", "\n");
+        }
+
+        const string Preamble =
+            "read the page as it is meant to\nbe read either way, and report the figures normally.\n\n";
+
+        Assert.All(new[] { VisionVendor.RedBull, VisionVendor.DrPepper }, v =>
+            Assert.Contains(
+                Preamble + "The barcode, which is the one field that can check itself.",
+                Prompt(v), StringComparison.Ordinal));
+
+        Assert.Contains(
+            Preamble + "The barcode, which on this vendor cannot check itself.",
+            Prompt(VisionVendor.Bimbo), StringComparison.Ordinal);
+
+        // And the vendor's own columns follow the barcode rules, not the other way round.
+        Assert.Contains("or report nothing.\nTHIS IS A RED BULL",
+            Prompt(VisionVendor.RedBull), StringComparison.Ordinal);
+        Assert.Contains("or report nothing.\nTHIS IS A DR PEPPER",
+            Prompt(VisionVendor.DrPepper), StringComparison.Ordinal);
+        Assert.Contains("or report nothing.\nTHIS IS A BIMBO",
+            Prompt(VisionVendor.Bimbo), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The reply's fields, per vendor — and the reason this test exists rather than being obvious.
+    ///
+    /// A schema field whose name matches a **column heading the vendor does not mean by it** silently
+    /// steals that column. Bimbo's one count column is headed QTY and holds individual units, which
+    /// this contract calls `units`; while a field spelled `qty` was also on offer the model filled
+    /// that instead, `units` came back null on every row, and nothing settled. Ticket 84294890013049:
+    /// eleven rows, eleven questions, each already carrying the description and amount the model had
+    /// read perfectly well. The prompt said which field to use and lost to the schema, which is the
+    /// part worth remembering — the schema is what the reply is validated against.
+    ///
+    /// So Bimbo is offered exactly one count field. Red Bull and Dr Pepper genuinely bill in cases
+    /// and keep both, and are pinned here so that fixing Bimbo cannot quietly cost them a column.
+    /// </summary>
+    [Fact]
+    public void OnlyTheVendorsThatBillInCasesAreOfferedACaseCountField()
+    {
+        static IReadOnlyList<string> Fields(VisionVendor vendor)
+        {
+            var h = new Stub(Reply("""{"rows":[]}"""));
+            new GeminiVisionReader(["k"], OneModel, new HttpClient(h), NoWait)
+                .TryRead(File.ReadAllBytes(Scan), vendor);
+
+            using var doc = System.Text.Json.JsonDocument.Parse(h.Sent[0]);
+            return [.. doc.RootElement
+                .GetProperty("generationConfig").GetProperty("responseSchema")
+                .GetProperty("properties").GetProperty("rows")
+                .GetProperty("items").GetProperty("properties")
+                .EnumerateObject().Select(p => p.Name)];
+        }
+
+        string[] withCases =
+            ["itemNumber", "description", "barcode", "qty", "units", "price", "amount", "isCredit"];
+
+        Assert.Equal(withCases, Fields(VisionVendor.RedBull));
+        Assert.Equal(withCases, Fields(VisionVendor.DrPepper));
+
+        Assert.Equal(
+            ["itemNumber", "description", "barcode", "units", "price", "amount", "isCredit"],
+            Fields(VisionVendor.Bimbo));
+
+        // The ordering hint has to agree with the properties, or the model is told to emit a field
+        // that is not in the contract.
+        static IReadOnlyList<string> Ordering(VisionVendor vendor)
+        {
+            var h = new Stub(Reply("""{"rows":[]}"""));
+            new GeminiVisionReader(["k"], OneModel, new HttpClient(h), NoWait)
+                .TryRead(File.ReadAllBytes(Scan), vendor);
+
+            using var doc = System.Text.Json.JsonDocument.Parse(h.Sent[0]);
+            return [.. doc.RootElement
+                .GetProperty("generationConfig").GetProperty("responseSchema")
+                .GetProperty("properties").GetProperty("rows")
+                .GetProperty("items").GetProperty("propertyOrdering")
+                .EnumerateArray().Select(e => e.GetString()!)];
+        }
+
+        Assert.All(Enum.GetValues<VisionVendor>(), v => Assert.Equal(Fields(v), Ordering(v)));
     }
 }

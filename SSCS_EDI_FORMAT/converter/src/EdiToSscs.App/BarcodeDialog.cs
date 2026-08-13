@@ -28,6 +28,7 @@ internal sealed class BarcodeDialog : Form
         ArgumentNullException.ThrowIfNull(request);
 
         Text = "Barcode needed";
+        AppIcon.ApplyTo(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;

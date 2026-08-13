@@ -66,6 +66,12 @@ public sealed class ConversionService : IFileConverter
     }
 
     /// <summary>
+    /// What the second reader cost on the file being converted, for the log. Reset per file; one
+    /// file is converted at a time, on the queue's own thread.
+    /// </summary>
+    private string? _visionNote;
+
+    /// <summary>
     /// A second reading of a scanned invoice, taken off the picture. Null reader, no key, no
     /// network, a bad reply — every one of them gives an empty reading and the parse carries on
     /// exactly as it did before there was one. Never throws.
@@ -75,7 +81,11 @@ public sealed class ConversionService : IFileConverter
         if (_visionReader is null) return VisionReading.Empty;
         try
         {
-            return _visionReader.TryRead(pdfBytes, vendor) ?? VisionReading.Empty;
+            var reading = _visionReader.TryRead(pdfBytes, vendor) ?? VisionReading.Empty;
+            // Recorded even on an empty reading, and especially then: a read that spent ninety
+            // seconds and came back with nothing is the case the log is for.
+            if (reading.Note.Length > 0) _visionNote = $"{vendor}: {reading.Note}";
+            return reading;
         }
         catch
         {
@@ -97,6 +107,7 @@ public sealed class ConversionService : IFileConverter
 
         string inputPath = file.InputPath;
         string inputFileName = Path.GetFileName(inputPath);
+        _visionNote = null;
         var log = new LogEntry
         {
             AppVersion = _appVersion,
@@ -128,6 +139,7 @@ public sealed class ConversionService : IFileConverter
         {
             log.Status = "Canceled";
             log.UserFriendlyReason = "The operator dismissed a prompt without answering it.";
+            log.VisionRead = _visionNote;
             _logger.TryWrite(log);
             return new ConversionOutcome
             {
@@ -185,6 +197,7 @@ public sealed class ConversionService : IFileConverter
                 finals.Add(MoveToAvailableName(temps[i], destinationFolder, converted.Documents[i].FileName, inputPath));
 
             log.OutputFileName = string.Join(", ", finals.Select(Path.GetFileName));
+            log.VisionRead = _visionNote;
             _logger.TryWrite(log);
 
             string saved = string.Join(", ", finals.Select(Path.GetFileName));
@@ -292,7 +305,7 @@ public sealed class ConversionService : IFileConverter
             return ConvertChubiwinos(lines, inputFileName, warnings);
 
         if (vendor == PdfVendor.Bimbo)
-            return ConvertBimbo(lines, inputFileName, warnings);
+            return ConvertBimbo(lines, inputFileName, warnings, inputBytes);
 
         return ConvertDrPepper(lines, inputFileName, warnings, inputBytes);
     }
@@ -316,7 +329,8 @@ public sealed class ConversionService : IFileConverter
         }
         catch (EdiConversionException ex) when (ex.ReasonCode == PdfReasonCodes.NoText
                                                 && _visionReader is not null
-                                                && vendor is PdfVendor.RedBull or PdfVendor.DrPepper)
+                                                && vendor is PdfVendor.RedBull or PdfVendor.DrPepper
+                                                    or PdfVendor.Bimbo)
         {
             return nothing;
         }
@@ -462,6 +476,13 @@ public sealed class ConversionService : IFileConverter
             "DESCRIPTION   UPC/SKU\nCASES   UNITS   NET   TAX   AMOUNT",
         PdfVendor.DrPepper =>
             "DESCRIPTION   UPC/SKU\nWHSLE   CASES   UNITS   NET   TAX   AMOUNT",
+        // One column set for both bands: Bimbo's RETURNS block prints the same headings as its
+        // DELIVERIES block and only puts a minus in front of the figures, so unlike Dr Pepper there
+        // is no second legend to pick between. Two lines because that is how the ticket prints it,
+        // with ITEM No and the two money groups on the row above their own columns.
+        PdfVendor.Bimbo =>
+            "            ITEM                        SUGG   RETAIL    WHOLESALE\n"
+            + "UPC   No   DESCRIPTION   QTY   RETAIL   AMOUNT   PRICE   AMOUNT",
         _ => "",
     };
 
@@ -536,9 +557,17 @@ public sealed class ConversionService : IFileConverter
     /// 84294890013154 — and the store's own paidouts use a different numbering anyway.
     /// </summary>
     private Converted ConvertBimbo(
-        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings)
+        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings,
+        byte[] pdfBytes)
     {
-        var ticket = BimboPdfParser.Parse(lines, warnings);
+        // The picture, read before anything else, because whether this page is readable at all can
+        // now depend on it: two of the store's thirteen samples went through the scanner with its OCR
+        // switched off and have no text layer whatsoever, while being perfectly legible as paper.
+        // Best-effort as everywhere — an empty reading leaves the parse exactly as it always was.
+        var ticket = BimboPdfParser.Parse(
+            lines, warnings,
+            field => AskBimboField(inputFileName, field, pdfBytes),
+            ReadWithVision(pdfBytes, VisionVendor.Bimbo));
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Bimbo", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1, "Bimbo"));
@@ -547,6 +576,77 @@ public sealed class ConversionService : IFileConverter
         var doc = new ConvertedDocument(
             OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
         return new Converted([doc], "PDF/Bimbo", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+    }
+
+    /// <summary>
+    /// Asks for one figure on one Bimbo row — its quantity, or on a row that came off the picture its
+    /// barcode — by showing the printed row with that figure boxed.
+    ///
+    /// Bimbo prints **one line per product**, which is the whole difference from the other two: Dr
+    /// Pepper carries the barcode on the product line above the priced row and Red Bull on the line
+    /// below, so both cut a two-line band and have to say which of the two to mark. Here the row is
+    /// the line, and the figure being asked about is on it.
+    ///
+    /// Cancelling skips the file. A made-up quantity books stock that never arrived, and on this
+    /// vendor nothing downstream would catch it — the unit cost absorbs a wrong count and the invoice
+    /// still balances to the penny.
+    /// </summary>
+    private string AskBimboField(string inputFileName, BimboUnknownField field, byte[] pdfBytes)
+    {
+        bool barcode = field.Field == LineField.Barcode;
+        string what = barcode ? "barcode" : "quantity";
+
+        if (_invoiceDetailsPrompt is null)
+            throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                $"The {what} for \"{field.Description}\" could not be read from this ticket and could "
+                + "not be worked out from the rest of it, so it has to be typed in - but no prompt is "
+                + "available.");
+
+        // The QTY column sits in the middle of the row with counts either side of it, so marking "the
+        // last 4 on the line" would as often land on a description or on the retail column. Where the
+        // scan actually read the column the figure itself is marked.
+        string? focusText = field.PrintedValue.Length > 0 ? field.PrintedValue : null;
+
+        // Where it did not, the column is marked instead — the case this vendor produces constantly,
+        // because QTY is the column its 200 dpi scans delete outright (ticket 84294890010234 lost it
+        // on all forty rows). Without this the question arrives with the whole line washed, which is
+        // no help at all on a row of eight figures with two of them headed AMOUNT. The column is
+        // found from the printed heading and the figure is legible in the picture even though the
+        // text layer never got it. Not for a barcode: that column is the first on the row with
+        // nothing to its left, and a code the scan read is already marked exactly.
+        string? column = barcode || focusText is not null ? null : "RETAIL";
+
+        var snip = field.LineNo > 0
+            ? PdfRowSnipper.TryCut(
+                pdfBytes, field.LineNo, field.LineNo, focusText, field.LineNo, barcode,
+                columnLeftOf: column)
+            : PdfRowSnipper.TryCutWholePage(pdfBytes, field.Page, field.PageUpsideDown);
+
+        bool wholePage = field.LineNo <= 0 && snip is not null;
+
+        string? typed = _invoiceDetailsPrompt.AskLineField(new LineFieldRequest(
+            inputFileName, "Bimbo", field.Field, field.Position, field.LineCount,
+            field.ItemNumber, field.Description, field.PrintedValue, null, field.Amount, snip,
+            snip is null || wholePage ? null : PdfRowSnipper.TryCutHeader(pdfBytes, field.LineNo),
+            ColumnLegend: ColumnLegend(PdfVendor.Bimbo, credit: false),
+            ColumnName: barcode ? "" : "QTY",
+            Hint: Hint(wholePage, barcode
+                // Bimbo prints the body of the barcode only - no leading zero, no check digit - so
+                // ten is the whole of what is on the paper and a longer answer is somebody reading
+                // the box rather than the ticket. Both spellings are accepted; the hint asks for the
+                // one that is actually printed in front of them.
+                ? "The 10 digits under UPC. The dash does not matter."
+                // No cases anywhere on this vendor, so there is nothing to convert and nothing to
+                // warn about. The number under QTY is the number to type.
+                : ""),
+            WholePage: wholePage));
+
+        if (string.IsNullOrWhiteSpace(typed))
+            throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                $"Skipped - the {what} for \"{field.Description}\" on {inputFileName} was not "
+                + "supplied. The original file was not changed.");
+
+        return typed;
     }
 
     /// <summary>
@@ -892,6 +992,7 @@ public sealed class ConversionService : IFileConverter
         log.ReasonCode = reasonCode;
         log.UserFriendlyReason = userMessage;
         log.ExceptionDetail = ex.ToString();
+        log.VisionRead = _visionNote;
         _logger.TryWrite(log);
         return new ConversionOutcome { Success = false, UserMessage = userMessage, ReasonCode = reasonCode };
     }

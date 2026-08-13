@@ -50,6 +50,7 @@ internal sealed class InvoiceNumberDialog : Form
         // first thing read and often the only thing read, so it carries the instruction rather than
         // a category name.
         Text = request.Vendor.Length > 0 ? $"Type invoice for {request.Vendor}" : "Invoice details";
+        AppIcon.ApplyTo(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
