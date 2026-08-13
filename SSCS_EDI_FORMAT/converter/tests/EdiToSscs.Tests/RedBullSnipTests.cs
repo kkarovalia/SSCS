@@ -459,13 +459,17 @@ public class RedBullSnipTests
     /// A note is never a window any more. Whatever the converter still says about a file it says in
     /// the list beside it — so nothing it writes may carry a picture, because there is nowhere left
     /// to show one and building it would be work nobody sees.
+    ///
+    /// The count is here to make a picture creeping back on to it a deliberate act. Four: the line,
+    /// the reason code, the message, and whether it is routine enough to leave the file's status
+    /// alone.
     /// </summary>
     [Fact]
     public void NotesCarryNoPicturesBecauseNothingShowsThemAnyMore()
     {
         Assert.DoesNotContain(typeof(ConversionWarning).GetProperties(),
             p => p.PropertyType == typeof(PdfRowSnip));
-        Assert.Equal(3, typeof(ConversionWarning).GetProperties().Length);
+        Assert.Equal(4, typeof(ConversionWarning).GetProperties().Length);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────── plumbing
@@ -497,7 +501,7 @@ public class RedBullSnipTests
         public List<LineFieldRequest> LineFields { get; } = [];
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new("TYPED-1", request.Date ?? new DateOnly(2026, 8, 10), request.Total);
+            new("TYPED-1", new DateOnly(2026, 8, 10), request.Total);
 
         public string? AskLineField(LineFieldRequest request)
         {

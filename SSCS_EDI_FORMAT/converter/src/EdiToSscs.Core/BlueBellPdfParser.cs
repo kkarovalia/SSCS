@@ -39,7 +39,8 @@ public sealed class BlueBellSection
     /// The invoice number as read from the scan — a hint only. Blue Bell prints it in a large font
     /// that the scanner's OCR gets wrong silently (example 1's text layer says 033105035263 where
     /// the paper reads 033103035263), and it carries no check digit, so nothing can verify it.
-    /// The operator types the real number; this is shown beside the box to compare against.
+    /// The operator types the real number. This value is retained only for parser evidence/tests and
+    /// cannot reach <see cref="InvoiceDetailsRequest"/> or its empty box.
     /// </summary>
     public string? SuggestedInvoiceNumber { get; init; }
 
@@ -47,14 +48,14 @@ public sealed class BlueBellSection
     /// Builds an invoice from this section alone. Used where one section really is the whole ticket;
     /// a ticket carrying both a Sales and a Returns block goes through
     /// <see cref="BlueBellPdfParser.Merge"/> instead, because SSCS books the pair as one payable.
-    /// <paramref name="date"/> is only used if <see cref="Date"/> is null — the ticket's own printed
-    /// date always wins.
+    /// <paramref name="date"/> is the operator-typed date and always wins. <see cref="Date"/> is
+    /// retained only for parser checks and section boundaries.
     /// </summary>
     public Invoice ToInvoice(string invoiceNumber, DateOnly date) => new()
     {
         SupplierName = BlueBellPdfParser.SupplierName,
         InvoiceNumber = invoiceNumber,
-        Date = Date ?? date,
+        Date = date,
         Total = Total,
         Lines = Lines,
     };
@@ -112,8 +113,9 @@ public static partial class BlueBellPdfParser
     /// maps the letters back and then insists on a real calendar date, so the phone number and the
     /// ZIP+4 stay excluded exactly as they are for <see cref="DateLine"/>.
     ///
-    /// A date read this way is a suggestion for the operator to confirm, never the invoice's date:
-    /// mapping 'Z' to '2' is arithmetic-free guesswork about a field with no checksum behind it.
+    /// A date read this way is only an internal document-boundary signal, never the invoice's date
+    /// and never a prompt suggestion: mapping 'Z' to '2' is arithmetic-free guesswork about a field
+    /// with no checksum behind it.
     /// </summary>
     [GeneratedRegex(@"(?<!\d)([0-9OQDILSBZ]{2})-([0-9OQDILSBZ]{2})-([0-9OQDILSBZ]{4})(?!\d)")]
     private static partial Regex DamagedDateLine();
@@ -249,8 +251,7 @@ public static partial class BlueBellPdfParser
     /// same shape as Bimbo and Red Bull.
     ///
     /// The rows keep their printed order, Sales first, so the invoice reads down the page the way
-    /// the paper does. <paramref name="date"/> is used only for a ticket whose own date the scan
-    /// destroyed.
+    /// the paper does. <paramref name="date"/> is always the operator-typed date.
     /// </summary>
     public static Invoice Merge(
         IReadOnlyList<BlueBellSection> sections, string invoiceNumber, DateOnly date)

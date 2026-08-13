@@ -42,7 +42,9 @@ public class BimboVisionTests
         public bool DismissesEverything { get; init; }
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new(invoiceNumber, request.Date ?? new DateOnly(2025, 9, 8));
+            new(invoiceNumber, new DateOnly(2025, 9, 8));
+
+        public bool ConfirmBimboOcrFallback(string fileName) => true;
 
         public string? AskLineField(LineFieldRequest request)
         {
@@ -303,6 +305,14 @@ public class BimboVisionTests
         Assert.Contains("WHOLESALE", asked.ColumnLegend, StringComparison.Ordinal);
         Assert.False(asked.WholePage);
         Assert.NotNull(asked.Snip);
+
+        // The yellow marker belongs on the QTY cell, not across all eight figures on the row.
+        // Bimbo's fixed form puts QTY just right of centre; the measured band is deliberately much
+        // narrower than either neighbouring money column.
+        Assert.True(asked.Snip!.FocusWidth < asked.Snip.Width * 0.15,
+            $"the QTY marker covers {asked.Snip.FocusWidth} of {asked.Snip.Width}px");
+        double centre = (asked.Snip.FocusLeft + asked.Snip.FocusWidth / 2d) / asked.Snip.Width;
+        Assert.InRange(centre, 0.53, 0.61);
 
         // No hint: there are no cases on this vendor, so there is nothing to convert and nothing to
         // get wrong. A hint nobody needs is a hint nobody reads.

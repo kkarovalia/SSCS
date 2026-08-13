@@ -19,12 +19,11 @@ namespace EdiToSscs.Core;
 /// to reconcile is booked in silence. Money comes back as text for the same reason a cent is never
 /// held as a float.
 ///
-/// Failure is always silent and always empty. No key, no network, a refused or throttled request, a
-/// reply that will not parse — every one of them gives <see cref="VisionReading.Empty"/> and the
-/// conversion carries on exactly as it does without this reader. The store cannot lose a delivery
-/// because Google was slow.
+/// The established confirmation path fails empty. Bimbo's picture-primary contract instead reports
+/// unavailable separately from unreadable: unavailable can offer the operator-approved OCR fallback,
+/// while a model that reached the page but could not produce a consistent invoice requires a rescan.
 /// </summary>
-public sealed class GeminiVisionReader : IInvoiceVisionReader
+public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReader
 {
     /// <summary>
     /// The model to read with.
@@ -186,6 +185,255 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         catch
         {
             return VisionReading.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Reads Bimbo as the source invoice rather than as a confirmation of OCR. This deliberately
+    /// uses its own prompt, schema and result type: changing it must not change one byte of the
+    /// established Dr Pepper or Red Bull requests.
+    /// </summary>
+    public BimboVisionReading ReadBimbo(byte[] pdfBytes)
+    {
+        if (!IsConfigured) return BimboVisionReading.Unavailable("AI reading is not configured.");
+        if (pdfBytes is null || pdfBytes.Length == 0)
+            return BimboVisionReading.Unreadable("The PDF had no page image to read.");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
+        bool reachedApi = false;
+        try
+        {
+            var pages = PdfPageImages.TryReadAll(pdfBytes);
+            if (pages.Count == 0)
+                return BimboVisionReading.Unreadable("The PDF had no page image to read.");
+            tally.Pages = pages.Count;
+
+            var rows = new List<BimboVisionRow>();
+            BimboVisionBandTotal? deliveries = null, returns = null;
+            string? ticketUnits = null, ticketTotal = null, cashDue = null;
+
+            for (int number = 1; number <= pages.Count; number++)
+            {
+                string body = BuildBimboPrimaryBody(pages[number - 1]);
+                var page = ReadSpecialPage(body, tally, ParseBimboReply, out bool answered);
+                reachedApi |= answered;
+                if (page is null) continue;
+
+                rows.AddRange(page.Rows.Select(r => r with { Page = number }));
+                deliveries ??= page.Deliveries;
+                returns ??= page.Returns;
+                ticketUnits ??= page.TicketUnits;
+                ticketTotal ??= page.TicketTotal;
+                cashDue ??= page.CashDue;
+            }
+
+            string note = tally.Describe(clock.ElapsedMilliseconds, rows.Count);
+            if (rows.Count == 0 || string.IsNullOrWhiteSpace(ticketUnits)
+                                || string.IsNullOrWhiteSpace(ticketTotal)
+                                || rows.Any(r => r.IsCredit is null))
+                return reachedApi
+                    ? BimboVisionReading.Unreadable(note)
+                    : BimboVisionReading.Unavailable(note);
+
+            return new BimboVisionReading
+            {
+                Status = BimboVisionStatus.Success,
+                Rows = rows,
+                Deliveries = deliveries,
+                Returns = returns,
+                TicketUnits = ticketUnits,
+                TicketTotal = ticketTotal,
+                CashDue = cashDue,
+                Note = note,
+            };
+        }
+        catch
+        {
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? BimboVisionReading.Unreadable(note)
+                : BimboVisionReading.Unavailable(note);
+        }
+    }
+
+    /// <summary>
+    /// A focused second read of Bimbo's check-digit-less UPC column. The target locators contain no
+    /// primary barcode, so agreement means the picture was actually read twice rather than one
+    /// answer being echoed back.
+    /// </summary>
+    public BimboBarcodeVerification VerifyBimboBarcodes(
+        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        if (!IsConfigured) return BimboBarcodeVerification.Unavailable("AI reading is not configured.");
+        if (pdfBytes is null || pdfBytes.Length == 0)
+            return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
+        if (targets.Count == 0)
+            return new BimboBarcodeVerification { Status = BimboVisionStatus.Success };
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
+        bool reachedApi = false;
+        try
+        {
+            var pages = PdfPageImages.TryReadAll(pdfBytes);
+            if (pages.Count == 0)
+                return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
+
+            // Start the verification on another configured model/key where one exists. A separate
+            // focused request on the same model is still useful; a different model is better.
+            if (Combinations > 1) _at = (_at + 1) % Combinations;
+
+            var rows = new List<BimboBarcodeRow>();
+            foreach (var group in targets.GroupBy(t => Math.Clamp(t.Page, 1, pages.Count)))
+            {
+                tally.Pages++;
+                var wanted = group.ToList();
+                var ids = wanted.Select(t => t.RowId).ToHashSet(StringComparer.Ordinal);
+                string body = BuildBimboBarcodeBody(pages[group.Key - 1], wanted);
+                var page = ReadSpecialPage(
+                    body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered);
+                reachedApi |= answered;
+                if (page is not null) rows.AddRange(page.Rows);
+            }
+
+            string note = tally.Describe(clock.ElapsedMilliseconds, rows.Count);
+            if (rows.Count != targets.Count)
+                return reachedApi
+                    ? BimboBarcodeVerification.Unreadable(note)
+                    : BimboBarcodeVerification.Unavailable(note);
+
+            return new BimboBarcodeVerification
+            {
+                Status = BimboVisionStatus.Success,
+                Rows = rows,
+                Note = note,
+            };
+        }
+        catch
+        {
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? BimboBarcodeVerification.Unreadable(note)
+                : BimboBarcodeVerification.Unavailable(note);
+        }
+    }
+
+    /// <summary>
+    /// A third UPC read whose visual input is materially different from both full-page reads. Each
+    /// image contains only one enlarged UPC cell; no description, item number, quantity, money, or
+    /// earlier barcode is present for the model to echo or infer from.
+    /// </summary>
+    public BimboBarcodeVerification VerifyBimboBarcodeCrops(
+        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        if (!IsConfigured) return BimboBarcodeVerification.Unavailable("AI reading is not configured.");
+        if (pdfBytes is null || pdfBytes.Length == 0)
+            return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
+        if (targets.Count == 0)
+            return new BimboBarcodeVerification { Status = BimboVisionStatus.Success };
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally { Pages = targets.Select(t => t.Page).Distinct().Count() };
+        bool reachedApi = false;
+        try
+        {
+            var crops = targets
+                .Select(t => new BimboUpcCrop(t.RowId, TryMakeBimboUpcCrop(pdfBytes, t)))
+                .Where(c => c.Png is not null)
+                .Select(c => c with { Png = c.Png! })
+                .ToList();
+            if (crops.Count == 0)
+                return BimboBarcodeVerification.Unreadable(tally.Describe(clock.ElapsedMilliseconds, 0));
+
+            // The second pass starts one combination on; the third starts two on. With fewer than
+            // three combinations a model can repeat, but the third visual input remains independent:
+            // it contains only the isolated cell and none of the context or prior answers.
+            if (Combinations > 1) _at = (_at + 2) % Combinations;
+
+            var ids = crops.Select(c => c.RowId).ToHashSet(StringComparer.Ordinal);
+            string body = BuildBimboBarcodeCropBody(crops);
+            var reply = ReadSpecialPage(
+                body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered);
+            reachedApi |= answered;
+
+            string note = tally.Describe(clock.ElapsedMilliseconds, reply?.Rows.Count ?? 0);
+            if (reply is null || reply.Rows.Count != crops.Count)
+                return reachedApi
+                    ? BimboBarcodeVerification.Unreadable(note)
+                    : BimboBarcodeVerification.Unavailable(note);
+
+            var read = reply.Rows.ToDictionary(r => r.RowId, StringComparer.Ordinal);
+            return new BimboBarcodeVerification
+            {
+                Status = BimboVisionStatus.Success,
+                // A row whose visual cell could not be isolated remains null and therefore goes to
+                // the operator; it does not make readable sibling rows lose their third opinion.
+                Rows = targets.Select(t => read.TryGetValue(t.RowId, out var row)
+                    ? row : new BimboBarcodeRow(t.RowId, null)).ToList(),
+                Note = note,
+            };
+        }
+        catch
+        {
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? BimboBarcodeVerification.Unreadable(note)
+                : BimboBarcodeVerification.Unavailable(note);
+        }
+    }
+
+    private sealed record BimboUpcCrop(string RowId, byte[]? Png);
+
+    private static byte[]? TryMakeBimboUpcCrop(byte[] pdfBytes, BimboBarcodeTarget target)
+    {
+        if (target.LineNumber < 1) return null;
+
+        var snip = PdfRowSnipper.TryCut(
+            pdfBytes, target.LineNumber, target.LineNumber,
+            focusLineNo: target.LineNumber,
+            fallbackColumn: new PdfColumnBand(0.015, 0.185));
+        if (snip is null || snip.FocusWidth < 1 || snip.FocusHeight < 1) return null;
+
+        try
+        {
+            using var page = new System.Drawing.Bitmap(new MemoryStream(snip.PagePng));
+            int x = Math.Clamp(snip.FocusLeft, 0, page.Width - 1);
+            int y = Math.Clamp(snip.Top + snip.FocusTop, 0, page.Height - 1);
+            int horizontalAir = Math.Max(2, snip.FocusHeight / 3);
+            int verticalAir = Math.Max(1, snip.FocusHeight / 5);
+            x = Math.Max(0, x - horizontalAir);
+            y = Math.Max(0, y - verticalAir);
+            int width = Math.Min(page.Width - x, snip.FocusWidth + horizontalAir * 2);
+            int height = Math.Min(page.Height - y, snip.FocusHeight + verticalAir * 2);
+            if (width < 2 || height < 2) return null;
+
+            using var cell = page.Clone(
+                new System.Drawing.Rectangle(x, y, width, height), page.PixelFormat);
+            if (target.PageUpsideDown)
+                cell.RotateFlip(System.Drawing.RotateFlipType.Rotate180FlipNone);
+
+            double scale = Math.Max(3.0, 96.0 / Math.Max(1, cell.Height));
+            int enlargedWidth = Math.Max(1, (int)Math.Round(cell.Width * scale));
+            int enlargedHeight = Math.Max(1, (int)Math.Round(cell.Height * scale));
+            using var enlarged = new System.Drawing.Bitmap(enlargedWidth, enlargedHeight);
+            using (var graphics = System.Drawing.Graphics.FromImage(enlarged))
+            {
+                graphics.Clear(System.Drawing.Color.White);
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                graphics.DrawImage(cell, 0, 0, enlargedWidth, enlargedHeight);
+            }
+
+            using var output = new MemoryStream();
+            enlarged.Save(output, System.Drawing.Imaging.ImageFormat.Png);
+            return output.ToArray();
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -363,6 +611,90 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
 
     // ───────────────────────────────────────────────────────────────────────── the request
 
+    /// <summary>
+    /// The same retry/fallback ladder as the established reader, parameterised only for Bimbo's two
+    /// new response shapes. <paramref name="apiAnswered"/> distinguishes an unavailable service from
+    /// a service that saw the page but could not return a complete usable reading.
+    /// </summary>
+    private T? ReadSpecialPage<T>(
+        string body, Tally tally, Func<Stream, T?> parse, out bool apiAnswered) where T : class
+    {
+        apiAnswered = false;
+        if (Combinations == 0) return null;
+
+        for (int round = 0; ; round++)
+        {
+            bool anythingWorthWaitingFor = false;
+            bool answeredButInvalid = false;
+            for (int tried = 0; tried < Combinations; tried++)
+            {
+                int index = (_at + tried) % Combinations;
+                var (key, model) = Pair(index);
+
+                tally.Requests++;
+                var reading = TrySpecialOnce(
+                    body, key, model, parse,
+                    out bool throttled, out bool timedOut, out bool answered);
+                apiAnswered |= answered;
+                answeredButInvalid |= answered && reading is null;
+                if (throttled) tally.Throttled++;
+                if (timedOut) tally.TimedOut++;
+                if (reading is not null)
+                {
+                    _at = index;
+                    return reading;
+                }
+                anythingWorthWaitingFor |= throttled;
+            }
+
+            // A successful response with an incomplete/inconsistent payload gets one immediate
+            // fresh read. This is the Bimbo "retry then recover" rule; waiting is for quota only.
+            if (answeredButInvalid && round == 0) continue;
+            if (!anythingWorthWaitingFor || round >= _backoff.Length) return null;
+            tally.Waited += _backoff[round].TotalSeconds;
+            Thread.Sleep(_backoff[round]);
+        }
+    }
+
+    private T? TrySpecialOnce<T>(
+        string body, string key, string model, Func<Stream, T?> parse,
+        out bool throttled, out bool timedOut, out bool apiAnswered) where T : class
+    {
+        throttled = false;
+        timedOut = false;
+        apiAnswered = false;
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post, $"{Endpoint}/{model}:generateContent");
+            request.Headers.TryAddWithoutValidation("x-goog-api-key", key);
+            request.Content = new StringContent(
+                body, Encoding.UTF8, new MediaTypeHeaderValue("application/json"));
+
+            using var cancel = new CancellationTokenSource(RequestTimeout);
+            using var response = _http.Send(request, cancel.Token);
+            if (response.IsSuccessStatusCode)
+            {
+                apiAnswered = true;
+                using var stream = response.Content.ReadAsStream(cancel.Token);
+                return parse(stream);
+            }
+
+            throttled = (int)response.StatusCode == 429 || (int)response.StatusCode >= 500;
+            return null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            throttled = true;
+            timedOut = ex is TaskCanceledException or OperationCanceledException;
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string BuildBody(byte[] png, VisionVendor vendor)
     {
         var buffer = new MemoryStream();
@@ -399,6 +731,214 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static string BuildBimboPrimaryBody(byte[] png) => BuildSpecialBody(
+        png,
+        """
+        You are the primary reader of a scanned Bimbo Bakeries delivery ticket. Copy what is
+        physically printed. Never use an OCR transcription and never invent or repair a digit.
+
+        Return every product row in page order. One row prints:
+          UPC | ITEM No | DESCRIPTION | QTY | SUGG RETAIL | RETAIL AMOUNT | PRICE | AMOUNT
+
+        barcode is exactly the ten UPC digits Bimbo prints, without its hyphen. Do not add a leading
+        zero, compute a check digit, or pad it to twelve digits. itemNumber is the six printed digits.
+        units is QTY and is already individual sellable units; there are no cases. price is the
+        second-to-last figure and has four decimal places. amount is the rightmost wholesale AMOUNT,
+        not the earlier retail amount. Set isCredit true only for a row under **RETURNS**. Return
+        magnitudes without minus signs; isCredit owns the sign.
+
+        Read deliveryUnits/deliveryAmount from DELIVERY TOTAL and returnUnits/returnAmount from
+        RETURNS TOTAL when those rows exist. Read ticketUnits and ticketTotal from TICKET TOTALS,
+        and cashDue from CASH DUE. ticketTotal is the last money figure on TICKET TOTALS.
+
+        Cross-check the page before answering: inspect each row twice, verify QTY x PRICE against the
+        rightmost AMOUNT, sum each band against its own total, then compare the bands with TICKET
+        TOTALS and CASH DUE. A failed check means look at the printed characters again; it never means
+        change a printed value to make the arithmetic work. If a row field is still unclear, return
+        null for that field so the operator can read it.
+
+        Ignore the printed invoice number and date completely. They are always typed by the operator
+        into empty boxes and there is intentionally no response field capable of carrying either one.
+        """,
+        WriteBimboPrimarySchema);
+
+    private static string BuildBimboBarcodeBody(
+        byte[] png, IReadOnlyList<BimboBarcodeTarget> targets)
+    {
+        string locators = JsonSerializer.Serialize(targets.Select(t => new
+        {
+            t.RowId,
+            t.Position,
+            t.ItemNumber,
+            t.Description,
+            t.Units,
+            t.Amount,
+        }));
+
+        return BuildSpecialBody(
+            png,
+            """
+            Independently re-read only the UPC column on this Bimbo Bakeries ticket. Bimbo prints a
+            ten-digit body with a hyphen after the fifth digit. Return exactly those ten printed
+            digits without the hyphen. Do not add a leading zero, compute a check digit, pad to twelve
+            digits, or infer a UPC from the item number or description. If any digit is unclear,
+            return null for that barcode.
+
+            The rows below are locators, not answers. They deliberately contain no UPC from the first
+            reading. Find each row on the picture using its position and the other printed fields,
+            then return the same rowId with your independent UPC reading. Return every rowId exactly
+            once. Ignore the invoice number and date.
+
+            Row locators:
+            """ + locators,
+            WriteBimboBarcodeSchema);
+    }
+
+    private static string BuildBimboBarcodeCropBody(IReadOnlyList<BimboUpcCrop> crops)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            w.WriteStartObject();
+            w.WriteString("text",
+                "Read each isolated Bimbo UPC cell independently, digit by digit. Each image contains "
+                + "only the printed UPC cell for the rowId immediately before it. Return exactly the "
+                + "ten printed digits without the hyphen. Do not add a leading zero, compute a check "
+                + "digit, or guess an unclear digit; return null for an unclear barcode. Return every "
+                + "rowId exactly once. You are not being shown either earlier reading.");
+            w.WriteEndObject();
+
+            foreach (var crop in crops)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", $"rowId: {crop.RowId}");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", "image/png");
+                w.WriteBase64String("data", crop.Png!);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteString("responseMimeType", "application/json");
+            WriteBimboBarcodeSchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static string BuildSpecialBody(
+        byte[] png, string prompt, Action<Utf8JsonWriter> writeSchema)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            w.WriteStartObject();
+            w.WriteStartObject("inline_data");
+            w.WriteString("mime_type", "image/png");
+            w.WriteBase64String("data", png);
+            w.WriteEndObject();
+            w.WriteEndObject();
+            w.WriteStartObject();
+            w.WriteString("text", prompt);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteString("responseMimeType", "application/json");
+            writeSchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static void WriteBimboPrimarySchema(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[] { "itemNumber", "description", "barcode", "units", "price", "amount" })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[] { "itemNumber", "description", "barcode", "units", "price", "amount", "isCredit" })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        w.WriteStringValue("itemNumber");
+        w.WriteStringValue("isCredit");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+        foreach (string name in new[]
+                 {
+                     "deliveryUnits", "deliveryAmount", "returnUnits", "returnAmount",
+                     "ticketUnits", "ticketTotal", "cashDue",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "pageUpsideDown", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("rows");
+        w.WriteStringValue("ticketUnits");
+        w.WriteStringValue("ticketTotal");
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
+
+    private static void WriteBimboBarcodeSchema(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        WriteField(w, "rowId", "string");
+        WriteField(w, "barcode", "string");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        w.WriteStringValue("rowId");
+        w.WriteStringValue("barcode");
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        w.WriteStringValue("rowId");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("rows");
+        w.WriteEndArray();
+        w.WriteEndObject();
     }
 
     /// <summary>
@@ -773,6 +1313,116 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
     /// Pulls the reading out of Gemini's envelope. Anything unexpected anywhere gives null, which
     /// the caller treats as a page that could not be read.
     /// </summary>
+    private static BimboVisionReading? ParseBimboReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        bool upsideDown = Flag(root, "pageUpsideDown");
+        var read = new List<BimboVisionRow>();
+        foreach (var row in rows.EnumerateArray())
+        {
+            string item = Text(row, "itemNumber") ?? "";
+            string description = Text(row, "description") ?? "";
+            string? barcode = Text(row, "barcode");
+            string? units = Text(row, "units");
+            string? price = Text(row, "price");
+            string? amount = Text(row, "amount");
+            bool? credit = NullableFlag(row, "isCredit");
+
+            if (item.Length == 0 && description.Length == 0 && barcode is null
+                && units is null && price is null && amount is null)
+                continue;
+
+            read.Add(new BimboVisionRow
+            {
+                ItemNumber = item,
+                Description = description,
+                Barcode = barcode,
+                Units = units,
+                Price = price,
+                Amount = amount,
+                IsCredit = credit,
+                PageUpsideDown = upsideDown,
+            });
+        }
+
+        if (read.Count == 0) return null;
+        int? ticketUnitNumber = Int(Text(root, "ticketUnits"));
+        decimal? ticketMoney = Money(Text(root, "ticketTotal"));
+        if (ticketUnitNumber is int printedUnits && read.All(r => Int(r.Units) is not null))
+        {
+            int rowUnits = read.Sum(r => (r.IsCredit == true ? -1 : 1) * Int(r.Units)!.Value);
+            if (rowUnits != printedUnits) return null;
+        }
+        if (ticketMoney is decimal printedTotal && read.All(r => Money(r.Amount) is not null))
+        {
+            decimal rowTotal = read.Sum(r => (r.IsCredit == true ? -1m : 1m) * Money(r.Amount)!.Value);
+            if (Math.Abs(rowTotal - printedTotal) > 0.01m * Math.Max(1, read.Count)) return null;
+        }
+
+        string? deliveryUnits = Text(root, "deliveryUnits");
+        string? deliveryAmount = Text(root, "deliveryAmount");
+        string? returnUnits = Text(root, "returnUnits");
+        string? returnAmount = Text(root, "returnAmount");
+        return new BimboVisionReading
+        {
+            Status = BimboVisionStatus.Success,
+            Rows = read,
+            Deliveries = deliveryUnits is null && deliveryAmount is null
+                ? null : new BimboVisionBandTotal(deliveryUnits, deliveryAmount),
+            Returns = returnUnits is null && returnAmount is null
+                ? null : new BimboVisionBandTotal(returnUnits, returnAmount),
+            TicketUnits = Text(root, "ticketUnits"),
+            TicketTotal = Text(root, "ticketTotal"),
+            CashDue = Text(root, "cashDue"),
+        };
+    }
+
+    private static BimboBarcodeVerification? ParseBimboBarcodeReply(
+        Stream stream, IReadOnlySet<string> expectedIds)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        if (!payload.RootElement.TryGetProperty("rows", out var rows)
+            || rows.ValueKind != JsonValueKind.Array) return null;
+
+        var read = new List<BimboBarcodeRow>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows.EnumerateArray())
+        {
+            string id = Text(row, "rowId") ?? "";
+            if (!expectedIds.Contains(id) || !seen.Add(id)) return null;
+            read.Add(new BimboBarcodeRow(id, Text(row, "barcode")));
+        }
+        if (seen.Count != expectedIds.Count) return null;
+        return new BimboBarcodeVerification
+        {
+            Status = BimboVisionStatus.Success,
+            Rows = read,
+        };
+    }
+
+    private static string? ReplyPayload(Stream stream)
+    {
+        using var doc = JsonDocument.Parse(stream);
+        if (!doc.RootElement.TryGetProperty("candidates", out var candidates)
+            || candidates.ValueKind != JsonValueKind.Array
+            || candidates.GetArrayLength() == 0) return null;
+
+        var parts = candidates[0].GetProperty("content").GetProperty("parts");
+        var text = new StringBuilder();
+        foreach (var part in parts.EnumerateArray())
+            if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+                text.Append(t.GetString());
+        return text.Length == 0 ? null : text.ToString();
+    }
+
     private static VisionReading? ParseReply(Stream stream)
     {
         using var doc = JsonDocument.Parse(stream);
@@ -838,6 +1488,17 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader
         && (v.ValueKind == JsonValueKind.True
             || (v.ValueKind == JsonValueKind.String
                 && bool.TryParse(v.GetString(), out bool parsed) && parsed));
+
+    private static bool? NullableFlag(JsonElement parent, string name)
+    {
+        if (!parent.TryGetProperty(name, out var v) || v.ValueKind == JsonValueKind.Null)
+            return null;
+        if (v.ValueKind == JsonValueKind.True) return true;
+        if (v.ValueKind == JsonValueKind.False) return false;
+        return v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out bool parsed)
+            ? parsed
+            : null;
+    }
 
     private static string? Text(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String

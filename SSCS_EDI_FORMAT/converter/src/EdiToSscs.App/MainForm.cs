@@ -4,7 +4,8 @@ using EdiToSscs.Core;
 
 namespace EdiToSscs.App;
 
-public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt, IInvoiceVisionReader
+public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt, IInvoiceVisionReader,
+    IBimboVisionReader
 {
     // Option A — navy primary, light surfaces, red used sparingly for brand accent.
     private static readonly Color ThemeBg = Color.FromArgb(248, 249, 252);
@@ -124,8 +125,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
     // ---------------------------------------------------------------- IInvoiceDetailsPrompt
 
     /// <summary>
-    /// Asks the operator to key the invoice number — and the date, when the scan destroyed it —
-    /// showing what was parsed so they can check it against the paper. Called from the conversion
+    /// Asks the operator to key the invoice number and date into empty boxes, showing only the safe
+    /// totals and line count parsed from the ticket. Called from the conversion
     /// worker, so it marshals to the UI thread. Returns null when the operator cancels the file.
     /// </summary>
     public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
@@ -146,7 +147,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
     /// <summary>
     /// Asks the operator to type one line's barcode, for the rare product whose code the scan
-    /// destroyed and the vendor's catalogue does not hold. Called from the conversion worker, so it
+    /// destroyed and no independent reading can confirm. Called from the conversion worker, so it
     /// marshals to the UI thread. Returns null when the operator skips the file.
     /// </summary>
     public string? AskBarcode(BarcodeRequest request)
@@ -180,6 +181,23 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
         using var dialog = new LineFieldDialog(request);
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Value : null;
+    }
+
+    public bool ConfirmBimboOcrFallback(string fileName)
+    {
+        if (IsDisposed || !IsHandleCreated) return false;
+        if (InvokeRequired)
+        {
+            try { return (bool)Invoke(() => ConfirmBimboOcrFallback(fileName)); }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        return MessageBox.Show(this,
+            $"AI reading is unavailable for {fileName}.\n\nUse the legacy PDF text reader for "
+            + "this Bimbo batch? It is less reliable on scanned tickets. This question is shown "
+            + "only once for the current batch.",
+            "Bimbo AI reading unavailable", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
     }
 
     public void SaveFolder(string folder)
@@ -464,8 +482,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         // saves into the list and clears that field, so asking it whether a key exists answered "no"
         // for a store that had just added one — and then told them to go and get a free Google key.
         _visionValueLabel.Text = s.IsActive
-            ? "On. Scanned invoices are read twice - from the PDF and from the picture - so you are only\n"
-              + "asked about a figure when nothing on the page can settle it."
+            ? "On. Bimbo is read from the page picture and its UPCs are read again independently.\n"
+              + "Other scanned vendors use the picture to cross-check the PDF reading."
             : s.AllProtectedKeys.Count == 0
                 ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
                   + "Open AI Reading Settings to switch it on with a free Google key."
@@ -481,34 +499,78 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
     /// </summary>
     public VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor)
     {
-        VisionSettings s;
-        lock (_visionLock) s = _vision;
-        if (!s.IsActive) return VisionReading.Empty;
-
         try
         {
-            var keys = s.AllProtectedKeys
-                .Select(SecretProtector.Unprotect)
-                .Where(k => !string.IsNullOrEmpty(k))
-                .Select(k => k!)
-                .ToList();
-
-            // The single legacy Model setting still counts, ahead of the list, so a store that
-            // pinned one model keeps it.
-            var models = new[] { s.Model }.Concat(s.Models)
-                .Where(m => !string.IsNullOrWhiteSpace(m))
-                .Select(m => m!.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            return keys.Count == 0
-                ? VisionReading.Empty
-                : new GeminiVisionReader(keys, models).TryRead(pdfBytes, vendor);
+            return CreateVisionReader()?.TryRead(pdfBytes, vendor) ?? VisionReading.Empty;
         }
         catch
         {
             return VisionReading.Empty;
         }
+    }
+
+    public BimboVisionReading ReadBimbo(byte[] pdfBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadBimbo(pdfBytes)
+                   ?? BimboVisionReading.Unavailable("AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return BimboVisionReading.Unavailable();
+        }
+    }
+
+    public BimboBarcodeVerification VerifyBimboBarcodes(
+        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    {
+        try
+        {
+            return CreateVisionReader()?.VerifyBimboBarcodes(pdfBytes, targets)
+                   ?? BimboBarcodeVerification.Unavailable("AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return BimboBarcodeVerification.Unavailable();
+        }
+    }
+
+    public BimboBarcodeVerification VerifyBimboBarcodeCrops(
+        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    {
+        try
+        {
+            return CreateVisionReader()?.VerifyBimboBarcodeCrops(pdfBytes, targets)
+                   ?? BimboBarcodeVerification.Unavailable("AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return BimboBarcodeVerification.Unavailable();
+        }
+    }
+
+    private GeminiVisionReader? CreateVisionReader()
+    {
+        VisionSettings s;
+        lock (_visionLock) s = _vision.Clone();
+        if (!s.IsActive) return null;
+
+        var keys = s.AllProtectedKeys
+            .Select(SecretProtector.Unprotect)
+            .Where(k => !string.IsNullOrEmpty(k))
+            .Select(k => k!)
+            .ToList();
+
+        // The single legacy Model setting still counts, ahead of the list, so a store that pinned
+        // one model keeps it. Gemini's verifier moves to the next configured combination first.
+        var models = new[] { s.Model }.Concat(s.Models)
+            .Where(m => !string.IsNullOrWhiteSpace(m))
+            .Select(m => m!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return keys.Count == 0 ? null : new GeminiVisionReader(keys, models);
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -667,7 +729,11 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 owner._logger, Application.ProductVersion, owner, visionReader: owner);
             _coordinator = new ConversionCoordinator(service, owner);
             _coordinator.FileChanged += OnFileChanged;
-            _coordinator.BatchCompleted += summary => _owner.RunOnUi(() => _summaryLabel.Text = summary);
+            _coordinator.BatchCompleted += summary => _owner.RunOnUi(() =>
+            {
+                _summaryLabel.Text = summary;
+                RepaintFileList();
+            });
         }
 
         public bool IsBusy => _coordinator.IsBusy;
@@ -731,7 +797,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             _dropPanel.Controls.Add(dropInner);
             middle.Controls.Add(_dropPanel, 0, 0);
 
-            _fileList = new ListView
+            _fileList = new BufferedListView
             {
                 Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = false,
                 ShowItemToolTips = true, HideSelection = false, BackColor = ThemePanel,
@@ -1086,6 +1152,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 : $"Emailed {emailed} of {file.Documents.Count} to {_owner._emailSender.ToAddress}";
             item.SubItems[2].Text = note;
             item.ToolTipText = note + "\n" + file.Detail;
+            RepaintFileList();
         }
 
 
@@ -1172,6 +1239,14 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 if (file.Status is FileStatus.Converted or FileStatus.Warning or FileStatus.Failed or FileStatus.Canceled)
                     _summaryLabel.Text = file.Detail;
 
+                // ListView is a native Windows control. During a fast queue, changing several
+                // subitems and their colour while a modal invoice prompt is opening/closing can
+                // update its model without scheduling a complete paint. The symptom is an empty
+                // white list whose rows reappear as soon as the operator clicks it. Nothing was
+                // lost; the click merely invalidated the control. Do that explicitly after every
+                // model change so the queue is always visible without operator intervention.
+                RepaintFileList();
+
                 // Nothing opens on its own here. A conversion that finished interrupts nobody: the
                 // only window this app puts in front of an operator is a question it cannot answer
                 // itself. A window that appears after the work is done is a window that gets clicked
@@ -1191,6 +1266,28 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             _fileList.Items.Add(item);
             _rowMap[file] = item;
             return item;
+        }
+
+        /// <summary>
+        /// Forces the native list surface to catch up with its already-updated items. Invalidate
+        /// schedules the full details view (including subitems) and Update performs it before the
+        /// next worker notification or modal prompt can cover the window again.
+        /// </summary>
+        private void RepaintFileList()
+        {
+            if (_fileList.IsDisposed || !_fileList.IsHandleCreated) return;
+            _fileList.Invalidate(invalidateChildren: true);
+            _fileList.Update();
+        }
+
+        /// <summary>
+        /// WinForms ListView wraps the native common control, which otherwise erases its background
+        /// between paints. Buffering prevents that white intermediate frame from becoming the last
+        /// frame left on screen while a conversion prompt owns the UI thread.
+        /// </summary>
+        private sealed class BufferedListView : ListView
+        {
+            public BufferedListView() => DoubleBuffered = true;
         }
     }
 }

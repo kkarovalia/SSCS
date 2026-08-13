@@ -5,7 +5,7 @@ namespace EdiToSscs.App;
 
 /// <summary>
 /// Asks the operator for one figure on one product row that the scan destroyed — its barcode, its
-/// unit count, or its dollar amount.
+/// unit count, unit price, or dollar amount.
 ///
 /// The window shows the printed row itself, cut out of the scan and marked. That is nearly all of
 /// the design: the answer is on the screen, so there is nothing to describe, nothing to look up on
@@ -241,6 +241,21 @@ internal sealed class LineFieldDialog : Form
             case LineField.Barcode:
             {
                 string digits = Upc.DigitsOnly(typed);
+                // Bimbo prints the ten-digit body, not a complete UPC-A. Its Core parser restores
+                // the leading zero and check digit after the operator has copied exactly what is on
+                // the ticket. Applying the other vendors' 12-digit rule here made the Bimbo hint
+                // impossible to follow.
+                if (string.Equals(_request.Vendor, "Bimbo", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (digits.Length == 10
+                        || digits.Length == 12 && digits[0] == '0' && Upc.IsValidUpcA12(digits))
+                        return true;
+                    MessageBox.Show(this,
+                        $"Bimbo prints 10 UPC digits; that is {digits.Length}. Type the digits under "
+                        + "UPC, or a complete valid 12-digit UPC-A.",
+                        Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return false;
+                }
                 if (digits.Length is < 11 or > 13)
                 {
                     MessageBox.Show(this,

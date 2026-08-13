@@ -37,7 +37,7 @@ So do **not** spend effort extracting the ship-to address. Leave `ShipToInfo.Unk
 |---|---|
 | **Supplier name** | A short, **stable** string. Reuse the vendor's existing 6-char code if it already has one in SSCS (`DRPEP`, `FRITOL`, `GSC`). SSCS maps it to a Vendor ID via its *Map Supplier to Vendor* screen. An unknown name still imports; the operator picks from a dropdown. |
 | **Invoice number** | Free text. Letters are fine (`IN-112`). SSCS does not validate it — which also means nothing catches a mis-read. If the number is scanned rather than machine-readable and has no check digit, have the operator type it (`IInvoiceDetailsPrompt`) instead of guessing; Blue Bell's scanner turned `033103035263` into `033105035263` with no sign of trouble. |
-| **Invoice date** | Real date. If the PDF genuinely has none, pass `null` — SSCS then dates it on the import day. **Never guess a date.** If the PDF *has* one but the scan wrecked it (`DATE 12-14-Z023`), ask through the same prompt rather than refusing the ticket — the rest of it still reconciles against its own TOTAL. Rules for doing that safely: the parsed value always wins, a repaired reading is only ever a suggestion for the operator to check, and supplying nothing still refuses the file. |
+| **Invoice date** | For scanned PDF vendors, the operator always types the date into an empty box. The request type intentionally has no date field, so a scanned or repaired value cannot become a suggestion. Use parsed dates only for internal document-boundary/check logic; the keyed value is what reaches XML. Supplying nothing refuses the file. |
 | **Invoice total** | The printed grand total. Used as your checksum and written into the file. Negative for a credit invoice. |
 
 ### Line — 5 fields

@@ -32,7 +32,7 @@ public class VisionPipelineTests
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new(invoiceNumber, request.Date ?? new DateOnly(2026, 1, 1));
+            new(invoiceNumber, new DateOnly(2026, 1, 1));
 
         public string? AskLineField(LineFieldRequest request)
         {

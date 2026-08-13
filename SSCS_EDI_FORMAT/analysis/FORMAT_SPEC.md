@@ -201,6 +201,31 @@ vendor-suggested figure is the safer default even when approximate:
 
 There is no longer a $99.99 cap; the old 4-digit field forced one, XML does not.
 
+### Scanned PDF headers and Bimbo picture-primary input
+
+For every scanned PDF vendor, the invoice number and date that reach NAXML are typed by the
+operator into empty boxes. Neither field has an invoice checksum; a plausible OCR error can pass
+silently and put a delivery under the wrong reference or accounting period. The type passed to the
+prompt, `InvoiceDetailsRequest`, intentionally contains neither an invoice-number value nor a date
+value. Parsed dates may still separate sections or support parser checks, but cannot pre-fill the UI
+or override the keyed date.
+
+Bimbo's normal product source is the page picture, not the PDF OCR text layer. The first
+vendor-specific model request returns each row's item number, description, printed ten-digit UPC
+body, QTY, PRICE, wholesale AMOUNT, delivery/return direction, band totals, TICKET TOTALS and CASH
+DUE. Core parses those as untrusted strings and repeats `QTY × PRICE`, band, ticket-unit and
+ticket-money checks. A second focused full-page request re-reads only the UPC column and is never
+shown the first result. A third request receives one enlarged UPC cell per row and no description,
+item number, quantity, amount or earlier UPC. Only unanimous agreement among all three reads accepts
+the UPC; two-to-one disagreement asks the operator on the precisely highlighted row. The complete
+value written to NAXML is `0 + body + computed check digit` (for example `74323-09183` →
+`074323091830`). There is no product or manufacturer-prefix table in source.
+
+OCR supplies only page/line coordinates for Bimbo's boxed correction dialog. If AI is unavailable
+before reading, the operator may approve the legacy text parser once per queue batch. A model reply
+that remains structurally inconsistent after retry is a rescan, never a mixture of AI and OCR
+figures.
+
 ### Vendor resolution
 
 SSCS keeps a **Map Supplier to Vendor** table keyed on the `Supplier/Name` text (truncated to

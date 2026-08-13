@@ -25,7 +25,8 @@ public class ChubiwinosPipelineTests
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request)
         {
             InvoicePrompts.Add(request);
-            return invoiceNumber is null ? null : new InvoiceDetails(invoiceNumber, request.Date ?? default);
+            return invoiceNumber is null ? null
+                : new InvoiceDetails(invoiceNumber, new DateOnly(2026, 6, 15));
         }
 
         public string? AskBarcode(BarcodeRequest request)
@@ -94,7 +95,6 @@ public class ChubiwinosPipelineTests
         Assert.Equal("DownloadFile (1).pdf", request.FileName);
         Assert.Equal(460.23m, request.Total);
         Assert.Equal(8, request.LineCount);
-        Assert.Equal(new DateOnly(2026, 6, 15), request.Date);
         // Always a box, and always an empty one.
         Assert.True(request.NeedsDate);
     }
@@ -123,6 +123,7 @@ public class ChubiwinosPipelineTests
             .GetProperties()
             .Select(p => p.Name)
             .Where(n => n.Contains("Invoice", StringComparison.OrdinalIgnoreCase)
+                        || n.Equals("Date", StringComparison.OrdinalIgnoreCase)
                         || n.Contains("Suggested", StringComparison.OrdinalIgnoreCase)
                         || n.Contains("Offer", StringComparison.OrdinalIgnoreCase))
             .ToList();

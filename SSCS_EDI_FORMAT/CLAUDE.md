@@ -48,8 +48,9 @@ store's existing `07189905101` in department ICE CREAM. Restore the check digit 
 
 **A sixth, 2026-08-11: a second *reader* is not a second calculation.** `QTY x PRICE` checked against
 `TOTAL` is the same OCR pass twice, which is why it cannot see a glyph the scanner renders wrongly in
-both columns. A vision model reading the **picture** fails differently, so the two agreeing is real
-corroboration — and it is still only ever allowed to *confirm*. See `VisionInvoiceReader.cs`.
+both columns. A vision model reading the **picture** fails differently. It confirms the established
+Dr Pepper and Red Bull parsers; Bimbo is now picture-first and uses a second, focused picture request
+to verify every check-digit-less UPC. See `GeminiVisionReader.cs`.
 
 **A fifth, learned the hard way on 2026-08-11: a checksum may confirm a figure, never supply one.**
 Red Bull ticket 2035939353 reached its own printed $394.84 exactly, through four wrong rows whose
@@ -58,9 +59,9 @@ misread returns a confident wrong answer, and `QTY × PRICE` is not a second opi
 it is the same scan damage wearing a different hat. So where two *different* readings of a figure
 agree it is taken; where they do not, or where there is only one, the operator is shown the printed
 row and asked. This is why the PDF vendors prompt more than they used to: 64 questions across
-Red Bull's twelve samples, 8 across Dr Pepper's. **A barcode is the exception** — it carries its own
-check digit and `RedBullCatalog`/`BimboCatalog` are independent records, so two unrelated things have
-to agree on the same digits, and that is verification rather than arithmetic.
+Red Bull's twelve samples, 8 across Dr Pepper's. **A barcode is the exception** — Red Bull's carries
+its own check digit, while Bimbo's must agree across two independent picture requests. That is
+verification rather than arithmetic.
 
 
 ## Do / don't
@@ -73,6 +74,7 @@ to agree on the same digits, and that is verification rather than arithmetic.
 | Use a checksum to say *something is wrong* | Refuse a delivery a person could fix in seconds |
 | Fail closed on a bad UPC-E check digit | Guess at a mistyped barcode |
 | Warn only when a human must act | Open a window after the work is done |
+| Mark a note `Routine` when it fires on nearly every file | Let a status colour mean "this vendor has returns" |
 | Populate each-list from the vendor's own figure | Write `0.00` and risk a free sale |
 | Edit conversion in `EdiToSscs.Core` | Put business logic in WinForms |
 
@@ -190,23 +192,25 @@ to agree on the same digits, and that is verification rather than arithmetic.
   barcode and is consulted **only** for a code that already failed its check digit; a product it has
   never seen goes to the operator. **Not yet round-tripped through live SSCS** — see
   [analysis/vendors/CHUBIWINOS.md](./analysis/vendors/CHUBIWINOS.md) §9.
-- `BimboPdfParser.cs` — Bimbo Bakeries delivery ticket → `BimboTicket`. **Round-tripped through live
-  SSCS 2026-07-28**, which booked its DELIVERIES *and* RETURNS as **one** $335.07 paidout — so returns
-  are negative lines on the same invoice, the same as Blue Bell and Red Bull. QTY is already individual units (`SS2P` is
-  one two-pack, not two) and PRICE is already the unit cost, so there is no case arithmetic at all.
-  Its UPC column is a **body with both the leading zero and the check digit removed**
-  (`74323-09183` → send `074323091830`), and **nothing on the page validates itself** — so
-  `BimboCatalog.cs` cross-checks Bimbo's item-number column against the barcode, which is the only
-  thing that catches the four mis-reads the money cannot see. Three checksums (row, band, ticket); a
-  band's unit count is overruled by the ticket's own when the two disagree. **Do not use its printed
-  `SUGG RETAIL`** — Bimbo suggests 1.99 where the store rings 3.59; retail is seeded at 45%.
-  **A row whose quantity will not come out is no longer dropped** (2026-08-12): dropping one took its
-  units *and* its money out together, so all three gates failed at once and a forty-row ticket was
-  refused over two figures (84294890010234, 225 units against its own 236). The row is kept unsettled,
-  offered to the picture, and failing that asked about — one question instead of a lost delivery. It
-  is the third vendor with a second reader, and the only one whose **barcode instructions had to be
-  different**: it prints the ten-digit body with no check digit, so a model told to reach twelve and
-  make them sum pads one, and nothing on the page catches that.
+- `BimboVisionParser.cs` — Bimbo Bakeries delivery ticket → `BimboTicket`, with
+  `GeminiVisionReader.ReadBimbo` as the normal source. **Round-tripped through live SSCS 2026-07-28**,
+  which booked DELIVERIES and RETURNS as **one** $335.07 paidout; returns are negative lines on that
+  invoice. QTY is already individual units (`SS2P` is one sellable two-pack) and PRICE is already unit
+  cost. The first picture request copies every row plus the delivery, return, ticket and cash totals,
+  checks each row twice, and reconciles those independent totals before returning. Core parses the
+  returned strings strictly, redoes every row/band/ticket check, and boxes only a disputed UPC, QTY,
+  PRICE or AMOUNT for the operator. OCR text supplies **coordinates only** for that box; none of its
+  product values may enter the invoice.
+
+  Bimbo prints a ten-digit UPC body without the leading zero or check digit
+  (`74323-09183` → `074323091830`), so it cannot validate itself. A second focused picture request is
+  given row locators but **not the first UPC**. The code is accepted only when the two reads agree and
+  the known Bimbo manufacturer prefix is present; otherwise the exact row is asked. There is no
+  hardcoded product catalogue: new Bimbo items require no source change or rebuild. If AI is
+  unavailable before reading, the app offers the legacy `BimboPdfParser` once for the whole queue
+  batch. If AI reaches the page but still cannot return a structurally consistent invoice after its
+  retry, the page must be rescanned; OCR figures are never mixed into a partial AI invoice. **Do not
+  use SUGG RETAIL** — retail is seeded at 45%.
   See [analysis/vendors/BIMBO.md](./analysis/vendors/BIMBO.md).
 - `RedBullPdfParser.cs` — Red Bull delivery ticket → `RedBullTicket`. **Round-tripped through live
   SSCS 2025-11-24**, which booked a two-page ticket (a $367.00 delivery invoice and a −$24.50 credit
@@ -353,11 +357,12 @@ to agree on the same digits, and that is verification rather than arithmetic.
   keypress; and underneath both, `InvoiceNumberDialog.Date` returned `_knownDate ?? typed`, so a
   corrected year **was discarded** and a real invoice went out dated 2016 with the guard nominally
   working. Now: empty box, typed every time, what is typed is what is used, and a blank is refused
-  rather than falling back to the scan. `InvoiceDetailsRequest` carries no `SuggestedDate` and no
-  `DateToOffer`, for the same reason it carries no suggested invoice number — a suggestion the
+  rather than falling back to the scan. `InvoiceDetailsRequest` carries **no date property at all**,
+  for the same reason it carries no suggested invoice number — a suggestion the
   prompt cannot receive cannot be wired back in by accident
   (`NoScannedInvoiceNumberOrDateCanReachThePromptForAnyVendor`). `AskLineField`
-  asks for **one figure on one Dr Pepper, Red Bull or Bimbo row** — its UPC, units or amount — by
+  asks for **one figure on one Dr Pepper, Red Bull or Bimbo row** — its UPC, units, unit price or
+  amount — by
   showing the printed row with that figure boxed, rather than by describing it. Bimbo prints **one
   line per product**, so its snip is a single line where the other two cut a two-line band and have
   to say which of the two carries the barcode; and it asks about `QTY`, not the `UNITS` both the

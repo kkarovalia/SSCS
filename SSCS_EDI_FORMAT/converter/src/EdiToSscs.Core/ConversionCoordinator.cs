@@ -66,13 +66,11 @@ public sealed class QueuedFile
 
 /// <summary>
 /// One invoice found inside a PDF, described for the operator so they can key the fields the
-/// document itself cannot supply — always the invoice number, and the date as well when the scan
-/// was too damaged to read one.
+/// document itself cannot safely supply — always the invoice number and date.
 /// </summary>
 public sealed record InvoiceDetailsRequest(
     string FileName,
     string Kind,
-    DateOnly? Date,
     decimal Total,
     int LineCount,
     int SectionIndex,
@@ -87,8 +85,8 @@ public sealed record InvoiceDetailsRequest(
     /// </summary>
     bool NeedsTotal = false)
 {
-    // There is deliberately no SuggestedInvoiceNumber here, and since 2026-08-12 no suggested date
-    // either. A parser can still read a number off a scan for its own purposes
+    // There is deliberately no SuggestedInvoiceNumber and no Date here. A parser can still read a
+    // number or date off a scan for its own consistency checks
     // (BlueBellSection.SuggestedInvoiceNumber), but it may not reach the prompt: it is wrong often
     // enough to matter, nothing downstream can catch it, and a filled-in box turns a field that
     // needs a person's eyes into an Enter keypress. Leaving it out of this record is what makes that
@@ -142,6 +140,8 @@ public enum LineField
     Barcode,
     /// <summary>The UNITS column — how many individual units the line is for.</summary>
     Units,
+    /// <summary>The per-unit PRICE column used as SSCS's Ea Cost.</summary>
+    UnitPrice,
     /// <summary>The line's extended dollar amount, the last column on the row.</summary>
     Amount,
 }
@@ -238,8 +238,8 @@ public sealed record LineFieldRequest(
     /// </summary>
     bool WholePage = false);
 
-/// <summary>What the operator keyed for one invoice. Each field is ignored when the ticket carried a
-/// readable one of its own, so a prompt can never overwrite something that was read off the paper.</summary>
+/// <summary>What the operator keyed for one invoice. The number and date are always used exactly as
+/// typed; neither has a machine-readable fallback.</summary>
 public sealed record InvoiceDetails(string InvoiceNumber, DateOnly Date = default, decimal Total = 0m);
 
 /// <summary>
@@ -251,9 +251,8 @@ public sealed record InvoiceDetails(string InvoiceNumber, DateOnly Date = defaul
 /// so it is always typed, and the box is never pre-filled from the scan: a wrong number sitting in
 /// the box invites an Enter keypress, which is the whole failure this prompt exists to prevent.
 ///
-/// The date is asked for only when the scan destroyed it (one Blue Bell ticket reads
-/// "DATE 12-14-Z023"): the ticket is otherwise perfectly good, and refusing a whole delivery over
-/// one mangled character sends the operator back to keying it by hand.
+/// The date has the same rule: it is always typed into an empty box. A plausible but wrong scanned
+/// year is otherwise silent and can book the invoice into the wrong accounting period.
 ///
 /// A barcode is asked for only when it fails its own check digit AND the vendor's catalogue has
 /// never recorded one for that product. The WinForms shell implements all of this with dialogs on
@@ -272,11 +271,18 @@ public interface IInvoiceDetailsPrompt
     string? AskBarcode(BarcodeRequest request) => null;
 
     /// <summary>
-    /// Asks for one figure on one product row — its barcode, its units or its amount. Returns what
+    /// Asks for one figure on one product row — its barcode, units, unit price or amount. Returns what
     /// the operator typed, or null if they cancelled the file. As with <see cref="AskBarcode"/> the
     /// default refuses, so a caller that cannot ask skips the invoice rather than inventing a number.
     /// </summary>
     string? AskLineField(LineFieldRequest request) => null;
+
+    /// <summary>
+    /// AI is Bimbo's normal reader. When it is unavailable before reading a page, offer the legacy
+    /// OCR parser once for the whole queue batch. The default declines so a headless caller never
+    /// silently swaps readers.
+    /// </summary>
+    bool ConfirmBimboOcrFallback(string fileName) => false;
 }
 
 /// <summary>
@@ -296,6 +302,12 @@ public interface IDestinationProvider
 public interface IFileConverter
 {
     ConversionOutcome ConvertFile(QueuedFile file, string destinationFolder);
+}
+
+/// <summary>A converter with decision state that is scoped to one drained queue.</summary>
+public interface IBatchFileConverter
+{
+    void BeginBatch();
 }
 
 /// <summary>
@@ -427,6 +439,8 @@ public sealed class ConversionCoordinator
 
     private void ProcessQueue()
     {
+        if (_converter is IBatchFileConverter batch) batch.BeginBatch();
+
         int converted = 0, failed = 0, canceled = 0, warned = 0;
         string? lastOutputPath = null;
         string? lastMessage = null;

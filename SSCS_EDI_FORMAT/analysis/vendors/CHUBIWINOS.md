@@ -182,8 +182,9 @@ so either character is accepted. What makes the shape unambiguous is the **clock
 no other line on the invoice carries one — and the result must still be a real calendar date. The
 label itself is never matched.
 
-If it will not read, the invoice is not lost: the operator is being asked for the invoice number
-anyway, so the date box appears in the same dialog. The paper's own date always wins.
+The parser may read this for its own checks, but it never supplies the invoice date. The operator
+types the date into an empty box on every invoice, beside the always-empty invoice-number box;
+`InvoiceDetailsRequest` has no field capable of carrying either scanned value.
 
 ---
 
@@ -260,9 +261,9 @@ The PDF prints `6V9389`. The store books it under its own number — `0615260705
 screen, which starts with the date. The two have nothing to do with each other, so the number is
 asked for and the operator's answer is what names the output file (`SSCS_061526070552D.xml`).
 
-The box **starts empty**, for both this vendor and Blue Bell. `InvoiceDetailsRequest` carries no
-suggestion field at all, which is what makes that structural rather than a habit
-(`NoScannedInvoiceNumberCanReachThePromptForAnyVendor`). The reasoning: the scanners get this field
+Both number and date boxes **start empty**, for this vendor and every other PDF vendor.
+`InvoiceDetailsRequest` carries neither scanned value, which makes that structural rather than a
+habit (`NoScannedInvoiceNumberOrDateCanReachThePromptForAnyVendor`). The reasoning: the scanners get this field
 wrong silently (`0V9293`, `6)9141` here; `033105035263` for `033103035263` on Blue Bell), it carries
 no check digit, and nothing downstream can catch it — so a filled-in box would turn the one field
 that needs a person's eyes into an Enter keypress.

@@ -25,15 +25,15 @@ public sealed class BimboTicket
     public required IReadOnlyList<InvoiceLine> Lines { get; init; }
 
     /// <summary>
-    /// Builds the final invoice. <paramref name="date"/> is consulted only when the ticket carried no
-    /// readable date of its own — the paper always wins.
+    /// Builds the final invoice with the operator-typed date. The parsed <see cref="Date"/> cannot
+    /// override it or reach the prompt.
     /// </summary>
     public Invoice ToInvoice(string invoiceNumber, DateOnly date) => new()
     {
         SupplierName = BimboPdfParser.SupplierName,
         InvoiceNumber = invoiceNumber,
-        // The date the operator confirmed. It is typed on every invoice now, with what the scan
-        // read offered in the box, because a plausible wrong date is what this scanner produces
+        // The date the operator typed. The box starts empty because a plausible wrong date is what
+        // this scanner produces
         // and nothing in the file can catch one - see InvoiceDetailsRequest.NeedsDate.
         Date = date,
         Total = Total,
@@ -76,9 +76,9 @@ public sealed class BimboTicket
 ///
 /// THE BARCODES CANNOT CHECK THEMSELVES. Bimbo prints the UPC with its check digit removed and its
 /// leading zero dropped, so a single mis-read digit is silent — the money still balances and SSCS
-/// opens a new item under an id belonging to nothing. Two rules cover it: the five-digit
-/// manufacturer prefix must be one Bimbo actually uses, and the item number column is cross-checked
-/// against <see cref="BimboCatalog"/>. Across the 170 sample rows that catches all ten mis-reads.
+/// opens a new item under an id belonging to nothing. Production therefore uses two independent
+/// picture reads and asks the operator whenever they disagree. This parser is only the explicitly
+/// approved OCR fallback and contains no product catalogue.
 /// </summary>
 public static partial class BimboPdfParser
 {
@@ -118,6 +118,27 @@ public static partial class BimboPdfParser
     /// <summary>How many numeric columns trail a product row: QTY, SUGG, RETAIL AMT, PRICE, AMOUNT.</summary>
     private const int TrailingColumns = 5;
 
+    /// <summary>
+    /// How much debris may sit in front of the code band before a line stops looking like a product
+    /// row. Two characters covers every speck the store's scans put there — "I 74323-09164",
+    /// ".J4323-09145", "/4323-73791" — and is short enough that no heading on the page survives it:
+    /// the nearest misses are "SOD:", "CASH CUSTOMER" and "GHRA 5813 BEST STOP", each of which still
+    /// has a letter in the third position. See <see cref="RepairCode"/>.
+    /// </summary>
+    private const int LeadingDebris = 2;
+
+    /// <summary>The six digits of the item-number column, which sit at the tail of the code band.</summary>
+    private const int ItemDigits = 6;
+
+    /// <summary>
+    /// The fewest digits a damaged code band may still show and be treated as a product row that lost
+    /// its barcode rather than as some other line of the ticket. Eight is two short of the UPC alone,
+    /// so a stray pair of figures cannot reach it, and the address ("20110 FM 1314 RD"), the customer
+    /// number ("12154 CUST# 992515-2") and the header all fall well below. It also keeps the band
+    /// longer than <see cref="ItemDigits"/>, so the item number can always be taken off its tail.
+    /// </summary>
+    private const int PartialCodeDigits = 8;
+
     /// <summary>A cent of drift per line is tolerable; beyond that the parse is not trustworthy.</summary>
     private const decimal CentPerLine = 0.01m;
 
@@ -155,8 +176,15 @@ public static partial class BimboPdfParser
     /// A section's closing total row: a label ending in TOTAL/TOTALS with no UPC in front of it.
     /// "DELIVERY TOTAL" also scans as "OELIUEAY TOTAL" and "TICKET TOTALS" as "TIIZET TOTALS", so
     /// only the word TOTAL is matched and the label is classified separately by its first letter.
+    ///
+    /// The word's own leading T may be damaged too — one of the store's tickets prints "TICKET
+    /// IOTALS", which cost it the ticket-level unit count entirely. That count is the witness
+    /// <see cref="CheckUnits"/> uses to overrule a band total the scan mangled, so losing it turns a
+    /// ticket that would have shipped with a warning into a refusal: the same page prints "DELIUERY
+    /// TOTAL 9~" for 90, and 90 - 6 is exactly the 84 the ticket row states. Matching is still
+    /// anchored ahead of the first digit, so no product row can reach this pattern.
     /// </summary>
-    [GeneratedRegex(@"^(?<label>[^\d]*?)T[O0]TALS?\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?<label>[^\d]*?)[TI1L][O0]TALS?\b", RegexOptions.IgnoreCase)]
     private static partial Regex TotalRow();
 
     /// <summary>The digits a product row opens with: ten of UPC and six of item number.</summary>
@@ -261,7 +289,7 @@ public static partial class BimboPdfParser
         CheckSectionAmounts(sections, warnings);
 
         decimal lineTotal = rows.Sum(r => r.Extended);
-        decimal total = CheckTicketTotal(ticketAmount, lineTotal, rows.Count, warnings);
+        decimal total = CheckTicketTotal(sections, ticketAmount, lineTotal, rows.Count, warnings);
 
         var date = fromThePicture ? null : FindDate(lines);
         var items = rows.Select(BuildLine).ToList();
@@ -271,7 +299,8 @@ public static partial class BimboPdfParser
             warnings.Add(new ConversionWarning(0, PdfReasonCodes.CreditLines,
                 $"This ticket has {credits} return line{(credits == 1 ? "" : "s")} that went back on the "
                 + "truck. They are sent as negative quantities on the same invoice, which is how the "
-                + "ticket's own total is worked out."));
+                + "ticket's own total is worked out.",
+                Routine: true));
 
         return new BimboTicket { Date = date, Total = total, Lines = items };
     }
@@ -556,6 +585,14 @@ public static partial class BimboPdfParser
     /// The cost of one unit. Bimbo prints it to four decimals, which is the most distinctive token on
     /// the row, so a reading that still has four decimals is taken as-is. When the scan destroyed it
     /// ("1.400-" for 1.9400) it is recovered as AMOUNT / QTY, which the section total then proves.
+    ///
+    /// Four decimals is a strong shape but it is not proof of the digits inside it — one of the store's
+    /// tickets prints `1.6900` for 1.8900. It is still taken as printed here, and deliberately: the
+    /// AMOUNT column is the only thing that could contradict it, and AMOUNT is damaged far more often
+    /// than PRICE is. The same ticket run also prints `338` for 3.78 and `1.56` for 7.56, and letting
+    /// a bad amount rewrite a good price turns a row that was 3.78 into one that is 338. A price the
+    /// row's own amount contradicts is repaired by <see cref="SettleAgainstThePicture"/> instead,
+    /// where a genuinely different reader gets to say which of the two columns moved.
     /// </summary>
     private static decimal ResolveUnitCost(
         Number price, Number amount, int qty, int lineNo, List<ConversionWarning> warnings)
@@ -613,7 +650,11 @@ public static partial class BimboPdfParser
         for (int i = 0; i < rows.Count; i++)
         {
             var r = rows[i];
-            if (r.Qty is > 0 && r.UnitCost is > 0m) NoteAnyDisagreement(r, warnings);
+            if (r.Qty is > 0 && r.UnitCost is > 0m)
+            {
+                NoteAnyDisagreement(r, warnings);
+                SettleAgainstThePicture(r, warnings);
+            }
             else SettleUnreadQuantity(r, i + 1, rows.Count, ask, warnings);
 
             r.Gtin = SettleBarcode(r, i + 1, rows.Count, ask, warnings);
@@ -623,11 +664,15 @@ public static partial class BimboPdfParser
     /// <summary>
     /// The whole barcode to send, or null where the row has no code anything could stand behind.
     ///
-    /// On the text path this is what it has always been: the column holds ten digits because
-    /// <see cref="SplitCode"/> counted them, so the prefix rule and <see cref="BimboCatalog"/> do the
-    /// work and nothing is ever asked. Only a row read off the picture can arrive without a code at
-    /// all — the model is told to leave the field empty rather than tidy a half-read one, since
-    /// nothing on a Bimbo ticket can catch a wrong barcode — and that row is the one worth a question.
+    /// Where the column holds ten digits, the explicitly-approved legacy fallback can only apply the
+    /// vendor-prefix check. The AI-primary path asks unless two independent picture reads agree.
+    ///
+    /// Two kinds of row arrive without a code. One is read off the picture — the model is told to
+    /// leave the field empty rather than tidy a half-read one, since nothing on a Bimbo ticket can
+    /// catch a wrong barcode. The other is a text row whose code band the scan ate into past what
+    /// <see cref="RepairShortBand"/> can stand behind. Both are worth exactly one question, and the
+    /// question is cheap next to what used to happen to the second kind: it was not a row at all, so
+    /// it left the ticket with its units and its money and every gate failed at once.
     /// </summary>
     private static string? SettleBarcode(
         Row r, int position, int lineCount,
@@ -687,6 +732,43 @@ public static partial class BimboPdfParser
             $"On the line for \"{r.Description}\" the text in the PDF gives a quantity of {r.Qty} and "
             + $"the picture of the page reads {seen}. The text was used - check this line against the "
             + "paper in SSCS."));
+    }
+
+    /// <summary>
+    /// Repairs a unit price the row's own AMOUNT column contradicts, where the picture reads one that
+    /// does not.
+    ///
+    /// A four-decimal price is taken as printed (see <see cref="ResolveUnitCost"/>) because the amount
+    /// beside it is the column these scans damage most, and arithmetic alone cannot say which of the
+    /// two moved: `1.6900` against an amount of 15.12 and `1.8900` against an amount of 338 are the
+    /// same shape of disagreement and want opposite answers. A second reader can say, and what it says
+    /// is which column it reads the same as the first reader did.
+    ///
+    /// So the amount has to be agreed by both before the price may be blamed for the disagreement.
+    /// On the first of those rows the picture also reads 15.12, which leaves the price as the one
+    /// figure the two readers differ on; on the second it reads 3.78 where the text has 338, so the
+    /// amount is the damaged column, the printed price stands and the row is worth 3.78 as it always
+    /// was. Getting that backwards books a $3.78 line at $338.
+    ///
+    /// The quantity is never touched here — <see cref="NoteAnyDisagreement"/> owns that — and neither
+    /// is the amount, which is only ever a check. Nothing is derived: the price used is one the
+    /// picture read off the paper, not one worked out from the other two columns.
+    /// </summary>
+    private static void SettleAgainstThePicture(Row r, List<ConversionWarning> warnings)
+    {
+        if (r.Qty is not int qty || r.UnitCost is not decimal cost || r.PrintedAmount is not decimal amount)
+            return;
+        if (Near(qty * cost, amount)) return;                       // the row already multiplies out
+
+        if (r.Vision?.Price is not decimal seen || seen <= 0m || seen == cost) return;
+        if (!Near(r.Vision.Amount, amount)) return;                 // both readers must have the amount
+        if (!Near(qty * seen, amount)) return;
+
+        r.UnitCost = seen;
+        warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.LineMathMismatch,
+            $"On the line for \"{r.Description}\" the scan read a price of {cost:0.0000}, which does not "
+            + $"make the {amount:0.00} the row prints over {qty}. The picture of the page reads "
+            + $"{seen:0.0000}, which does, so that was used - check this line in SSCS."));
     }
 
     /// <summary>
@@ -890,7 +972,8 @@ public static partial class BimboPdfParser
     /// last week's money onto this week's invoice.
     /// </summary>
     private static decimal CheckTicketTotal(
-        decimal? printed, decimal lineTotal, int rowCount, List<ConversionWarning> warnings)
+        List<Section> sections, decimal? printed, decimal lineTotal, int rowCount,
+        List<ConversionWarning> warnings)
     {
         if (printed is null)
             throw new EdiConversionException(PdfReasonCodes.NoTotal,
@@ -899,10 +982,31 @@ public static partial class BimboPdfParser
 
         decimal tolerance = CentPerLine * Math.Max(1, rowCount);
         if (Math.Abs(lineTotal - printed.Value) > tolerance)
+        {
+            // TICKET TOTALS is one figure printed once, and the scan damages it like any other:
+            // 240.07 comes back "2411.07" on one of the store's tickets and 350.68 as "3511.68" on
+            // another. The bands outrank it when they cover the whole ticket, because by this point
+            // CheckSectionAmounts has already made each of them agree with the rows underneath it —
+            // so DELIVERY TOTAL and RETURNS TOTAL are two separately printed figures, independently
+            // reconciled, saying the same thing the lines say. One damaged figure does not outvote
+            // that. Where a band prints no amount of its own the cover is incomplete and the ticket
+            // is still refused, since the rows it holds have nothing standing behind them.
+            decimal bandTotal = sections.Sum(s => s.PrintedAmount ?? 0m);
+            if (sections.Count > 0 && sections.All(s => s.PrintedAmount is not null)
+                && Math.Abs(bandTotal - lineTotal) <= tolerance)
+            {
+                warnings.Add(new ConversionWarning(0, PdfReasonCodes.TotalMismatch,
+                    $"This ticket's own TICKET TOTALS reads {printed.Value:0.00}, which its sections do "
+                    + $"not come to. They print {bandTotal:0.00} between them and that agrees with the "
+                    + "lines, so it was used - check this ticket in SSCS."));
+                return bandTotal;
+            }
+
             throw new EdiConversionException(PdfReasonCodes.TotalMismatch,
                 $"This Bimbo ticket does not add up: it says {printed.Value:0.00} but its lines come to "
                 + $"{lineTotal:0.00}. A page may be missing, or the scan has damaged a figure. "
                 + "Re-scan the whole page and try again.");
+        }
 
         if (lineTotal != printed.Value)
             warnings.Add(new ConversionWarning(0, PdfReasonCodes.TotalMismatch,
@@ -965,66 +1069,17 @@ public static partial class BimboPdfParser
     private static string ResolveUpc(Row row, List<ConversionWarning> warnings)
     {
         string upc = RepairPrefix(row.Upc10, row.Description, row.LineNo, warnings);
-
-        // What the picture made of the same column, where a second reader was consulted and read ten
-        // digits. It is never the answer on its own — one reader of a code that cannot check itself
-        // is exactly the situation this vendor is already in — but it is an independent voice, and
-        // below it is what lets a catalogue entry too thin to correct a code on its own do so.
         string? fromPicture = row.Vision?.Barcode is string b && b.Length == 10 ? b : null;
 
-        var known = BimboCatalog.Find(row.ItemNumber);
-        if (known is null || known.Value.Upc10 == upc)
-        {
-            if (fromPicture is not null && fromPicture != upc)
-                warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
-                    $"On the line for \"{row.Description}\" the text in the PDF gives the barcode {upc} "
-                    + $"and the picture of the page reads {fromPicture}. Nothing on a Bimbo ticket can "
-                    + "settle which is right, so the text was used - check this line in SSCS."));
-            return upc;
-        }
-
-        int differences = CountDifferences(known.Value.Upc10, upc);
-
-        // More than one digit apart means the *item number* is the damaged column, not the UPC —
-        // a mis-read item number lands on some other product's record, and following it would swap
-        // one good barcode for a completely unrelated one. The barcode as printed is safer.
-        //
-        // Unless the picture read the catalogue's code off the paper. Then it is not the item number
-        // that is damaged: two things that share no machinery — a record built from other tickets,
-        // and a reader looking at the photograph — agree on digits the OCR does not have, which is
-        // the corroboration this vendor otherwise never gets.
-        if (differences > 1)
-        {
-            if (fromPicture == known.Value.Upc10)
-            {
-                warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
-                    $"The barcode on the line for \"{row.Description}\" scanned as {upc}, but the "
-                    + $"picture of the page reads {known.Value.Upc10} and that is what Bimbo's item "
-                    + $"number {row.ItemNumber} is on record with. The recorded one was used."));
-                return known.Value.Upc10;
-            }
-
+        // This is the explicitly-approved legacy OCR fallback. It has no product table to consult:
+        // new Bimbo products must work without a source edit or rebuild. If its optional picture
+        // helper disagrees, neither reading can settle the code, so retain the OCR value and warn.
+        if (fromPicture is not null && fromPicture != upc)
             warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
-                $"On the line for \"{row.Description}\" the barcode {upc} and Bimbo's item number "
-                + $"{row.ItemNumber} point at different products. The barcode was used as printed - "
-                + "check this line in SSCS."));
-            return upc;
-        }
-
-        if (!known.Value.Trusted && fromPicture != known.Value.Upc10)
-        {
-            warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
-                $"On the line for \"{row.Description}\" the barcode reads {upc} but item number "
-                + $"{row.ItemNumber} has been seen with {known.Value.Upc10}. Only one ticket has ever "
-                + "shown that, so the barcode was used as printed - check this line in SSCS."));
-            return upc;
-        }
-
-        warnings.Add(new ConversionWarning(row.LineNo, PdfReasonCodes.UpcCheckDigit,
-            $"The barcode on the line for \"{row.Description}\" scanned as {upc}, one digit away from "
-            + $"the {known.Value.Upc10} Bimbo's item number {row.ItemNumber} is on record with. The "
-            + "recorded one was used so the delivery lands on the item SSCS already has."));
-        return known.Value.Upc10;
+                $"On the line for \"{row.Description}\" the text in the PDF gives the barcode {upc} "
+                + $"and the picture of the page reads {fromPicture}. Nothing on a Bimbo ticket can "
+                + "settle which is right, so the text was used - check this line in SSCS."));
+        return upc;
     }
 
     /// <summary>
@@ -1097,8 +1152,8 @@ public static partial class BimboPdfParser
     /// admitting two is left unread rather than guessed at.
     ///
     /// A token whose separators both survived as real punctuation was genuinely read; one that had
-    /// to treat a digit as a separator is a repair, and a repair is only ever offered to the operator
-    /// as a suggestion to check against the paper.
+    /// to treat a digit as a separator is a repair and is discarded. Neither form reaches the
+    /// invoice-details prompt.
     /// </summary>
     private static (DateOnly Date, bool Repaired)? ReadDateToken(string token)
     {
@@ -1171,20 +1226,134 @@ public static partial class BimboPdfParser
     {
         int i = 0;
         while (i < line.Length && !char.IsAsciiDigit(line[i]) && !char.IsAsciiLetter(line[i])) i++;
-        if (i >= line.Length || !char.IsAsciiDigit(line[i])) return null;
+        if (i < line.Length && char.IsAsciiDigit(line[i]))
+        {
+            var (digits, end) = ScanCode(line, i, tolerant: false);
+            if (digits.Length == CodeDigits)
+                return (digits[..10], digits[10..], line[end..].Trim());
+        }
 
+        return RepairCode(line);
+    }
+
+    /// <summary>
+    /// Collects the code band from <paramref name="from"/>, returning its digits and where it
+    /// stopped. A letter always ends it — that is the description starting. <paramref name="tolerant"/>
+    /// additionally lets any punctuation act as a separator, where the strict read allows only the
+    /// space and the hyphen Bimbo actually prints.
+    /// </summary>
+    private static (string Digits, int End) ScanCode(string line, int from, bool tolerant)
+    {
         var digits = new System.Text.StringBuilder(CodeDigits);
+        int i = from;
+        bool letterSpent = false;
         while (i < line.Length && digits.Length < CodeDigits)
         {
             char c = line[i];
             if (char.IsAsciiDigit(c)) digits.Append(c);
-            else if (c is not (' ' or '-')) break;   // a letter or punctuation ends the code band
+            else if (char.IsAsciiLetter(c))
+            {
+                // A letter is normally the description starting. The exception is a hyphen the scan
+                // turned into one ("7432r09157" for 74323-09157), which is only credible sitting
+                // between two digits, and is allowed once per band so that a product name can never
+                // be walked into.
+                if (!tolerant || letterSpent || !BetweenDigits(line, i)) break;
+                letterSpent = true;
+            }
+            else if (!tolerant && c is not (' ' or '-')) break; // strict: only Bimbo's own separators
             i++;
         }
+        return (digits.ToString(), i);
+    }
 
-        if (digits.Length != CodeDigits) return null;
-        string code = digits.ToString();
-        return (code[..10], code[10..], line[i..].Trim());
+    /// <summary>True when the character at <paramref name="at"/> has a digit on both sides of it.</summary>
+    private static bool BetweenDigits(string line, int at) =>
+        at > 0 && char.IsAsciiDigit(line[at - 1])
+        && at + 1 < line.Length && char.IsAsciiDigit(line[at + 1]);
+
+    /// <summary>
+    /// A second, deliberately looser look at a line the strict read rejected.
+    ///
+    /// Losing a product row is the most expensive thing this parser can do, and the quietest. The
+    /// row's units and its money leave the ticket together, so the band gates and the ticket gate all
+    /// fail at once and the whole delivery is refused over one speck of ink — and it is refused
+    /// *silently*, because a line that was never a row is never offered to the picture and never
+    /// asked about either. Sixteen of the store's tickets on 2026-08-12 produced eight such rows
+    /// across six tickets, every one of them a real delivery line that any person could read.
+    ///
+    /// Two kinds of damage, both off those scans:
+    ///
+    ///   a speck INSIDE the band  "70870-00910 ,007908"  "70870=00909 007907"  "74323-09398 (07805"
+    ///   a speck IN FRONT of it   "I 74323-09164 008785" ".J4323-09145 008783" "/4323-73791 013529"
+    ///
+    /// What stops a heading being read as a row is that the band must still yield fifteen or sixteen
+    /// digits **and end at a letter** — the product description. No heading manages both: the closest
+    /// is "500: 21312020 10:0649 AM ...", whose sixteen digits stop mid-figure rather than at a word.
+    /// </summary>
+    private static (string Upc10, string ItemNumber, string Columns)? RepairCode(string line)
+    {
+        for (int start = 0; start <= LeadingDebris && start < line.Length; start++)
+        {
+            if (!char.IsAsciiDigit(line[start])) continue;
+
+            var (digits, end) = ScanCode(line, start, tolerant: true);
+
+            // The band has to hand over to a description. The gap between them is whitespace or more
+            // scan debris, so it is stepped over — but only over characters that are neither letters
+            // nor digits, which is what keeps "500: 21312020 10:0649 AM" (sixteen digits that stop
+            // in the middle of a clock time) from reading as a product row.
+            int after = end;
+            while (after < line.Length && !char.IsAsciiLetterOrDigit(line[after])) after++;
+            if (after >= line.Length || !char.IsAsciiLetter(line[after])) continue;
+
+            string rest = line[end..].Trim();
+            if (digits.Length == CodeDigits) return (digits[..10], digits[10..], rest);
+
+            if (digits.Length == CodeDigits - 1 && RepairShortBand(digits) is { } repaired)
+                return (repaired.Upc10, repaired.ItemNumber, rest);
+
+            // The band has lost more than the prefix rule can stand behind
+            // ("57528-0374? 011095", "74323-738% 950661"). Everything else that makes this a row is
+            // still on the line — its name, its count and both money columns — so it is kept with no
+            // barcode at all and <see cref="SettleBarcode"/> asks for one. That costs a question; the
+            // alternative is the row leaving the ticket with its units and its money, which fails
+            // every gate at once and refuses a delivery nobody can see anything wrong with. The item
+            // number survives at the tail of the band and is carried through, because it is what a
+            // person will read the barcode off the shelf label for.
+            if (digits.Length >= PartialCodeDigits) return ("", digits[^ItemDigits..], rest);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// A code band one digit short, which is the scan having eaten a digit rather than having added a
+    /// speck ("74323-09164 08785", "/4323-73791 013529"). Which column lost it decides the whole
+    /// reading, so it is never guessed: it is settled by the prefix rule or not at all.
+    ///
+    /// Failing that the *UPC* is taken whole and the item number is short a leading zero, accepted
+    /// only when the ten digits open with a prefix Bimbo actually bills under. A row that satisfies
+    /// neither keeps no barcode at all rather than a plausible wrong one and goes to the operator.
+    /// </summary>
+    private static (string Upc10, string ItemNumber)? RepairShortBand(string digits)
+    {
+        // A missing UPC digit cannot be restored without guessing now that the product catalogue is
+        // gone. Keep the row with no barcode and ask the operator instead.
+
+        // The item number lost its leading zero, so the UPC is the whole leading ten.
+        string upc10 = digits[..10];
+        string item5 = "0" + digits[10..];
+        if (!KnownPrefixes.Contains(upc10[..5], StringComparer.Ordinal)) return null;
+
+        return (upc10, item5);
+    }
+
+    /// <summary>True when <paramref name="shorter"/> is <paramref name="whole"/> with one character removed.</summary>
+    private static bool IsOneDeletionOf(string whole, string shorter)
+    {
+        if (whole.Length != shorter.Length + 1) return false;
+        for (int drop = 0; drop < whole.Length; drop++)
+            if (string.Concat(whole[..drop], whole[(drop + 1)..]) == shorter) return true;
+        return false;
     }
 
     /// <summary>
@@ -1242,15 +1411,9 @@ public static partial class BimboPdfParser
 /// none of the ticket's own arithmetic could recover. Described well enough for the operator to find
 /// the row on the paper without counting down it.
 ///
-/// Bimbo asks about two things and no more. **The quantity**, because it is the one figure here the
-/// money cannot check — misread it and the unit cost absorbs the difference, so the invoice balances
-/// to the penny while the store's stock is wrong. And **the barcode**, but only on a row that came
-/// off the picture with no code on it, since a row read out of the text layer always carries ten
-/// digits and the prefix rule and <see cref="BimboCatalog"/> are what stand behind those.
-///
-/// Deliberately not the unit price: it is recovered as AMOUNT / QTY once the quantity is known, and
-/// the band and ticket totals then prove it. Nor the description — SSCS keeps its own wording for an
-/// item it already has, so asking would be a prompt that changes nothing.
+/// The AI-primary path may ask for UPC, quantity, price, or amount when a field cannot be read or the
+/// independent checks disagree. Description is carried through from the model; SSCS keeps its own
+/// wording for an item it already has.
 /// </summary>
 public sealed record BimboUnknownField(
     /// <summary>1-based position among the ticket's rows — how the operator counts down it.</summary>

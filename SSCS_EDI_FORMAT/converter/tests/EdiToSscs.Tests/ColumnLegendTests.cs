@@ -34,7 +34,9 @@ public class ColumnLegendTests
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new(invoiceNumber, request.Date ?? new DateOnly(2026, 8, 12));
+            new(invoiceNumber, new DateOnly(2026, 8, 12));
+
+        public bool ConfirmBimboOcrFallback(string fileName) => true;
 
         public string? AskLineField(LineFieldRequest request)
         {

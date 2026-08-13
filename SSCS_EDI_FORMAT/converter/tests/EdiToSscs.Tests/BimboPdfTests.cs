@@ -224,15 +224,13 @@ public class BimboPdfTests
     /// Nothing else on the page can see this: the money reconciles either way.
     /// </summary>
     [Fact]
-    public void TheItemNumberCorrectsAUpcTheScanDamagedPastItsPrefix()
+    public void TheLegacyFallbackDoesNotRewriteAUpcFromAHardcodedProductTable()
     {
         var t = Parse("84294890012057", out var warnings);
 
-        Assert.Contains(t.Lines, l => Upc.SscsIdFromGtin(l.Gtin) == "07432309183");
-        Assert.DoesNotContain(t.Lines, l => Upc.SscsIdFromGtin(l.Gtin) == "07432309783");
-
-        Assert.Contains(warnings, w =>
-            w.ReasonCode == PdfReasonCodes.UpcCheckDigit && w.Message.Contains("008788"));
+        Assert.Contains(t.Lines, l => Upc.SscsIdFromGtin(l.Gtin) == "07432309783");
+        Assert.DoesNotContain(t.Lines, l => Upc.SscsIdFromGtin(l.Gtin) == "07432309183");
+        Assert.DoesNotContain(warnings, w => w.Message.Contains("on record", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -450,13 +448,13 @@ public class BimboPdfTests
         Assert.Contains(warnings, w => w.ReasonCode == PdfReasonCodes.CreditLines);
     }
 
-    /// <summary>The catalogue is a table of record; its size is pinned so an edit is deliberate.</summary>
+    /// <summary>
+    /// Bimbo changes products constantly. A product table in the executable made every new loaf a
+    /// source edit and rebuild, so UPC safety now comes from two independent picture reads instead.
+    /// </summary>
     [Fact]
-    public void TheCatalogueHoldsTheProductsTheSamplesShowed()
+    public void TheHardcodedBimboProductCatalogueIsGone()
     {
-        Assert.Equal(54, BimboCatalog.Count);
-        Assert.Equal("7432309183", BimboCatalog.Find("008788")!.Value.Upc10);
-        Assert.True(BimboCatalog.Find("008788")!.Value.Trusted);
-        Assert.Null(BimboCatalog.Find("999999"));
+        Assert.Null(typeof(BimboPdfParser).Assembly.GetType("EdiToSscs.Core.BimboCatalog"));
     }
 }

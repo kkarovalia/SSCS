@@ -50,7 +50,20 @@ public static class ReasonCodes
 /// itself, and anything it *can* answer is now asked about rather than noted — so by the time a
 /// note is written there is nothing left for anyone to do about it.
 /// </summary>
-public sealed record ConversionWarning(int LineNumber, string ReasonCode, string Message);
+/// <param name="Routine">
+/// True when this describes something normal about the invoice rather than something to go and look
+/// at, which keeps it out of <see cref="ConversionResult.HasWarnings"/> and so off the file's status.
+/// It is still logged and still listed.
+///
+/// Only one thing sets it today, and it is the reason the flag exists: "this ticket has returns"
+/// fires on very nearly every Bimbo and Dr Pepper ticket, because very nearly every one of them
+/// carries returns. Sixteen tickets converted in a row on 2026-08-12 and every single one that
+/// succeeded came out amber — for that. A status that is always amber says nothing, and the tickets
+/// that were amber for a real reason (a barcode changed, a line that may open a new item in SSCS)
+/// looked exactly like the ones that were not.
+/// </param>
+public sealed record ConversionWarning(
+    int LineNumber, string ReasonCode, string Message, bool Routine = false);
 
 /// <summary>Result of a successful in-memory conversion.</summary>
 public sealed class ConversionResult
@@ -69,7 +82,8 @@ public sealed class ConversionResult
     public required long InputByteCount { get; init; }
     public required IReadOnlyList<ConversionWarning> Warnings { get; init; }
     public long OutputByteCount => OutputBytes.LongLength;
-    public bool HasWarnings => Warnings.Count > 0;
+    /// <summary>Whether anything here wants a person. Routine notes do not — see <see cref="ConversionWarning.Routine"/>.</summary>
+    public bool HasWarnings => Warnings.Any(w => !w.Routine);
 }
 
 /// <summary>Thrown when an input file cannot be converted. Carries a plain-language message.</summary>

@@ -17,8 +17,7 @@ public class BlueBellPipelineTests
 
     /// <summary>
     /// Answers the prompt the way an operator would, in order: an invoice number, or null to skip
-    /// the file. The date it hands back is whatever the request suggested, which is how an operator
-    /// who confirms the scanner's reading behaves.
+    /// the file. The date is the value the operator reads from this fixture's paper.
     /// </summary>
     private sealed class ScriptedPrompt(params string?[] answers) : IInvoiceDetailsPrompt
     {
@@ -29,7 +28,8 @@ public class BlueBellPipelineTests
         {
             Seen.Add(request);
             string? number = _next < answers.Length ? answers[_next++] : null;
-            return number is null ? null : new InvoiceDetails(number, request.Date ?? default);
+            return number is null ? null
+                : new InvoiceDetails(number, new DateOnly(2026, 3, 19));
         }
     }
 

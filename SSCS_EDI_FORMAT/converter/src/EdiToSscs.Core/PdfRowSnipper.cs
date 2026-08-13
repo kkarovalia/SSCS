@@ -22,6 +22,14 @@ public sealed record PdfRowSnip(
     int FocusLeft, int FocusTop, int FocusWidth, int FocusHeight);
 
 /// <summary>
+/// A vendor-verified horizontal column on the printed sheet, expressed as fractions of the page
+/// width. This is a fallback only: a token or printed heading that can be placed exactly still wins.
+/// It exists for fixed-form tickets whose photograph is sound while the hidden OCR text either
+/// drops or corrupts the very figure being requested.
+/// </summary>
+public readonly record struct PdfColumnBand(double LeftFraction, double RightFraction);
+
+/// <summary>
 /// Cuts the picture of a printed row out of a scanned invoice.
 ///
 /// These PDFs are photographs of paper with a machine's transcription laid underneath. Every bug
@@ -84,12 +92,14 @@ public static class PdfRowSnipper
     public static PdfRowSnip? TryCut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
         string? focusText = null, int? focusLineNo = null, bool markWholeCode = false,
-        bool lastOfDuplicates = false, string? columnLeftOf = null)
+        bool lastOfDuplicates = false, string? columnLeftOf = null,
+        PdfColumnBand? fallbackColumn = null)
     {
         try
         {
             return Cut(pdfBytes, firstLineNo, lastLineNo, focusText, focusLineNo, markWholeCode,
-                lastOfDuplicates: lastOfDuplicates, columnLeftOf: columnLeftOf);
+                lastOfDuplicates: lastOfDuplicates, columnLeftOf: columnLeftOf,
+                fallbackColumn: fallbackColumn);
         }
         catch
         {
@@ -274,7 +284,8 @@ public static class PdfRowSnipper
     private static PdfRowSnip? Cut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
         string? focusText, int? focusLineNo, bool markWholeCode, bool mark = true,
-        bool lastOfDuplicates = false, string? columnLeftOf = null)
+        bool lastOfDuplicates = false, string? columnLeftOf = null,
+        PdfColumnBand? fallbackColumn = null)
     {
         ArgumentNullException.ThrowIfNull(pdfBytes);
         if (firstLineNo > lastLineNo) (firstLineNo, lastLineNo) = (lastLineNo, firstLineNo);
@@ -324,6 +335,15 @@ public static class PdfRowSnipper
         // belongs to, where the caller can name one; failing both, the whole row.
         var span = markWholeCode ? FindCodeSpan(focus) : FindSpan(focus, focusText, lastOfDuplicates);
         span ??= FindColumnSpan(lines, focus, columnLeftOf);
+        if (span is null && fallbackColumn is PdfColumnBand band
+            && band.LeftFraction >= 0 && band.RightFraction <= 1
+            && band.LeftFraction < band.RightFraction)
+        {
+            // Fixed-form vendor fallback. The Y coordinate still comes from the exact located row;
+            // only X comes from the form. Fractions keep the same column on 200/300 dpi scans and
+            // avoid tying a verified layout to one scanner resolution.
+            span = (page.Width * band.LeftFraction, page.Width * band.RightFraction);
+        }
         int focusLeft = 0, focusWidth = image.WidthInSamples;
         if (span is not null)
         {

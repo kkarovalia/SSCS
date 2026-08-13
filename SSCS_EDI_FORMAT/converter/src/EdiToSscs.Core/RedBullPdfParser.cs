@@ -154,8 +154,8 @@ public sealed class RedBullTicket
         {
             SupplierName = RedBullPdfParser.SupplierName,
             InvoiceNumber = invoiceNumber,
-            // The date the operator confirmed. It is typed on every invoice now, with what the scan
-            // read offered in the box, because a plausible wrong date is what this scanner produces
+            // The date the operator typed. The box starts empty because a plausible wrong date is
+            // what this scanner produces
             // and nothing in the file can catch one - see InvoiceDetailsRequest.NeedsDate.
             Date = date,
             Total = lines.Sum(l => l.ExtendedCost),

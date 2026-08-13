@@ -324,9 +324,9 @@ The **invoice number** is always typed and the box is never pre-filled. The tick
 (`2030211863`) but the store's own paidouts use a different numbering entirely — the verified
 example is filed in SSCS as `112425112379D`.
 
-The **date** is asked for only when the ticket's own is impossible. `11/24/2025` reads as
-`11/24/2026`, the same 5-as-6 that turns the 75320 ZIP into 76320; a ticket cannot be dated in the
-future, so the parser declines to post it and offers the year before as a suggestion to check.
+The **date is always typed into an empty box**, just like the invoice number. `11/24/2025` reading as
+`11/24/2026` is the example that proves why: a plausible wrong year has no checksum and can book the
+delivery into the wrong period. The scanned reading cannot reach `InvoiceDetailsRequest`.
 
 ## 6. One PDF is one invoice
 

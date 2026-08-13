@@ -29,8 +29,10 @@ public class BimboPipelineTests
                 ? null
                 : new InvoiceDetails(
                     invoiceNumber,
-                    DateTyped != default ? DateTyped : request.Date ?? default);
+                    DateTyped != default ? DateTyped : new DateOnly(2026, 7, 28));
         }
+
+        public bool ConfirmBimboOcrFallback(string fileName) => true;
     }
 
     private static ConversionService Service(TempDir tmp, IInvoiceDetailsPrompt prompt) =>
@@ -123,6 +125,7 @@ public class BimboPipelineTests
         Assert.DoesNotContain(
             typeof(InvoiceDetailsRequest).GetProperties(),
             p => p.Name.Contains("Invoice", StringComparison.OrdinalIgnoreCase)
+                 || p.Name.Equals("Date", StringComparison.OrdinalIgnoreCase)
                  || p.Name.Contains("Suggest", StringComparison.OrdinalIgnoreCase)
                  || p.Name.Contains("Offer", StringComparison.OrdinalIgnoreCase));
     }
@@ -143,7 +146,8 @@ public class BimboPipelineTests
 
         var asked = Assert.Single(prompt.Prompts);
         Assert.True(asked.NeedsDate);
-        Assert.Null(asked.Date);
+        Assert.DoesNotContain(typeof(InvoiceDetailsRequest).GetProperties(),
+            p => p.Name.Equals("Date", StringComparison.OrdinalIgnoreCase));
 
         // The parser can still reconstruct 07/13/2026 out of the damage, and that reconstruction is
         // deliberately not offered to the operator any more - it cannot even reach this record. What

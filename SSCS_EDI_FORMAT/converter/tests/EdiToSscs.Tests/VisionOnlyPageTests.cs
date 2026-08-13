@@ -24,7 +24,7 @@ public class VisionOnlyPageTests
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>
-            new(invoiceNumber, request.Date ?? new DateOnly(2026, 8, 11));
+            new(invoiceNumber, new DateOnly(2026, 8, 11));
 
         public string? AskLineField(LineFieldRequest request)
         {

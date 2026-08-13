@@ -213,7 +213,8 @@ public class BlueBellDamagedDateTests
         // "12-14-Z023" is not offered and cannot be: the record has no field to carry it.
         var seen = Assert.Single(prompt.Seen);
         Assert.True(seen.NeedsDate);
-        Assert.Null(seen.Date);
+        Assert.DoesNotContain(typeof(InvoiceDetailsRequest).GetProperties(),
+            p => p.Name.Equals("Date", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -223,8 +224,8 @@ public class BlueBellDamagedDateTests
     /// It used to be shown rather than asked whenever the scan produced something plausible, and a
     /// plausible wrong date is exactly what these scanners produce: two of the store's twenty-two
     /// samples booked themselves into 2016 and 2020, both for 2026, because the last digit was eaten.
-    /// A future date was caught; a past one never was. The box is pre-filled with what was read, so
-    /// confirming a good one costs a glance.
+    /// A future date was caught; a past one never was. The box is empty, so the operator must read
+    /// the paper.
     /// </summary>
     [Fact]
     public void TheDateIsAlwaysAskedAndWhatTheOperatorConfirmsIsWhatIsUsed()
@@ -247,7 +248,8 @@ public class BlueBellDamagedDateTests
         // That used to be false: the dialog held the scan's date and returned it in preference to
         // the box, so a corrected year was silently thrown away.
         Assert.All(prompt.Seen, r => Assert.True(r.NeedsDate));
-        Assert.All(prompt.Seen, r => Assert.Equal(new DateOnly(2026, 3, 19), r.Date));
+        Assert.DoesNotContain(typeof(InvoiceDetailsRequest).GetProperties(),
+            p => p.Name.Equals("Date", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

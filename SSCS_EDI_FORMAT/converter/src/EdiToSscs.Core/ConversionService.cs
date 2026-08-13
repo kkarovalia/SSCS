@@ -46,12 +46,13 @@ public sealed class ConversionOutcome
 /// file in the destination, flushed, re-read and verified, then atomically moved to a
 /// non-conflicting final name. A failure never leaves a partial or misleading file behind.
 /// </summary>
-public sealed class ConversionService : IFileConverter
+public sealed class ConversionService : IFileConverter, IBatchFileConverter
 {
     private readonly ConversionLogger _logger;
     private readonly string _appVersion;
     private readonly IInvoiceDetailsPrompt? _invoiceDetailsPrompt;
     private readonly IInvoiceVisionReader? _visionReader;
+    private bool? _bimboOcrFallbackForBatch;
 
     public ConversionService(
         ConversionLogger? logger = null,
@@ -64,6 +65,9 @@ public sealed class ConversionService : IFileConverter
         _invoiceDetailsPrompt = invoiceDetailsPrompt;
         _visionReader = visionReader;
     }
+
+    /// <summary>Clears the one Bimbo fallback decision when a new queue batch starts.</summary>
+    public void BeginBatch() => _bimboOcrFallbackForBatch = null;
 
     /// <summary>
     /// What the second reader cost on the file being converted, for the log. Reset per file; one
@@ -162,7 +166,9 @@ public sealed class ConversionService : IFileConverter
         log.RecordsProcessed = converted.RecordCount;
         log.UpcERecordsExpanded = converted.UpcExpanded;
         log.OutputBytes = converted.Documents.Sum(d => d.Bytes.LongLength);
-        if (converted.HasWarnings)
+        // Everything is logged, including the routine notes that deliberately do not raise the file's
+        // status. The log is the record of what happened to a ticket, not a to-do list.
+        if (converted.Warnings.Count > 0)
             log.Warnings = converted.Warnings.Select(w => $"line {w.LineNumber} [{w.ReasonCode}]: {w.Message}").ToList();
 
         // Every document is written and verified as a temporary file BEFORE any of them claims a
@@ -212,7 +218,9 @@ public sealed class ConversionService : IFileConverter
             if (converted.Headline.Length > 0)
                 message = $"{converted.Headline}\n{message}";
 
-            if (converted.HasWarnings)
+            // Routine notes (for example normal vendor returns) stay visible in the details even
+            // though they deliberately do not make the file amber.
+            if (converted.Warnings.Count > 0)
                 message += $"\n{string.Join("\n", converted.Warnings.Select(w => w.Message))}";
 
             return new ConversionOutcome
@@ -248,7 +256,7 @@ public sealed class ConversionService : IFileConverter
         /// <summary>What was read off the ticket, shown beside the saved file. See Headline.</summary>
         string Headline = "")
     {
-        public bool HasWarnings => Warnings.Count > 0;
+        public bool HasWarnings => Warnings.Any(w => !w.Routine);
     }
 
     /// <summary>
@@ -295,6 +303,16 @@ public sealed class ConversionService : IFileConverter
                 TextOr([], () => PdfTextExtractor.ExtractPages(inputBytes), vendor),
                 inputFileName, warnings, inputBytes);
 
+        // Bimbo still runs the text-layer pass, but the AI-primary path receives only its
+        // coordinates. Keeping the positioned records here prevents an OCR value from being wired
+        // back into a row while still allowing the question dialog to cut out the exact line.
+        if (vendor == PdfVendor.Bimbo)
+        {
+            IReadOnlyList<PdfTextLine> positioned = TextOr(
+                [], () => PdfTextExtractor.ExtractPositionedLines(inputBytes), vendor);
+            return ConvertBimbo(positioned, inputFileName, warnings, inputBytes);
+        }
+
         IReadOnlyList<string> lines =
             TextOr([], () => PdfTextExtractor.ExtractLines(inputBytes), vendor);
 
@@ -303,9 +321,6 @@ public sealed class ConversionService : IFileConverter
 
         if (vendor == PdfVendor.Chubiwinos)
             return ConvertChubiwinos(lines, inputFileName, warnings);
-
-        if (vendor == PdfVendor.Bimbo)
-            return ConvertBimbo(lines, inputFileName, warnings, inputBytes);
 
         return ConvertDrPepper(lines, inputFileName, warnings, inputBytes);
     }
@@ -370,13 +385,12 @@ public sealed class ConversionService : IFileConverter
             lines = [];
         }
 
-        DateOnly? date = DrPepperPdfParser.FindDate(lines);
         decimal? total = DrPepperPdfParser.FindAmountDue(lines) ?? seen.PrintedTotal;
 
         // Asking for the total does not weaken the sum-must-match gate, it restores it: a figure a
         // person read off the paper is worth more than one OCR guessed at.
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Dr Pepper", date, total ?? 0m, 0, 1, 1, "Dr Pepper",
+            inputFileName, "Dr Pepper", total ?? 0m, 0, 1, 1, "Dr Pepper",
             NeedsTotal: total is null));
 
         Invoice invoice = DrPepperPdfParser.Parse(
@@ -515,7 +529,6 @@ public sealed class ConversionService : IFileConverter
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Blue Bell",
-            sections.Select(s => s.Date).FirstOrDefault(d => d is not null),
             total, lineCount, 1, 1, "Blue Bell"));
 
         var invoice = BlueBellPdfParser.Merge(sections, keyed.InvoiceNumber, keyed.Date);
@@ -536,7 +549,7 @@ public sealed class ConversionService : IFileConverter
         var ticket = ChubiwinosPdfParser.Parse(lines, warnings);
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Chubiwinos", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1,
+            inputFileName, "Chubiwinos", ticket.Total, ticket.Lines.Count, 1, 1,
             "Chubiwinos"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date,
@@ -557,25 +570,98 @@ public sealed class ConversionService : IFileConverter
     /// 84294890013154 — and the store's own paidouts use a different numbering anyway.
     /// </summary>
     private Converted ConvertBimbo(
-        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings,
+        IReadOnlyList<PdfTextLine> positionedLines, string inputFileName, List<ConversionWarning> warnings,
         byte[] pdfBytes)
     {
-        // The picture, read before anything else, because whether this page is readable at all can
-        // now depend on it: two of the store's thirteen samples went through the scanner with its OCR
-        // switched off and have no text layer whatsoever, while being perfectly legible as paper.
-        // Best-effort as everywhere — an empty reading leaves the parse exactly as it always was.
-        var ticket = BimboPdfParser.Parse(
-            lines, warnings,
-            field => AskBimboField(inputFileName, field, pdfBytes),
-            ReadWithVision(pdfBytes, VisionVendor.Bimbo));
+        BimboTicket ticket;
+        if (_visionReader is IBimboVisionReader bimboVision)
+        {
+            BimboVisionReading reading;
+            try { reading = bimboVision.ReadBimbo(pdfBytes); }
+            catch { reading = BimboVisionReading.Unavailable(); }
+            if (reading.Note.Length > 0) _visionNote = $"Bimbo primary: {reading.Note}";
+
+            if (reading.Status == BimboVisionStatus.Success)
+            {
+                var targets = reading.Rows.Select((r, i) =>
+                {
+                    var located = BimboVisionParser.Locate(r, positionedLines);
+                    return new BimboBarcodeTarget(
+                        $"p{Math.Max(1, r.Page)}-r{i + 1}", Math.Max(1, r.Page), i + 1,
+                        r.ItemNumber, r.Description, r.Units ?? "", r.Amount ?? "",
+                        located?.LineNumber ?? 0, r.PageUpsideDown);
+                }).ToList();
+
+                BimboBarcodeVerification verification;
+                try { verification = bimboVision.VerifyBimboBarcodes(pdfBytes, targets); }
+                catch { verification = BimboBarcodeVerification.Unavailable(); }
+                if (verification.Note.Length > 0)
+                    _visionNote = (_visionNote is null ? "" : _visionNote + "; ")
+                                  + $"Bimbo UPC verification: {verification.Note}";
+
+                BimboBarcodeVerification cropVerification;
+                try { cropVerification = bimboVision.VerifyBimboBarcodeCrops(pdfBytes, targets); }
+                catch { cropVerification = BimboBarcodeVerification.Unavailable(); }
+                if (cropVerification.Note.Length > 0)
+                    _visionNote = (_visionNote is null ? "" : _visionNote + "; ")
+                                  + $"Bimbo isolated UPC verification: {cropVerification.Note}";
+
+                ticket = BimboVisionParser.Parse(
+                    reading, verification, cropVerification, positionedLines, warnings,
+                    field => AskBimboField(inputFileName, field, pdfBytes));
+            }
+            else if (reading.Status == BimboVisionStatus.Unavailable)
+            {
+                if (!UseBimboOcrFallback(inputFileName)) throw new OperationCanceledException();
+                warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                    "AI reading was unavailable, so this Bimbo ticket used the legacy PDF text "
+                    + "reader after the operator approved that fallback."));
+                ticket = BimboPdfParser.Parse(
+                    positionedLines.Select(l => l.Text).ToList(), warnings,
+                    field => AskBimboField(inputFileName, field, pdfBytes));
+            }
+            else
+            {
+                throw new EdiConversionException(PdfReasonCodes.NoLineItems,
+                    "AI reached this Bimbo ticket but could not read all product rows and the "
+                    + "independent TICKET TOTALS checks after retrying. Re-scan the page so the "
+                    + "printing is clear, then try again. OCR values were not substituted.");
+            }
+        }
+        else if (_visionReader is not null)
+        {
+            // Compatibility for existing injected readers. The desktop reader implements the
+            // Bimbo-specific contract above; old test/host fakes still exercise the legacy path.
+            ticket = BimboPdfParser.Parse(
+                positionedLines.Select(l => l.Text).ToList(), warnings,
+                field => AskBimboField(inputFileName, field, pdfBytes),
+                ReadWithVision(pdfBytes, VisionVendor.Bimbo));
+        }
+        else
+        {
+            if (!UseBimboOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Bimbo ticket used the legacy PDF text reader "
+                + "after the operator approved that fallback."));
+            ticket = BimboPdfParser.Parse(
+                positionedLines.Select(l => l.Text).ToList(), warnings,
+                field => AskBimboField(inputFileName, field, pdfBytes));
+        }
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Bimbo", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1, "Bimbo"));
+            inputFileName, "Bimbo", ticket.Total, ticket.Lines.Count, 1, 1, "Bimbo"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
         var doc = new ConvertedDocument(
             OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
         return new Converted([doc], "PDF/Bimbo", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+    }
+
+    private bool UseBimboOcrFallback(string inputFileName)
+    {
+        if (_bimboOcrFallbackForBatch is bool decided) return decided;
+        _bimboOcrFallbackForBatch = _invoiceDetailsPrompt?.ConfirmBimboOcrFallback(inputFileName) == true;
+        return _bimboOcrFallbackForBatch.Value;
     }
 
     /// <summary>
@@ -594,7 +680,13 @@ public sealed class ConversionService : IFileConverter
     private string AskBimboField(string inputFileName, BimboUnknownField field, byte[] pdfBytes)
     {
         bool barcode = field.Field == LineField.Barcode;
-        string what = barcode ? "barcode" : "quantity";
+        string what = field.Field switch
+        {
+            LineField.Barcode => "barcode",
+            LineField.Units => "quantity",
+            LineField.UnitPrice => "unit price",
+            _ => "amount",
+        };
 
         if (_invoiceDetailsPrompt is null)
             throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
@@ -614,12 +706,29 @@ public sealed class ConversionService : IFileConverter
         // found from the printed heading and the figure is legible in the picture even though the
         // text layer never got it. Not for a barcode: that column is the first on the row with
         // nothing to its left, and a code the scan read is already marked exactly.
-        string? column = barcode || focusText is not null ? null : "RETAIL";
+        string? column = field.Field == LineField.Units && focusText is null ? "RETAIL" : null;
+
+        // Bimbo is a fixed form. These are the gaps between its printed columns, measured as page
+        // fractions so they survive scanner resolution changes. They are used only after both an
+        // exact token and the positioned heading fail. That is common precisely when a question is
+        // needed: the photograph still shows the figure but the hidden OCR text damaged it.
+        //
+        // Keeping this in the Bimbo adapter is deliberate. PdfRowSnipper knows how to draw a band;
+        // only this vendor knows that UPC is the first cell, QTY the fourth, PRICE the seventh and
+        // wholesale AMOUNT the eighth. This is form geometry, not a product catalogue.
+        PdfColumnBand fallbackColumn = field.Field switch
+        {
+            LineField.Barcode => new(0.025, 0.170),
+            LineField.Units => new(0.535, 0.600),
+            LineField.UnitPrice => new(0.775, 0.865),
+            _ => new(0.885, 0.985),
+        };
 
         var snip = field.LineNo > 0
             ? PdfRowSnipper.TryCut(
-                pdfBytes, field.LineNo, field.LineNo, focusText, field.LineNo, barcode,
-                columnLeftOf: column)
+                pdfBytes, field.LineNo, field.LineNo, focusText, field.LineNo,
+                lastOfDuplicates: field.Field == LineField.Amount, columnLeftOf: column,
+                fallbackColumn: fallbackColumn)
             : PdfRowSnipper.TryCutWholePage(pdfBytes, field.Page, field.PageUpsideDown);
 
         bool wholePage = field.LineNo <= 0 && snip is not null;
@@ -629,7 +738,13 @@ public sealed class ConversionService : IFileConverter
             field.ItemNumber, field.Description, field.PrintedValue, null, field.Amount, snip,
             snip is null || wholePage ? null : PdfRowSnipper.TryCutHeader(pdfBytes, field.LineNo),
             ColumnLegend: ColumnLegend(PdfVendor.Bimbo, credit: false),
-            ColumnName: barcode ? "" : "QTY",
+            ColumnName: field.Field switch
+            {
+                LineField.Units => "QTY",
+                LineField.UnitPrice => "PRICE",
+                LineField.Amount => "AMOUNT",
+                _ => "",
+            },
             Hint: Hint(wholePage, barcode
                 // Bimbo prints the body of the barcode only - no leading zero, no check digit - so
                 // ten is the whole of what is on the paper and a longer answer is somebody reading
@@ -672,7 +787,7 @@ public sealed class ConversionService : IFileConverter
             ReadWithVision(pdfBytes, VisionVendor.RedBull));
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Red Bull", ticket.Date, ticket.Total, ticket.Lines.Count, 1, 1,
+            inputFileName, "Red Bull", ticket.Total, ticket.Lines.Count, 1, 1,
             "Red Bull"));
 
         // Answers are remembered so a second pass can re-use them: the operator is never asked the
@@ -917,7 +1032,7 @@ public sealed class ConversionService : IFileConverter
     /// <summary>
     /// Gets from the operator what the ticket could not supply. The invoice number is always typed:
     /// it is the one field nothing can verify — no check digit, and the scanner mis-reads it
-    /// silently. The date is typed only when the scan destroyed it.
+    /// silently. The date follows the same rule and is always typed into an empty box.
     /// </summary>
     private InvoiceDetails AskInvoiceDetails(InvoiceDetailsRequest request)
     {

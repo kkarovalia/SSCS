@@ -57,7 +57,8 @@ internal sealed class InvoiceNumberDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         Font = new Font("Segoe UI", 10f);
-        // Sized from its contents, because the date box is only present on some tickets.
+        // Sized from its contents; the optional total box appears only when the scan lost that
+        // checksum. Invoice number and date are present and empty on every scanned invoice.
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         MinimumSize = new Size(500, 0);

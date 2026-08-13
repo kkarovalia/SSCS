@@ -383,26 +383,23 @@ Everything else reconciles arithmetically. This does not. So the operator types 
 scanned reading shown beside the box to compare against. Observed numbers are 12 digits beginning
 `0331`, but that is not enforced — SSCS accepts free text.
 
-### 7.2 The date — typed only when the scan destroyed it
+### 7.2 The date — typed into an empty box every time
 
 One ticket's header reads `DATE 12-14-Z023`: a single character of the year came out as a letter.
 Nothing else on that ticket is wrong, and its money reconciles line by line, so refusing the whole
 delivery over one character just sends the operator back to keying the invoice by hand.
 
-So a date that will not read is **not** a parse failure. `BlueBellSection.Date` is nullable, the
-date box appears on the dialog, and the operator keys `mm-dd-yyyy`.
+So a date that will not read is **not** a parse failure. `BlueBellSection.Date` remains useful for
+section boundaries, while the operator keys `mm-dd-yyyy` for the invoice on every ticket.
 
 Three rules keep that honest:
 
-- **The date is typed on every ticket** (changed 2026-08-11). The box is pre-filled with what the
-  scan read and what the operator confirms is what the invoice carries. A date that reads cleanly is
-  still not trusted: a wrong year is entirely plausible, checks nothing, and files the delivery into
-  the wrong period. `SuggestedDate` is never used on its own - a ticket whose date was destroyed and
-  whose operator typed none is still refused.
-- **A repaired reading is a suggestion, never the date.** `ReadDamagedDate` maps the letters the
-  scanner substitutes (`Z`→2, `O`→0, `l`→1 …) back to digits and insists on a real calendar date in
-  2000–2100, then offers the result for the operator to check against the paper. Mapping characters
-  is guesswork about a field with no checksum behind it, so it never stands on its own.
+- **The date is typed on every ticket.** The box is empty, just like the invoice-number box. A date
+  that reads cleanly is still not trusted: a wrong year is plausible, checks nothing, and files the
+  delivery into the wrong period. `InvoiceDetailsRequest` has no date field, so a scanned or repaired
+  value cannot become a pre-fill later.
+- **A repaired reading is internal only.** Character mapping may help identify a section boundary,
+  but it never reaches the operator or the invoice date.
 - **No date and no answer refuses the file** (`PDF_NO_DATE`). Year 0001 in SSCS would be worse than
   no file at all.
 

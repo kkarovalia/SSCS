@@ -85,16 +85,11 @@ Blue Bell (2026-07-26) broke two assumptions that were true while Dr Pepper was 
   only where a field genuinely cannot be verified — everything else on that ticket reconciles
   against its printed TOTAL and is parsed normally.
 
-The same prompt is the answer to a **damaged** header field, not just an unverifiable one. One Blue
-Bell ticket scanned as `DATE 12-14-Z023`; the rest of it was sound and its money reconciled, so it
-now asks for the date rather than refusing the delivery over a single character. Three rules make
-that safe, and are worth copying for any header field a future vendor loses:
-
-1. The parsed value always wins — the prompt is only consulted when parsing found nothing, so it
-   can never overwrite what the paper actually said.
-2. A repaired reading (letters mapped back to digits, then validated) is offered as a *suggestion*
-   to check against the paper, never used on its own.
-3. Nothing supplied still refuses the file. A placeholder is worse than no file.
+Invoice number and date now follow a stricter rule for every scanned vendor: both are typed into
+empty boxes on every invoice. Neither carries a checksum, and a plausible wrong scanned date can
+silently book the delivery into the wrong accounting period. `InvoiceDetailsRequest` carries no
+invoice-number or date value at all, so a future caller cannot reconnect a scanned suggestion.
+Nothing supplied still refuses the file; a placeholder is worse than no file.
 
 This applies to header fields only. A field that **proves** the parse — the printed TOTAL — can
 never be typed, because accepting a keyed figure removes the only check between a misread ticket
@@ -148,34 +143,35 @@ nothing downstream catches.
 Bimbo (2026-08-03) is the first vendor whose **barcodes cannot check themselves at all**: it prints
 the UPC-A body with the leading zero *and* the check digit removed, so a mis-read digit is completely
 silent — the money reconciles, the unit counts agree, and SSCS opens a new item under an id belonging
-to nothing. See [vendors/BIMBO.md](./vendors/BIMBO.md) §3. Three ideas worth reusing:
+to nothing. The OCR parser also proved unable to preserve every visibly readable row on these noisy
+receipt scans. Bimbo therefore became the first **picture-primary** vendor on 2026-08-13. See
+[vendors/BIMBO.md](./vendors/BIMBO.md). Four ideas are meant to be reused:
 
-- **When a code has no check digit, find a second encoding of the same product on the page.** Bimbo
-  prints its own item number in the next column, so the two columns check each other. This is
-  `ChubiwinosCatalog`'s idea used more aggressively — there it only replaced a code that had already
-  failed a check digit, here it is the *only* detector — so it is fenced twice: an entry may correct a
-  code only once **two separate tickets** agree on it, and only when the two codes are **one digit
-  apart**. Further apart means the item number is the damaged column, and following it would swap a
-  good barcode for an unrelated product's.
-- **A validated prefix is a cheap partial check digit.** Bimbo bills under three GS1 manufacturer
-  prefixes; a scanned prefix one digit from exactly one of them is repaired, an ambiguous one is
-  warned about. That alone caught six of the ten sample mis-reads.
-- **A printed count can be wrong too — cross-check it before refusing.** Chubiwinos treats a section's
-  unit count as a hard gate, which is right when it is the only one. Bimbo prints a count per band
-  *and* for the ticket, and one sample prints `RETURNS TOTAL -15` where its rows come to 16 and the
-  ticket's own `104` agrees with the rows. So a band count is overruled by the grand count when the
-  grand count matches the lines; only when **both** disagree is the ticket refused. A hard gate on a
-  figure that is itself OCR'd costs whole deliveries.
+- **Have the model read the whole invoice, then make Core prove it.** The first request copies every
+  row and the delivery, return, ticket and cash totals. Its vendor-specific prompt tells the model to
+  inspect each row twice and cross-check all four levels without changing a printed value. Core then
+  strictly parses the returned strings and independently repeats row, band and ticket arithmetic.
+  A disputed value is shown to the operator; model output is not serialized blindly.
+- **Verify check-digit-less UPCs with two different follow-up reads.** The second pass receives the
+  original page plus non-UPC row locators, never the first UPC. The third receives only one enlarged
+  UPC cell per row: no full invoice, description, item number, quantity, amount or prior answer. A
+  UPC is accepted only when all three independently return the same ten printed digits. Even a
+  two-to-one majority asks for that exact highlighted row; the August batch proved that two
+  full-page reads can repeat the same ambiguous glyph.
+- **Do not hardcode a product catalogue.** Bimbo buys new items continuously. Product-number → UPC
+  data in source made every new item a code change and rebuild, and stale mappings were another way
+  to turn a good read into the wrong product. The table was deleted; new products flow through the
+  three-read rule without a release.
+- **Keep fallback modes explicit.** If AI is unavailable before reading the page, the app asks once
+  per queue batch whether to use the legacy PDF text parser. If AI reaches the page but its result is
+  still incomplete or inconsistent after one fresh read, the page is rescanned. OCR values are never
+  mixed into a partial picture reading; its positioned text is used only to locate the row image for
+  an operator question.
 
-It also showed that **counting digits beats pattern-matching them**. PdfPig renders the same row as
-`74323-09513 008799`, `70870- 73400 014153` and `74323-0 951 3 008799`; a regex with lazy digit
-groups partitions the third wrongly and drops the row without a sound. Taking a fixed *number* of
-leading digits and ignoring the separators between them cannot make that mistake, and it doubles as
-the non-product-row filter.
-
-Finally, it settled that **no scanned invoice number may reach the prompt, for any vendor.**
-`InvoiceDetailsRequest` carries no suggestion field at all, so the box cannot be pre-filled by
-accident. See [vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §8.
+Finally, it settled that **no scanned invoice number or date may reach the prompt, for any vendor.**
+Both boxes start empty every time, and `InvoiceDetailsRequest` has neither field, so a scanned value
+cannot be wired in as a suggestion by accident. See
+[vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §8.
 
 ## What Red Bull added to the architecture
 

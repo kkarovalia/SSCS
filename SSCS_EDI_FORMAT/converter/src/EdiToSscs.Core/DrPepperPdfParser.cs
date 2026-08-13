@@ -955,8 +955,8 @@ public static partial class DrPepperPdfParser
             sum += amount;
         }
 
-        // Returns are the one thing on this invoice a person should eyeball, because they move stock
-        // the other way and because the ticket numbers them separately from the sale.
+        // Returns are normal vendor activity. Keep the count in the conversion details and log, but
+        // do not turn an otherwise verified invoice amber merely because stock moved back.
         int creditCount = items.Count(l => l.Units < 0);
         if (creditCount > 0)
         {
@@ -968,7 +968,8 @@ public static partial class DrPepperPdfParser
             warnings.Add(new ConversionWarning(0, PdfReasonCodes.CreditLines,
                 $"This invoice has {creditCount} credit line{(creditCount == 1 ? "" : "s")} — goods that went back on "
                 + "the truck. They go to SSCS as negative quantities at a positive cost, so the delivery nets out to "
-                + $"the printed total.{alsoNumbered}"));
+                + $"the printed total.{alsoNumbered}",
+                Routine: true));
         }
 
         if (items.Count == 0)

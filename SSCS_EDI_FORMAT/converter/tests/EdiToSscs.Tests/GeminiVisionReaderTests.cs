@@ -14,6 +14,7 @@ namespace EdiToSscs.Tests;
 public class GeminiVisionReaderTests
 {
     private const string Scan = @"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf";
+    private const string BimboScan = @"Fixtures\PDF\BIMBO_84294890013239_sscs_verified.pdf";
 
     /// <summary>
     /// Answers each request from a script and records what it was sent.
@@ -560,5 +561,70 @@ public class GeminiVisionReaderTests
         }
 
         Assert.All(Enum.GetValues<VisionVendor>(), v => Assert.Equal(Fields(v), Ordering(v)));
+    }
+
+    [Fact]
+    public void BimboThreePassesAreIndependentAndCannotCarryHeaderSuggestions()
+    {
+        const string primaryUpc = "7432309183";
+        var handler = new Stub(
+            Reply("""
+                {"rows":[{"itemNumber":"008788","description":"BIM PANQUE NUE FS FC",
+                "barcode":"7432309183","units":"4","price":"3.0100","amount":"12.04",
+                "isCredit":false}],"deliveryUnits":"4","deliveryAmount":"12.04",
+                "ticketUnits":"4","ticketTotal":"12.04","cashDue":"12.04"}
+                """),
+            Reply("""{"rows":[{"rowId":"p1-r1","barcode":"7432309183"}]}"""),
+            Reply("""{"rows":[{"rowId":"p1-r1","barcode":"7432309183"}]}"""));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        byte[] pdf = File.ReadAllBytes(BimboScan);
+        var reading = reader.ReadBimbo(pdf);
+        int lineNumber = PdfTextExtractor.ExtractPositionedLines(pdf)
+            .First(l => l.Text.Contains("008788", StringComparison.Ordinal)).LineNumber;
+        BimboBarcodeTarget[] targets =
+        [
+            new BimboBarcodeTarget(
+                "p1-r1", 1, 1, "008788", "BIM PANQUE NUE FS FC", "4", "12.04", lineNumber),
+        ];
+        var verified = reader.VerifyBimboBarcodes(pdf, targets);
+        var isolated = reader.VerifyBimboBarcodeCrops(pdf, targets);
+
+        Assert.Equal(BimboVisionStatus.Success, reading.Status);
+        Assert.Equal(BimboVisionStatus.Success, verified.Status);
+        Assert.Equal(BimboVisionStatus.Success, isolated.Status);
+        Assert.Equal(3, handler.Sent.Count);
+
+        using var first = JsonDocument.Parse(handler.Sent[0]);
+        string primaryPrompt = first.RootElement.GetProperty("contents")[0]
+            .GetProperty("parts")[1].GetProperty("text").GetString()!;
+        Assert.Contains("inspect each row twice", primaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("Ignore the printed invoice number and date", primaryPrompt, StringComparison.Ordinal);
+
+        using var second = JsonDocument.Parse(handler.Sent[1]);
+        string barcodePrompt = second.RootElement.GetProperty("contents")[0]
+            .GetProperty("parts")[1].GetProperty("text").GetString()!;
+        Assert.DoesNotContain(primaryUpc, barcodePrompt, StringComparison.Ordinal);
+        Assert.Contains("p1-r1", barcodePrompt, StringComparison.Ordinal);
+
+        using var third = JsonDocument.Parse(handler.Sent[2]);
+        var parts = third.RootElement.GetProperty("contents")[0].GetProperty("parts");
+        string cropPrompt = parts[0].GetProperty("text").GetString()!;
+        Assert.Contains("digit by digit", cropPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(primaryUpc, cropPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("008788", handler.Sent[2], StringComparison.Ordinal);
+        Assert.DoesNotContain("PANQUE", handler.Sent[2], StringComparison.Ordinal);
+        Assert.DoesNotContain("12.04", handler.Sent[2], StringComparison.Ordinal);
+
+        byte[] cropBytes = Convert.FromBase64String(parts[2]
+            .GetProperty("inline_data").GetProperty("data").GetString()!);
+        using var crop = new System.Drawing.Bitmap(new MemoryStream(cropBytes));
+        Assert.True(crop.Width > crop.Height * 3,
+            $"isolated UPC crop was unexpectedly {crop.Width}x{crop.Height}");
+
+        string combined = string.Concat(handler.Sent);
+        Assert.DoesNotContain("suggestedInvoice", combined, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("suggestedDate", combined, StringComparison.OrdinalIgnoreCase);
     }
 }

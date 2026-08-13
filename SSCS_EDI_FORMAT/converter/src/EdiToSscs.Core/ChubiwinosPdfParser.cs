@@ -57,8 +57,8 @@ public sealed class ChubiwinosTicket
     public required IReadOnlyList<ChubiwinosLine> Lines { get; init; }
 
     /// <summary>
-    /// Builds the final invoice. <paramref name="date"/> is only consulted when the ticket carried
-    /// no readable date of its own — the paper always wins. <paramref name="resolveGtin"/> supplies
+    /// Builds the final invoice. <paramref name="date"/> is always the operator-typed date;
+    /// the parsed date cannot override it. <paramref name="resolveGtin"/> supplies
     /// a barcode for the rows that need one; it is never called for a row that already has one.
     /// </summary>
     public Invoice ToInvoice(string invoiceNumber, DateOnly date, Func<ChubiwinosLine, string> resolveGtin)
@@ -68,8 +68,8 @@ public sealed class ChubiwinosTicket
         {
             SupplierName = ChubiwinosPdfParser.SupplierName,
             InvoiceNumber = invoiceNumber,
-            // The date the operator confirmed. It is typed on every invoice now, with what the scan
-            // read offered in the box, because a plausible wrong date is what this scanner produces
+            // The date the operator typed. The box starts empty because a plausible wrong date is
+            // what this scanner produces
             // and nothing in the file can catch one - see InvoiceDetailsRequest.NeedsDate.
             Date = date,
             Total = Total,
