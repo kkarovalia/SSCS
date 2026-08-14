@@ -25,6 +25,21 @@ wrong vendor is refused rather than mis-read.
 Only stage 1 differs per vendor. **Never hand-format XML inside a vendor parser** — always go
 through the one builder.
 
+### Dr Pepper and Bimbo are picture-primary
+
+Dr Pepper and Bimbo do not use the PDF OCR text layer as a value reader. Gemini reads and
+cross-checks the invoice picture. OCR is used only to locate exact highlight coordinates. OCR
+values must never override, reject, confirm, or modify Gemini values. The legacy OCR parser runs
+only after explicit once-per-batch approval when Gemini is unavailable; there is no silent fallback.
+
+Dr Pepper UPCs are read three independent times: primary full invoice, fresh full-page barcode-only
+verification with the first barcode withheld, and an isolated enlarged UPC-cell read cropped from
+Gemini's geometric cell box rather than OCR. All three
+must agree exactly and pass the UPC-A check digit. There is no product catalogue, manufacturer
+prefix, majority vote, padding or repair. Invoice number and date are not present in either AI
+schema and are typed into empty boxes. The legacy parser may read AMOUNT DUE for validation but
+must never ask the operator to type it or derive missing line values from it.
+
 ## What SSCS actually consumes
 
 SSCS (Computerized Daily Book, `sunrayasp.com`) is the **consumer**. Per line it reads

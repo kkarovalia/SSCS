@@ -24,6 +24,11 @@ public static class PdfReasonCodes
     public const string BarcodeRequired = "PDF_BARCODE_REQUIRED";
     /// <summary>A line the vendor billed without a barcode — a credit, or a mixed display shipper.</summary>
     public const string NoBarcode = "PDF_NO_BARCODE";
+    /// <summary>
+    /// A barcode that reads cleanly and passes its own check digit, but got fewer than the three
+    /// independent AI reads it is meant to get, because the extra passes could not run.
+    /// </summary>
+    public const string BarcodeUnconfirmed = "PDF_BARCODE_UNCONFIRMED";
     /// <summary>The invoice carries returned goods, sent as negative quantities.</summary>
     public const string CreditLines = "PDF_CREDIT_LINES";
     public const string VendorRequired = "PDF_VENDOR_REQUIRED";

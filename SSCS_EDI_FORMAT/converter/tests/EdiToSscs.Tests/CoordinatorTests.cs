@@ -240,4 +240,46 @@ public class CoordinatorTests
         Assert.Equal(FileStatus.Converted, first[0].Status);
         Assert.Equal(FileStatus.Converted, second[0].Status);
     }
+
+    /// <summary>
+    /// A converter that says what it is waiting on has that shown on the row it is waiting for, and
+    /// never over the outcome.
+    ///
+    /// Before this, a picture-primary invoice showed "Converting..." for the whole of three network
+    /// reads. A late line — a barcode pass finishing after the file was written — must not land on
+    /// top of the message the operator actually needs.
+    /// </summary>
+    private sealed class TalkativeConverter : IFileConverter, IProgressReportingConverter
+    {
+        public event Action<string>? Progress;
+
+        public ConversionOutcome ConvertFile(QueuedFile file, string destinationFolder)
+        {
+            Progress?.Invoke("Reading the invoice - try 1 of 8 sent (key 1, m). No reply yet.");
+            Progress?.Invoke("Reading the invoice - try 1 of 8: Google's AI is busy.");
+            return new ConversionOutcome { Success = true, UserMessage = "Converted 1 invoice." };
+        }
+
+        public void SaySomethingLate() => Progress?.Invoke("Checking the barcodes - try 2 of 8 sent.");
+    }
+
+    [Fact]
+    public async Task ConverterProgressIsShownOnTheConvertingRowAndNeverOverTheOutcome()
+    {
+        using var tmp = new TempDir();
+        var dest = new FakeDestination { CurrentFolder = tmp.Sub("out") };
+        var converter = new TalkativeConverter();
+        var coordinator = new ConversionCoordinator(converter, dest);
+        var details = new ConcurrentQueue<string>();
+        coordinator.FileChanged += f => details.Enqueue(f.Detail);
+        string input = PlaceFixture(tmp, @"EDI\EDI_GHRA_118955.txt", "EDI_GHRA_118955.txt");
+
+        var items = coordinator.Enqueue(new[] { input });
+        await coordinator.WhenIdleAsync();
+        converter.SaySomethingLate();
+
+        Assert.Contains(details, d => d.Contains("try 1 of 8 sent", StringComparison.Ordinal));
+        Assert.Contains(details, d => d.Contains("Google's AI is busy", StringComparison.Ordinal));
+        Assert.Equal("Converted 1 invoice.", items[0].Detail);
+    }
 }

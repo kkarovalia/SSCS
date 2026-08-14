@@ -3,9 +3,55 @@
 **Vendor:** Dr Pepper Bottling Company of Texas.  **Supplier name written:** `DR PEPPER`.
 **Input:** searchable PDF, one invoice per file.
 
-**Status: IMPLEMENTED & VERIFIED** for straight sales. **Credits are NOT yet round-tripped through
-live SSCS** — see the CREDITS section below; what SSCS does with a negative `InvoiceUnitQty` remains
-an open question.
+## Current production contract (2026-08-13)
+
+Dr Pepper is Gemini-first, following Bimbo's picture-primary design. Gemini reads the complete
+invoice picture and owns every invoice value. OCR is used only to locate exact highlight
+coordinates. OCR values must never override, reject, confirm, or modify Gemini values. The legacy
+OCR parser runs only after explicit once-per-batch approval when Gemini is unavailable.
+
+The primary full-invoice response returns every physical product row in order, its page, SALES or
+CREDITS section, section row order and occurrence, stable row id, item number, description,
+12-digit UPC/SKU, WHSLE where printed, CASES, UNITS, NET, TAX, AMOUNT, credit direction and page
+orientation. It also returns each package subtotal and its row ids, TOTAL SALE, sales/credit summary
+counts and amounts, and AMOUNT DUE. Numeric values remain strings until Core validates them. The
+schema has no invoice-number or invoice-date field; both operator boxes always begin empty.
+
+UPCs have three independent AI reads:
+
+1. the primary full-invoice read;
+2. a fresh full-page barcode-only read that receives non-barcode row locators and never sees pass
+   one's barcode;
+3. a fresh read of each isolated, enlarged UPC cell, cropped from Gemini's geometric cell box rather
+   than OCR, with no item, description, counts, money or previous barcode.
+
+All three must agree exactly on a valid 12-digit UPC-A. There is no majority vote, manufacturer
+prefix, product catalogue, 11-digit padding or repair. A missing or disagreeing pass asks only the
+affected UPC. A question is allowed only when OCR located the exact value coordinates; otherwise
+the operator is told to rescan. Every question shows only the photographed two-line product row,
+the invoice's own three-line section strip (SALES/CREDITS banner plus both header lines), and a box around only
+the requested UPC, UNITS or AMOUNT value. There is no synthetic column legend and no scrollable
+whole-invoice fallback. On the fixed form, the coordinate-only fallback bands are UPC 0.42-0.69,
+UNITS 0.34-0.43 and AMOUNT 0.82-0.99 of page width; they are used only after an exact token cannot
+be placed and never supply a value. The box uses the same shared translucent-gold wash and dark-gold
+edge as Bimbo because both vendors render through the same `SnipView` palette.
+
+Core independently validates sales `CASES x NET = AMOUNT`, package cases/units/amount, TOTAL SALE,
+the sales/credit summary, signed row money against AMOUNT DUE, and final rounded NAXML extensions
+against AMOUNT DUE. A failed check never derives or changes a value to make the arithmetic work.
+The legacy parser may read AMOUNT DUE for validation but must never ask the operator to type it or
+derive missing line values from it.
+
+Credits remain on the one payable as negative unit quantities and positive unit costs. Their
+informational warning is routine, so a successfully validated invoice stays green. Gemini replies,
+invoice contents, UPCs and amounts are not written to diagnostic logs.
+
+The remainder of this profile records the invoice evidence and the explicitly approved legacy OCR
+parser. Statements below that describe OCR as a value source apply only to that fallback.
+
+**Legacy evidence status:** straight-sales OCR parsing was implemented and verified. The
+picture-primary path now owns production conversion, and its routine-credit behavior is pinned by
+tests as negative quantity with positive cost on the same payable.
 
 Confirmed in live SSCS twice:
 
@@ -204,7 +250,7 @@ destroyed it and the page cannot settle it, so a clean invoice shows exactly one
 |------|--------------|-----|
 | Invoice number | **Always asked**, box always empty | It is the last figure on the page nothing can check, and this scanner flips digits in short numeric fields — see below |
 | Date | Shown in that same window; a box only if destroyed | Being shown while the operator holds the paper is the only check it can have |
-| AMOUNT DUE | Shown; a box only if destroyed | Typing it *restores* the sum-must-match gate with a human-read figure |
+| AMOUNT DUE | Validation only | Gemini reads it. The legacy parser may read it for validation, but the operator is never asked to type it and no line value is derived from it. |
 | A row's UNITS | Package subtotal first, then asked | See the section above |
 | A row's AMOUNT | Asked — **never** derived | See below |
 | A barcode (bad check digit, or a product line that did not read at all) | Asked | The money reconciles whatever code goes out, so nothing else can catch it |

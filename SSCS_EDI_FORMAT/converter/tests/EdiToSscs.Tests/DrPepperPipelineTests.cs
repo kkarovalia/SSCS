@@ -33,6 +33,7 @@ public class DrPepperPipelineTests
     /// </summary>
     private sealed class ScriptedPrompt(string? invoiceNumber) : IInvoiceDetailsPrompt
     {
+        public bool ConfirmDrPepperOcrFallback(string fileName) => true;
         private static readonly Dictionary<string, string> Paper = new(StringComparer.Ordinal)
         {
             // 5218300220 - "115.95 1 1. 11S.95" under a "PEG 1 1 115.95" subtotal
@@ -186,6 +187,13 @@ public class DrPepperPipelineTests
             Assert.Equal("UNITS", r.ColumnName);
             Assert.NotNull(r.Snip);
             Assert.NotNull(r.Header);
+            Assert.False(r.WholePage);
+            Assert.Equal("", r.ColumnLegend);
+            Assert.True(r.Snip!.FocusWidth > 0 && r.Snip.FocusWidth < r.Snip.Width * 0.22,
+                "the approved legacy path must still box only the requested UNITS value");
+            Assert.True(r.Snip.Height > r.Snip.FocusHeight,
+                "the crop must show the two-line product while marking only its priced line");
+            Assert.Equal(0, r.Header!.FocusHeight);
         });
     }
 

@@ -3,7 +3,8 @@ using EdiToSscs.Core;
 namespace EdiToSscs.Tests;
 
 /// <summary>
-/// Proofs that the strip of column names above a row is always there, and always the right one.
+/// Proofs for vendors that permit a typed column-name fallback. Dr Pepper no longer does: its
+/// AI-primary and approved-legacy regression tests require the real photographed section header.
 ///
 /// The strip is not decoration and it is not the answer to the question — it is what makes the
 /// answer readable. A snip is two printed lines cut out of the middle of a ticket, and by item 16
@@ -13,8 +14,7 @@ namespace EdiToSscs.Tests;
 ///
 /// <see cref="PdfRowSnipper.TryCutHeader"/> cuts the printed one where it can, and that is the
 /// better article because it is **aligned** — same page, same width, UNITS over the units. This
-/// covers the fallback for the three ways that fails: a Dr Pepper header the scan chewed up until it
-/// no longer reads as one, a Red Bull page where none was found, and a row with no line number.
+/// covers the fallback for Red Bull or Bimbo when a printed header cannot be located.
 ///
 /// The section matters as much as the vendor. Dr Pepper's CREDITS block prints a **shorter column
 /// set** with no WHSLE, so a sales legend over a credit row would have the operator counting across
@@ -30,6 +30,7 @@ public class ColumnLegendTests
 
     private sealed class ScriptedPrompt(string invoiceNumber) : IInvoiceDetailsPrompt
     {
+        public bool ConfirmDrPepperOcrFallback(string fileName) => true;
         public List<LineFieldRequest> LineFields { get; } = [];
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 
@@ -76,7 +77,7 @@ public class ColumnLegendTests
     /// reads left to right off the strip onto the row, and a reversed legend sends them to the SKU
     /// when the question is about the barcode.
     /// </summary>
-    [Fact]
+    [Fact(Skip = "Superseded by Dr Pepper exact-value AI-primary highlight tests.")]
     public void ADrPepperSalesQuestionCarriesTheSalesColumns()
     {
         using var tmp = new TempDir();
@@ -123,7 +124,7 @@ public class ColumnLegendTests
     /// place: they count across to what the strip calls UNITS and read the CASES figure. The money
     /// then reconciles against a count belonging to nothing, which is the quiet kind of wrong.
     /// </summary>
-    [Fact]
+    [Fact(Skip = "Superseded by Dr Pepper exact-value AI-primary highlight tests.")]
     public void ADrPepperCreditQuestionCarriesTheCreditColumns()
     {
         using var tmp = new TempDir();
@@ -298,7 +299,7 @@ public class ColumnLegendTests
     /// (the position cannot be had, and a box on a guessed row gets typed in), but the operator now
     /// knows what the columns are called.
     /// </summary>
-    [Fact]
+    [Fact(Skip = "Whole-page Dr Pepper questions are intentionally forbidden; rescan is required.")]
     public void AWholePageQuestionStillNamesTheColumns()
     {
         using var tmp = new TempDir();

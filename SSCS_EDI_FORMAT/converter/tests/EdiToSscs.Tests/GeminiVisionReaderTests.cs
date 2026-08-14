@@ -67,6 +67,34 @@ public class GeminiVisionReaderTests
     /// <summary>One key, one model — so these tests are about the reply and not the fallback chain.</summary>
     private static readonly string[] OneModel = ["gemini-test"];
 
+    /// <summary>
+    /// The ladder, best first, and **no Flash-Lite rung at all**.
+    ///
+    /// This is not an oversight to be tidied up later. Once both Flash models had run out of free
+    /// allowance on 2026-08-13 every remaining invoice was read by Flash-Lite, and that is where
+    /// the day's transposed and duplicated barcode digits came from — one ticket lost a whole
+    /// $24.85 row that way while reporting itself fine. Running out of Flash now reports the reader
+    /// unavailable, which asks before falling back, rather than answering badly without saying so.
+    ///
+    /// Every name here was checked against the account's own models.list on 2026-08-13. A model
+    /// that does not exist is not a slower rung, it is a 404 on every request against it — there is
+    /// no `gemini-3.1-flash` or `gemini-3-flash`, and `gemini-3.7-flash` does exist.
+    /// </summary>
+    [Fact]
+    public void SharedDefaultsAreFullFlashOnly()
+    {
+        Assert.Equal(
+            [
+                "gemini-3.7-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+            ],
+            GeminiVisionReader.DefaultModels);
+        Assert.Equal("gemini-3.7-flash", GeminiVisionReader.DefaultModel);
+        Assert.DoesNotContain(GeminiVisionReader.DefaultModels,
+            m => m.Contains("lite", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static (VisionReading Reading, Stub Handler) Read(params HttpResponseMessage[] replies)
     {
         var handler = new Stub(replies);
@@ -276,11 +304,10 @@ public class GeminiVisionReaderTests
     }
 
     /// <summary>
-    /// Every model on a key is tried before the next key is touched, which keeps one shop's work on
-    /// one account for as long as that account can carry it.
+    /// Every key gets the preferred model before any key gets the lower-quality fallback model.
     /// </summary>
     [Fact]
-    public void EveryModelOnAKeyIsTriedBeforeTheNextKey()
+    public void EveryKeyGetsThePreferredModelBeforeAnyFallbackModel()
     {
         var handler = new Router((key, _) =>
             key == "k1" ? Raw("empty", HttpStatusCode.TooManyRequests) : Rows());
@@ -290,7 +317,7 @@ public class GeminiVisionReaderTests
             .TryRead(File.ReadAllBytes(Scan), VisionVendor.RedBull);
 
         Assert.NotEmpty(reading.Rows);
-        Assert.Equal(["k1/m1", "k1/m2", "k2/m1", "k2/m1"], handler.Tried);
+        Assert.Equal(["k1/m1", "k2/m1", "k2/m1"], handler.Tried);
     }
 
     /// <summary>
@@ -325,7 +352,26 @@ public class GeminiVisionReaderTests
             .TryRead(File.ReadAllBytes(Scan), VisionVendor.RedBull);
 
         Assert.Empty(reading.Rows);
-        Assert.Equal(["k1/m1", "k1/m2", "k2/m1", "k2/m2"], handler.Tried.Take(4));
+        Assert.Equal(["k1/m1", "k2/m1", "k1/m2", "k2/m2"], handler.Tried.Take(4));
+    }
+
+    [Fact]
+    public void AnyNumberOfKeysIsExhaustedOnThePreferredModelBeforeTheFallbackModel()
+    {
+        var handler = new Router((_, _) => Raw("empty", HttpStatusCode.TooManyRequests));
+
+        new GeminiVisionReader(
+                ["k1", "k2", "k3", "k4", "k5"], ["flash", "flash-lite"],
+                new HttpClient(handler), NoWait)
+            .TryRead(File.ReadAllBytes(Scan), VisionVendor.RedBull);
+
+        Assert.Equal(
+            [
+                "k1/flash", "k2/flash", "k3/flash", "k4/flash", "k5/flash",
+                "k1/flash-lite", "k2/flash-lite", "k3/flash-lite", "k4/flash-lite",
+                "k5/flash-lite",
+            ],
+            handler.Tried.Take(10));
     }
 
     /// <summary>A PDF that was never a scan has no picture to read, and nothing is sent.</summary>

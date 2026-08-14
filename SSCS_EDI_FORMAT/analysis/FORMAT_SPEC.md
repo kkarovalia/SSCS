@@ -226,6 +226,26 @@ before reading, the operator may approve the legacy text parser once per queue b
 that remains structurally inconsistent after retry is a rescan, never a mixture of AI and OCR
 figures.
 
+Dr Pepper uses the same value boundary with a vendor-specific schema. Gemini's primary request sees
+the complete invoice and returns physical rows, package subtotals, TOTAL SALE, sales/credit summary
+and AMOUNT DUE as strings. OCR is used only to locate exact highlight coordinates. OCR values must
+never override, reject, confirm, or modify Gemini values. The legacy OCR parser runs only after
+explicit once-per-batch approval when Gemini is unavailable.
+
+Every Dr Pepper UPC is read independently three times: full-invoice primary, full-page barcode-only
+verification without pass-one UPCs, and isolated enlarged UPC cells cropped from Gemini's geometric
+cell boxes rather than OCR. Unanimous exact 12-digit UPC-A
+agreement is required; no catalogue, prefix, padding, repair or majority vote is allowed. Invoice
+number and date are absent from the AI schema and are always typed into empty boxes. The legacy
+parser may read AMOUNT DUE for validation but must never ask the operator to type it or derive
+missing line values from it. Routine credits serialize as negative quantities with positive costs
+and do not turn a successful conversion amber.
+
+A Dr Pepper value question is permitted only with three visual pieces: the cropped two-line
+product, a box around only the requested field, and the invoice's photographed three-line section
+strip (SALES/CREDITS banner plus both column-header lines). Dr Pepper has no synthetic header and no
+unmarked whole-page fallback; missing geometry is a rescan.
+
 ### Vendor resolution
 
 SSCS keeps a **Map Supplier to Vendor** table keyed on the `Supplier/Name` text (truncated to

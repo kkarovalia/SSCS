@@ -23,38 +23,82 @@ namespace EdiToSscs.Core;
 /// unavailable separately from unreadable: unavailable can offer the operator-approved OCR fallback,
 /// while a model that reached the page but could not produce a consistent invoice requires a rescan.
 /// </summary>
-public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReader
+public sealed class GeminiVisionReader
+    : IInvoiceVisionReader, IBimboVisionReader, IDrPepperVisionReader, IVisionProgressReporter
 {
+    /// <summary>
+    /// What the operator is told is happening, in the words of the job rather than the protocol.
+    /// Three passes read one invoice, and "Converting..." for all three of them is what made a
+    /// hundred-second read look like a hung window.
+    /// </summary>
+    private const string ReadingPhase = "Reading the invoice";
+    private const string BarcodePhase = "Checking the barcodes";
+    private const string CloseUpPhase = "Checking each barcode close up";
+
     /// <summary>
     /// The model to read with.
     ///
-    /// **Not the newest one.** Measured against the store's own key on 2026-08-11: `gemini-3.6-flash`
-    /// allows **twenty requests a day** on the free tier, and a page is one request — so a single
-    /// period's invoices exhaust it before they are half done, and every file after that silently
-    /// loses its second reader. `gemini-3.5-flash` answers on the same key with quota to spare.
-    /// `gemini-3.5-flash-lite` also answers and is the fallback if this one is ever capped too;
-    /// the model is a setting, so the store can change it without a new build.
+    /// The store's proven primary reader. Newer and lighter stable multimodal models remain behind
+    /// it as separate quota pools; the model is also a setting, so the store can change the order.
     /// </summary>
-    public const string DefaultModel = "gemini-3.5-flash";
+    public const string DefaultModel = "gemini-3.7-flash";
 
     /// <summary>
-    /// The models to fall through, best first. Each carries **its own quota**, so a key with nothing
-    /// left on one will often still answer on the next — which is why this list exists and why it is
-    /// the first thing tried when a request comes back throttled. `flash-lite` is a smaller model and
-    /// a slightly worse reader, which is the right way round: a second opinion from the small model
-    /// still has to be confirmed by the paper before any figure is taken.
+    /// Stable image/PDF readers, quality-first. Every configured key is tried on one model before
+    /// the reader advances to the next.
+    ///
+    /// **Full Flash only — no Flash-Lite rung, deliberately** (2026-08-13). Which rung answered
+    /// decides how good the reading is, and the day this was settled the allowance ran out on both
+    /// Flash models by early afternoon: every conversion after that came off Flash-Lite, and that
+    /// is where the day's transposed and duplicated barcode digits came from. One ticket read on
+    /// Lite silently dropped a whole $24.85 row; the same file on full Flash came back complete and
+    /// exact to the cent in 21 seconds.
+    ///
+    /// Removing the rung means that when every Flash model is exhausted the reader reports itself
+    /// unavailable instead of quietly answering badly — which offers the legacy parser with an
+    /// explicit approval rather than shipping a worse reading nobody was told about. That is the
+    /// intended trade and it is the store's call, not a limitation.
+    ///
+    /// **Every name here was checked against the account's own `models.list` on 2026-08-13.** A
+    /// model that does not exist is not a slower fall-through, it is a 404 on every request against
+    /// that rung. There is no `gemini-3.1-flash` or `gemini-3-flash` — those ship only as `-lite`,
+    /// `-image` or `-preview` variants — and `gemini-3.7-flash` does exist, which is why it is the
+    /// top rung.
     /// </summary>
-    public static readonly string[] DefaultModels = [DefaultModel, "gemini-3.5-flash-lite"];
+    public static readonly string[] DefaultModels =
+    [
+        DefaultModel,
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ];
 
     private const string Endpoint = "https://generativelanguage.googleapis.com/v1beta/models";
 
-    /// <summary>
-    /// Long enough for a full-page scan on a slow line, short enough that a hung request does not
-    /// look like a hung application. A timeout is just an empty reading.
-    /// </summary>
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(90);
+    /// <summary>The settings-page key check is tiny and should not wait forever on a dead connection.</summary>
+    private static readonly TimeSpan KeyCheckTimeout = TimeSpan.FromSeconds(30);
 
-    private static readonly HttpClient Shared = new() { Timeout = RequestTimeout };
+    /// <summary>
+    /// How much room the reply is given, in tokens.
+    ///
+    /// This used to be unset, which is not "no limit" — it is the model's own default, and on the
+    /// newer thinking models the reasoning is spent out of the same budget before a single character
+    /// of the answer is written. A full Dr Pepper page is nineteen rows of twenty fields plus eleven
+    /// package subtotals, so the JSON alone is thousands of tokens; add thinking and the reply gets
+    /// cut off mid-object. What comes back then is a 200 with a truncated or empty candidate, which
+    /// this class could only call "incomplete" — and it looked for all the world like the model
+    /// being bad at reading invoices. On 2026-08-13 `gemini-3.6-flash` did exactly that three runs
+    /// running, spending 35 to 78 seconds each time to return nothing usable, while the smaller
+    /// models answered the same page completely in fifteen.
+    ///
+    /// Sized for a page far bigger than any the store has sent. It costs nothing when unused: this
+    /// is a ceiling, not an allocation.
+    /// </summary>
+    private const int OutputRoom = 65536;
+
+    // Invoice reads have no client-side deadline. If Gemini accepted a request and is still working,
+    // let it finish. Explicit HTTP quota/overload responses still advance to the next key/model at
+    // once; only the optional settings-page key check has a short diagnostic timeout.
+    private static readonly HttpClient Shared = new() { Timeout = Timeout.InfiniteTimeSpan };
 
     /// <summary>
     /// How long to wait after being throttled, per attempt.
@@ -74,6 +118,12 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     private readonly TimeSpan[] _backoff;
 
     /// <summary>
+    /// How long to keep going back to a model that says it is busy. Injectable so the suite can
+    /// prove the behaviour without spending two real minutes doing it.
+    /// </summary>
+    private readonly TimeSpan[] _busyWaits;
+
+    /// <summary>
     /// Where the last successful request came from, so the next page starts there instead of
     /// re-probing combinations already known to be empty. An invoice is several pages and a quota
     /// does not refill between them.
@@ -81,8 +131,10 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     private int _at;
 
     public GeminiVisionReader(
-        string apiKey, string? model = null, HttpClient? http = null, TimeSpan[]? backoff = null)
-        : this([apiKey], string.IsNullOrWhiteSpace(model) ? null : [model], http, backoff)
+        string apiKey, string? model = null, HttpClient? http = null, TimeSpan[]? backoff = null,
+        TimeSpan[]? busyWaits = null)
+        : this([apiKey], string.IsNullOrWhiteSpace(model) ? null : [model], http, backoff,
+            busyWaits)
     {
     }
 
@@ -91,16 +143,21 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     /// note that spreading one workload over several accounts to get past a quota is what Google
     /// calls circumvention, and the account it suspends is the one currently working.
     /// </param>
-    /// <param name="models">Models to fall through per key; null for <see cref="DefaultModels"/>.</param>
+    /// <param name="models">Models to fall through after every key; null for <see cref="DefaultModels"/>.</param>
+    /// <param name="busyWaits">
+    /// Waits between retries of a model that answered 503; null for <see cref="BusyModelWaits"/>.
+    /// An empty array retries without waiting, which is only ever what a test wants.
+    /// </param>
     public GeminiVisionReader(
         IReadOnlyList<string>? apiKeys, IReadOnlyList<string>? models = null,
-        HttpClient? http = null, TimeSpan[]? backoff = null)
+        HttpClient? http = null, TimeSpan[]? backoff = null, TimeSpan[]? busyWaits = null)
     {
         _keys = [.. (apiKeys ?? []).Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim())];
         _models = [.. (models ?? []).Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m.Trim())];
         if (_models.Length == 0) _models = DefaultModels;
         _http = http ?? Shared;
         _backoff = backoff ?? Backoff;
+        _busyWaits = busyWaits ?? BusyModelWaits;
     }
 
     /// <summary>True when a key is configured at all. No key is not an error, just no second reader.</summary>
@@ -110,11 +167,26 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     private int Combinations => _keys.Length * _models.Length;
 
     /// <summary>
-    /// The n-th pair. Models cycle fastest, so a key is exhausted across every model before the next
-    /// key is touched — which is the order that keeps one account's work on one account.
+    /// The n-th pair. Keys cycle fastest, so the preferred model is tried on every configured
+    /// account before any account falls back to the lower-quality model.
     /// </summary>
     private (string Key, string Model) Pair(int index) =>
-        (_keys[index / _models.Length], _models[index % _models.Length]);
+        (_keys[index % _keys.Length], _models[index / _keys.Length]);
+
+    /// <summary>
+    /// What one attempt against one key and model came back as.
+    ///
+    /// These are kept apart because until 2026-08-13 they all reached the log as the single word
+    /// **throttled**, and they are five different faults. A 429 is the free allowance gone and it
+    /// comes back tomorrow. A 503 is Google's model busy and it comes back in a minute. A 400 or a
+    /// 403 says this request or this key is wrong and no later attempt fixes it. A dropped
+    /// connection never reached Google at all, so the store's network is the thing to look at. And
+    /// an HTTP 200 that does not validate is the model answering badly, which is the only one of
+    /// them worth asking the same combination again about. A log that calls all five the same word
+    /// cannot tell anybody which happened — the 12:38 run read "8 throttled" for six 503s and two
+    /// 429s, and those want opposite responses.
+    /// </summary>
+    private enum AttemptOutcome { Read, Incomplete, RateLimited, Overloaded, Refused, Network, Canceled }
 
     /// <summary>
     /// What one read cost, tallied as it happens so <see cref="VisionReading.Note"/> can say where
@@ -122,8 +194,20 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     /// </summary>
     private sealed class Tally
     {
-        public int Pages, Requests, Throttled, TimedOut;
+        public int Pages;
+        public int Requests { get; private set; }
         public double Waited;
+        private readonly Dictionary<AttemptOutcome, int> _counts = [];
+        public List<string> Failures { get; } = [];
+
+        public int Count(AttemptOutcome outcome) => _counts.GetValueOrDefault(outcome);
+
+        public void Record(AttemptOutcome outcome, int keyNumber, string model, string? reason)
+        {
+            Requests++;
+            _counts[outcome] = Count(outcome) + 1;
+            if (reason is not null) Failures.Add($"key {keyNumber}/{model}: {reason}");
+        }
 
         public string Describe(long ms, int rows)
         {
@@ -133,13 +217,58 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
                 $"{Requests} request{(Requests == 1 ? "" : "s")}",
                 $"{rows} row{(rows == 1 ? "" : "s")} read",
             };
-            if (Throttled > 0) parts.Add($"{Throttled} throttled");
-            if (TimedOut > 0) parts.Add($"{TimedOut} timed out");
+            Add(AttemptOutcome.RateLimited, "out of free allowance (HTTP 429)");
+            Add(AttemptOutcome.Overloaded, "model busy (HTTP 5xx)");
+            Add(AttemptOutcome.Refused, "refused (other HTTP error)");
+            Add(AttemptOutcome.Network, "could not reach Google");
+            Add(AttemptOutcome.Canceled, "no reply came back");
+            Add(AttemptOutcome.Incomplete, "answered but incomplete (HTTP 200)");
             if (Waited > 0) parts.Add($"waited {Waited:0}s on the free allowance");
+            if (Failures.Count > 0) parts.Add($"failures [{string.Join("; ", Failures)}]");
             parts.Add($"{ms / 1000.0:0.0}s total");
             return string.Join(", ", parts);
+
+            void Add(AttemptOutcome outcome, string label)
+            {
+                int count = Count(outcome);
+                if (count > 0) parts.Add($"{count} {label}");
+            }
         }
     }
+
+    /// <summary>
+    /// Where to say which attempt is outstanding, so a slow read is not a silent one. Optional;
+    /// null is the silence this had before 2026-08-13, when a conversion that spent minutes inside
+    /// one HTTPS call was indistinguishable from a hung application.
+    ///
+    /// **Only what is actually known is said.** A synchronous HTTPS call either returns or it does
+    /// not; nothing in it reports whether the far end is working. So this says which try is out and
+    /// what the finished ones came back as, and never that Google is "processing".
+    /// </summary>
+    public Action<string>? Progress { get; set; }
+
+    private void Report(string phase, string what)
+    {
+        Action<string>? sink = Progress;
+        if (sink is null || phase.Length == 0) return;
+        try { sink($"{phase} - {what}"); }
+        catch
+        {
+            // Progress is decoration. A subscriber throwing must never fail the conversion it is
+            // describing.
+        }
+    }
+
+    private static string Describe(AttemptOutcome outcome) => outcome switch
+    {
+        AttemptOutcome.RateLimited => "today's free AI allowance is used up",
+        AttemptOutcome.Overloaded => "Google's AI is busy",
+        AttemptOutcome.Refused => "Google refused the request",
+        AttemptOutcome.Network => "could not reach Google",
+        AttemptOutcome.Canceled => "no reply came back",
+        AttemptOutcome.Incomplete => "the reply was incomplete",
+        _ => "read",
+    };
 
     public VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor)
     {
@@ -189,6 +318,48 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     }
 
     /// <summary>
+    /// Reads the complete Dr Pepper invoice in one picture request. The response has no invoice
+    /// number or date fields, and OCR is not consulted for any value.
+    /// </summary>
+    public DrPepperVisionReading ReadDrPepper(byte[] pdfBytes)
+    {
+        if (!IsConfigured) return DrPepperVisionReading.Unavailable("AI reading is not configured.");
+        if (pdfBytes is null || pdfBytes.Length == 0)
+            return DrPepperVisionReading.Unreadable("The PDF had no page image to read.");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
+        bool reachedApi = false;
+        try
+        {
+            var pages = PdfPageImages.TryReadAll(pdfBytes);
+            if (pages.Count == 0)
+                return DrPepperVisionReading.Unreadable("The PDF had no page image to read.");
+            tally.Pages = pages.Count;
+
+            string body = BuildDrPepperPrimaryBody(pages);
+            var reading = ReadSpecialPage(
+                body, tally, ParseDrPepperReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null || reading.Rows.Count == 0
+                || string.IsNullOrWhiteSpace(reading.AmountDue))
+                return reachedApi
+                    ? DrPepperVisionReading.Unreadable(note)
+                    : DrPepperVisionReading.Unavailable(note);
+
+            return reading with { Status = DrPepperVisionStatus.Success, Note = note };
+        }
+        catch
+        {
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? DrPepperVisionReading.Unreadable(note)
+                : DrPepperVisionReading.Unavailable(note);
+        }
+    }
+
+
+    /// <summary>
     /// Reads Bimbo as the source invoice rather than as a confirmation of OCR. This deliberately
     /// uses its own prompt, schema and result type: changing it must not change one byte of the
     /// established Dr Pepper or Red Bull requests.
@@ -216,7 +387,8 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             for (int number = 1; number <= pages.Count; number++)
             {
                 string body = BuildBimboPrimaryBody(pages[number - 1]);
-                var page = ReadSpecialPage(body, tally, ParseBimboReply, out bool answered);
+                var page = ReadSpecialPage(
+                    body, tally, ParseBimboReply, out bool answered, ReadingPhase);
                 reachedApi |= answered;
                 if (page is null) continue;
 
@@ -293,7 +465,8 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
                 var ids = wanted.Select(t => t.RowId).ToHashSet(StringComparer.Ordinal);
                 string body = BuildBimboBarcodeBody(pages[group.Key - 1], wanted);
                 var page = ReadSpecialPage(
-                    body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered);
+                    body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered,
+                    BarcodePhase);
                 reachedApi |= answered;
                 if (page is not null) rows.AddRange(page.Rows);
             }
@@ -356,7 +529,8 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             var ids = crops.Select(c => c.RowId).ToHashSet(StringComparer.Ordinal);
             string body = BuildBimboBarcodeCropBody(crops);
             var reply = ReadSpecialPage(
-                body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered);
+                body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered,
+                CloseUpPhase);
             reachedApi |= answered;
 
             string note = tally.Describe(clock.ElapsedMilliseconds, reply?.Rows.Count ?? 0);
@@ -455,7 +629,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
         for (int i = 0; i < Combinations; i++)
         {
             var (key, model) = Pair(i);
-            int which = (i / _models.Length) + 1;
+            int which = (i % _keys.Length) + 1;
             string named = _keys.Length > 1 ? $"key {which} on {model}" : model;
 
             int status = Ping(key, model, ref offline);
@@ -493,7 +667,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
                 """{"contents":[{"parts":[{"text":"Reply with the word ready."}]}]}""",
                 Encoding.UTF8, new MediaTypeHeaderValue("application/json"));
 
-            using var cancel = new CancellationTokenSource(RequestTimeout);
+            using var cancel = new CancellationTokenSource(KeyCheckTimeout);
             using var response = _http.Send(request, cancel.Token);
             return (int)response.StatusCode;
         }
@@ -509,13 +683,6 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     }
 
     /// <summary>
-    /// One page, read — waiting out a throttle rather than giving up on it.
-    ///
-    /// Only a 429 and a 5xx are worth retrying: those say "ask again later". A 400 or a 403 says the
-    /// request or the key is wrong and asking again just wastes the allowance the operator is
-    /// waiting on.
-    /// </summary>
-    /// <summary>
     /// One page, read — trying every key and model before waiting on any of them.
     ///
     /// The order matters. A throttled request means *this* key has nothing left on *this* model, and
@@ -525,11 +692,19 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     ///
     /// A 400 or a 403 is different: it says the request or the key is wrong, not early. That
     /// combination is skipped and never waited on.
+    ///
+    /// This is Red Bull's optional **second** reader, and it keeps its quota wait for the reason the
+    /// wait was measured for: thirty-five invoices dropped on the converter at once will exhaust the
+    /// free minute, and without the wait every file after the first dozen silently loses its second
+    /// opinion. Nothing here is the source of an invoice, so a slow one costs time and no accuracy.
+    /// The picture-primary vendors do not go through this method — see
+    /// <see cref="ReadSpecialPage{T}"/>, which never sleeps.
     /// </summary>
     private VisionReading? ReadPage(byte[] png, VisionVendor vendor, Tally tally)
     {
         if (Combinations == 0) return null;
         string body = BuildBody(png, vendor);
+        const string phase = "Reading the picture";
 
         for (int round = 0; ; round++)
         {
@@ -538,131 +713,173 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             for (int tried = 0; tried < Combinations; tried++)
             {
                 int index = (_at + tried) % Combinations;
-                var (key, model) = Pair(index);
-
-                tally.Requests++;
-                var reading = TryOnce(body, key, model, out bool throttled, out bool timedOut);
-                if (throttled) tally.Throttled++;
-                if (timedOut) tally.TimedOut++;
+                var reading = Attempt(
+                    index, body, tally, ParseReply, phase, tried + 1, Combinations,
+                    out _, out AttemptOutcome outcome);
                 if (reading is not null)
                 {
                     _at = index;          // start here next page rather than re-probing empty quotas
                     return reading;
                 }
-                anythingWorthWaitingFor |= throttled;
+                anythingWorthWaitingFor |= outcome
+                    is AttemptOutcome.RateLimited or AttemptOutcome.Overloaded
+                    or AttemptOutcome.Network or AttemptOutcome.Canceled;
             }
 
             // Every key on every model is empty. Waiting is the only thing left, and only for as
             // long as the quota window - beyond that the conversion goes on without a second reader.
             if (!anythingWorthWaitingFor || round >= _backoff.Length) return null;
             tally.Waited += _backoff[round].TotalSeconds;
+            Report(phase, $"nothing answered; waiting {_backoff[round].TotalSeconds:0} seconds for "
+                          + "the free allowance");
             Thread.Sleep(_backoff[round]);
-        }
-    }
-
-    /// <summary>
-    /// One request against one key and model. Null for any failure; <paramref name="throttled"/>
-    /// says whether asking again later could plausibly work.
-    /// </summary>
-    private VisionReading? TryOnce(
-        string body, string key, string model, out bool throttled, out bool timedOut)
-    {
-        throttled = false;
-        timedOut = false;
-        try
-        {
-            using var request = new HttpRequestMessage(
-                HttpMethod.Post, $"{Endpoint}/{model}:generateContent");
-            request.Headers.TryAddWithoutValidation("x-goog-api-key", key);
-            request.Content = new StringContent(
-                body, Encoding.UTF8, new MediaTypeHeaderValue("application/json"));
-
-            using var cancel = new CancellationTokenSource(RequestTimeout);
-            using var response = _http.Send(request, cancel.Token);
-
-            if (response.IsSuccessStatusCode)
-            {
-                using var stream = response.Content.ReadAsStream(cancel.Token);
-                return ParseReply(stream);
-            }
-
-            throttled = (int)response.StatusCode == 429 || (int)response.StatusCode >= 500;
-            return null;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
-        {
-            // A dropped line is worth another go; the next key is on the same wire, so this is the
-            // one case where moving on will not help and waiting might.
-            //
-            // Counted separately from a real 429 because the two look identical from here and cost
-            // wildly different amounts of time: a throttle answers in milliseconds and is paid for
-            // in the sleep below, while a request that runs out the 90-second clock has already
-            // spent that before anything is retried. On a long ticket that is most of the wait, and
-            // the log is the only place the difference shows.
-            throttled = true;
-            timedOut = ex is TaskCanceledException or OperationCanceledException;
-            return null;
-        }
-        catch
-        {
-            return null;
         }
     }
 
     // ───────────────────────────────────────────────────────────────────────── the request
 
     /// <summary>
-    /// The same retry/fallback ladder as the established reader, parameterised only for Bimbo's two
-    /// new response shapes. <paramref name="apiAnswered"/> distinguishes an unavailable service from
-    /// a service that saw the page but could not return a complete usable reading.
+    /// One AI pass for a picture-primary vendor: **every configured key and model, once each, in
+    /// order, with nothing in between** — and then at most one more request.
+    ///
+    /// The shape is what it is because of what each answer means. A 429, a 503, a refusal or a
+    /// dropped line all say *this combination cannot serve this request now*, and the next
+    /// combination is a different quota pool on a different model, so the only sensible response is
+    /// to move to it immediately. Sleeping first helps nothing and the operator is standing at the
+    /// counter. An HTTP 200 that fails validation is a different animal — the service is up and
+    /// answering, it simply answered badly — and that is the one thing worth asking again, once, of
+    /// the combination that proved it can reply.
+    ///
+    /// So the cost is bounded and knowable: at most one request per combination, plus one. It used
+    /// to be three full sweeps with 20- and 50-second sleeps between them, which on 2026-08-13 took
+    /// a single Dr Pepper invoice past four minutes with the window saying only "Converting...".
+    /// There is no sleep on this path at all, and no client-side deadline that would guess at
+    /// whether Google is still working — see <see cref="Shared"/>.
+    ///
+    /// <paramref name="apiAnswered"/> is the whole of the unavailable/unreadable distinction. True
+    /// means some combination returned HTTP 200, so the service reached the invoice and the page
+    /// needs re-scanning; false means nothing did, and only then may the operator be offered the
+    /// legacy OCR reader.
     /// </summary>
     private T? ReadSpecialPage<T>(
-        string body, Tally tally, Func<Stream, T?> parse, out bool apiAnswered) where T : class
+        string body, Tally tally, Func<Stream, T?> parse, out bool apiAnswered,
+        string phase = "") where T : class
     {
         apiAnswered = false;
         if (Combinations == 0) return null;
 
-        for (int round = 0; ; round++)
+        int startingAt = Math.Abs(Volatile.Read(ref _at) % Combinations);
+        int answeredAt = -1;
+
+        for (int tried = 0; tried < Combinations; tried++)
         {
-            bool anythingWorthWaitingFor = false;
-            bool answeredButInvalid = false;
-            for (int tried = 0; tried < Combinations; tried++)
+            int index = (startingAt + tried) % Combinations;
+            var reading = AttemptRung(
+                index, body, tally, parse, phase, tried + 1, Combinations,
+                ref apiAnswered, ref answeredAt);
+            if (reading is not null)
             {
-                int index = (_at + tried) % Combinations;
-                var (key, model) = Pair(index);
-
-                tally.Requests++;
-                var reading = TrySpecialOnce(
-                    body, key, model, parse,
-                    out bool throttled, out bool timedOut, out bool answered);
-                apiAnswered |= answered;
-                answeredButInvalid |= answered && reading is null;
-                if (throttled) tally.Throttled++;
-                if (timedOut) tally.TimedOut++;
-                if (reading is not null)
-                {
-                    _at = index;
-                    return reading;
-                }
-                anythingWorthWaitingFor |= throttled;
+                Interlocked.Exchange(ref _at, index);
+                return reading;
             }
+        }
 
-            // A successful response with an incomplete/inconsistent payload gets one immediate
-            // fresh read. This is the Bimbo "retry then recover" rule; waiting is for quota only.
-            if (answeredButInvalid && round == 0) continue;
-            if (!anythingWorthWaitingFor || round >= _backoff.Length) return null;
-            tally.Waited += _backoff[round].TotalSeconds;
-            Thread.Sleep(_backoff[round]);
+        // Nothing answered at all. Every rung has now had its say, including the extra goes a busy
+        // one gets, so asking the ladder again would only make the operator wait a second time for
+        // the same silence.
+        if (answeredAt < 0) return null;
+
+        // Something answered, and answered badly. One fresh attempt, at the combination that proved
+        // it can reply — not another sweep.
+        var again = Attempt(
+            answeredAt, body, tally, parse, phase, Combinations + 1, Combinations + 1, out _, out _);
+        if (again is not null) Interlocked.Exchange(ref _at, answeredAt);
+        return again;
+    }
+
+    /// <summary>
+    /// How long to wait before giving a busy model another go, and — by its length — how many extra
+    /// goes it gets. Two, a few seconds apart.
+    ///
+    /// A 503 says Google's own server is busy, which is nobody's allowance and clears on its own,
+    /// so the rung that is worth insisting on is the one already in hand: the best model the ladder
+    /// has reached. Dropping to a worse model over a blip that lasts seconds is how an invoice ends
+    /// up read by something that transposes digits — and dropping off the ladder entirely is how a
+    /// readable invoice gets refused, which is what happened to the store at 17:20 on 2026-08-13
+    /// while the same file went through in one request two minutes later.
+    ///
+    /// **Nothing here retries a 429.** An exhausted allowance does not come back before tomorrow,
+    /// and sleeping on one is exactly what used to leave an invoice at "Converting..." for minutes.
+    /// </summary>
+    private static readonly TimeSpan[] BusyModelWaits =
+        [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6)];
+
+    /// <summary>
+    /// One rung of the ladder, including the extra goes it gets if it comes back busy.
+    ///
+    /// The retry happens **here**, while this key and model are still the current rung, rather than
+    /// after the whole ladder has been walked. That is what "try the best model a couple of times
+    /// before dropping" means: 3.7 on key 1 three times over nine seconds, then 3.7 on key 2, then
+    /// 3.6 on key 1, and so on down. Any number of keys works — the ladder is every configured key
+    /// on one model before the next model, whether that is one key or six.
+    /// </summary>
+    private T? AttemptRung<T>(
+        int index, string body, Tally tally, Func<Stream, T?> parse, string phase,
+        int number, int of, ref bool apiAnswered, ref int answeredAt) where T : class
+    {
+        for (int go = 0; ; go++)
+        {
+            var reading = Attempt(
+                index, body, tally, parse, phase, number, of,
+                out bool answered, out AttemptOutcome outcome);
+            if (answered)
+            {
+                apiAnswered = true;
+                if (answeredAt < 0) answeredAt = index;
+            }
+            if (reading is not null) return reading;
+
+            // Only busy earns another go, and only while there are goes left. Anything else - out
+            // of allowance, refused, unreachable, or answering badly - is not fixed by waiting.
+            if (outcome != AttemptOutcome.Overloaded || go >= _busyWaits.Length) return null;
+
+            TimeSpan wait = _busyWaits[go];
+            Report(phase, "Google's AI is busy - their server, not your allowance. Trying the same "
+                          + $"model again in {wait.TotalSeconds:0} seconds.");
+            if (wait > TimeSpan.Zero) Thread.Sleep(wait);
         }
     }
 
-    private T? TrySpecialOnce<T>(
-        string body, string key, string model, Func<Stream, T?> parse,
-        out bool throttled, out bool timedOut, out bool apiAnswered) where T : class
+    /// <summary>One attempt, tallied and announced. Never throws.</summary>
+    private T? Attempt<T>(
+        int index, string body, Tally tally, Func<Stream, T?> parse, string phase,
+        int number, int of, out bool apiAnswered, out AttemptOutcome outcome) where T : class
     {
-        throttled = false;
-        timedOut = false;
+        var (key, model) = Pair(index);
+        int keyNumber = index % _keys.Length + 1;
+
+        Report(phase, $"try {number} of {of} sent (key {keyNumber}, {model}). No reply yet.");
+        var reading = TryOnce(
+            body, key, model, parse, out apiAnswered, out outcome, out string? failure);
+        tally.Record(outcome, keyNumber, model, failure);
+        if (reading is null) Report(phase, $"try {number} of {of}: {Describe(outcome)}.");
+        return reading;
+    }
+
+    /// <summary>
+    /// One request against one key and model, classified by what actually came back.
+    ///
+    /// There is no way from here to tell a request Google is working on from one it has quietly
+    /// stopped working on: a synchronous call either returns or it does not, and nothing in the
+    /// protocol reports progress. Nothing in this class claims otherwise.
+    /// </summary>
+    private T? TryOnce<T>(
+        string body, string key, string model, Func<Stream, T?> parse,
+        out bool apiAnswered, out AttemptOutcome outcome, out string? failure) where T : class
+    {
         apiAnswered = false;
+        outcome = AttemptOutcome.Read;
+        failure = null;
         try
         {
             using var request = new HttpRequestMessage(
@@ -671,26 +888,54 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             request.Content = new StringContent(
                 body, Encoding.UTF8, new MediaTypeHeaderValue("application/json"));
 
-            using var cancel = new CancellationTokenSource(RequestTimeout);
-            using var response = _http.Send(request, cancel.Token);
+            using var response = _http.Send(request, CancellationToken.None);
             if (response.IsSuccessStatusCode)
             {
                 apiAnswered = true;
-                using var stream = response.Content.ReadAsStream(cancel.Token);
-                return parse(stream);
+
+                // Buffered so that a reply which failed to parse can still be asked *why*. One page
+                // of JSON; the copy costs nothing next to the request that fetched it.
+                using var buffer = new MemoryStream();
+                using (var stream = response.Content.ReadAsStream(CancellationToken.None))
+                    stream.CopyTo(buffer);
+                buffer.Position = 0;
+                var reading = parse(buffer);
+                if (reading is null)
+                {
+                    outcome = AttemptOutcome.Incomplete;
+                    buffer.Position = 0;
+                    failure = RanOutOfRoom(buffer)
+                        ? "HTTP 200 reply cut short (ran out of output room)"
+                        : "HTTP 200 incomplete response";
+                }
+                return reading;
             }
 
-            throttled = (int)response.StatusCode == 429 || (int)response.StatusCode >= 500;
+            int status = (int)response.StatusCode;
+            outcome = status == 429 ? AttemptOutcome.RateLimited
+                : status >= 500 ? AttemptOutcome.Overloaded
+                : AttemptOutcome.Refused;
+            failure = $"HTTP {status}";
             return null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
         {
-            throttled = true;
-            timedOut = ex is TaskCanceledException or OperationCanceledException;
+            // Production invoice reads have no client deadline, so a cancellation here is the
+            // connection or the caller, never a timer this class set. It is counted apart from a
+            // real 429: "throttled" was the wrong word for it and sent people to the wrong fix.
+            bool canceled = ex is TaskCanceledException or OperationCanceledException;
+            outcome = canceled ? AttemptOutcome.Canceled : AttemptOutcome.Network;
+            failure = ex is HttpRequestException http && http.StatusCode is not null
+                ? $"HTTP {(int)http.StatusCode.Value} transport error"
+                : canceled ? "canceled before a reply" : "network error";
             return null;
         }
         catch
         {
+            // A reply that arrived and could not be read at all. If the status said 200 it belongs
+            // with the other incomplete replies, and gets the one fresh attempt they get.
+            outcome = apiAnswered ? AttemptOutcome.Incomplete : AttemptOutcome.Refused;
+            failure = "invalid response";
             return null;
         }
     }
@@ -724,6 +969,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             w.WriteStartObject("generationConfig");
             // Reading printed digits is not a creative task; nothing here should vary run to run.
             w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
             w.WriteString("responseMimeType", "application/json");
             WriteSchema(w, vendor);
             w.WriteEndObject();
@@ -732,6 +978,112 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
         }
         return Encoding.UTF8.GetString(buffer.ToArray());
     }
+
+    private static string BuildDrPepperPrimaryBody(IReadOnlyList<byte[]> pages)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            for (int index = 0; index < pages.Count; index++)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", $"Invoice page {index + 1} of {pages.Count}:");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", "image/png");
+                w.WriteBase64String("data", pages[index]);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+            w.WriteStartObject();
+            w.WriteString("text", DrPepperPrimaryPrompt);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
+            w.WriteString("responseMimeType", "application/json");
+            WriteDrPepperPrimarySchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// Dr Pepper's one and only request.
+    ///
+    /// Since 2026-08-13 nothing downstream re-reads this invoice, so this prompt is where a misread
+    /// figure is caught or not caught at all. That is the right place for it: the model is looking
+    /// at the page and can look again, which no amount of arithmetic on this side can do. Hence the
+    /// explicit final pass — count the digits, verify the check digit, multiply the row out, add the
+    /// subtotals up — stated as work to do before answering rather than as background advice.
+    ///
+    /// The one deliberate asymmetry is the barcode. Everywhere else an uncertain figure is null,
+    /// because a null unit count drops a row and says so, which is safe. A null barcode drops the
+    /// row too — and a barcode that merely fails its check digit is caught here, flagged, and fixed
+    /// in SSCS in seconds. So a legible-but-doubtful code is worth more than nothing, and the
+    /// prompt says exactly that. It must never be read as licence to repair one: adjusting a digit
+    /// to satisfy the check produces a code that looks perfect and posts the delivery to the wrong
+    /// item, which is the one failure nothing downstream can see.
+    /// </summary>
+    private const string DrPepperPrimaryPrompt = """
+        You are the only reader of this scanned Dr Pepper invoice. Nothing downstream will re-read
+        the page, so your answer is what reaches the store's system. Read only the physical print
+        visible in the supplied page pictures. Never use an OCR transcription, product catalogue,
+        remembered product, manufacturer prefix, arithmetic inference, or a plausible repair.
+        Inspect every printed character twice. A pen stroke may damage a digit; it does not replace
+        it. If a value is still uncertain, return null for that field.
+
+        Return every actual product exactly once and in physical invoice order. Exclude equipment,
+        deposits, PACKAGE SUBTOTAL rows, TOTAL SALE rows, summary rows, and barcode scan sheets.
+        A product is normally two visual lines: description plus a 12-digit UPC/SKU on the product
+        line, then the money line headed WHSLE CASES UNITS NET TAX AMOUNT. Credit rows are under the
+        CREDITS heading, omit WHSLE, may print CASES as zero, and must set isCredit true. Return
+        numeric values as exact strings, preserving every decimal and printed sign. isCredit owns
+        the output sign; do not turn a routine credit into an error.
+
+        For each row return its page, section (SALES or CREDITS), order on that page within that section,
+        occurrence of the same item within that section, item number, description, barcode,
+        wholesale where physically printed, cases, units, net, tax and amount. Also return every
+        PACKAGE SUBTOTAL with the rowIds it covers and its cases, units and amount; TOTAL SALE cases,
+        units and amount; the separate sales/credit summary counts and amounts; and AMOUNT DUE.
+        Generate each rowId from page, section and page-local row order and reuse it exactly in subtotal rowIds.
+
+        Before you answer, work through every one of these checks and go back to the picture for any
+        row that fails one:
+
+        1. Barcodes. Dr Pepper prints a full 12-digit UPC-A. Count the digits: exactly twelve, and
+           the twelfth is calculated from the other eleven. Verify it — add digits 1, 3, 5, 7, 9 and
+           11, multiply that sum by three, add digits 2, 4, 6, 8 and 10, and the twelfth digit is
+           whatever brings the result up to a multiple of ten. If it does not come out, you have
+           misread a digit: look at the printed cell again, character by character. Transposed pairs
+           and a duplicated digit inside a run of zeros are the two mistakes to look for.
+        2. Delivery rows. CASES x NET must equal AMOUNT. This does not hold on a credit and must not
+           be checked there.
+        3. Every PACKAGE SUBTOTAL against the rows above it, in cases, units and amount.
+        4. The printed unit counts against the rows in each section, and the signed row money
+           against AMOUNT DUE.
+
+        These checks tell you where to look again. They never tell you what to write. Never change,
+        fill, reject, or derive a value merely to make one pass, and never adjust a barcode digit to
+        satisfy its check digit — a repaired code looks perfect and sends the delivery to the wrong
+        product. If a figure is still uncertain after looking again, return null for it.
+
+        The barcode is the one exception to returning null. A code that fails its check digit is
+        still worth returning, because it gets flagged for a person to correct; a null barcode
+        loses the whole line. Return null for a barcode only when the cell is genuinely illegible.
+
+        Ignore invoice number and invoice date completely. They are always typed into empty boxes,
+        and the response schema intentionally has no field capable of carrying either value.
+        """;
 
     private static string BuildBimboPrimaryBody(byte[] png) => BuildSpecialBody(
         png,
@@ -832,6 +1184,7 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             w.WriteEndArray();
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
             w.WriteString("responseMimeType", "application/json");
             WriteBimboBarcodeSchema(w);
             w.WriteEndObject();
@@ -864,12 +1217,99 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
             w.WriteEndArray();
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
             w.WriteString("responseMimeType", "application/json");
             writeSchema(w);
             w.WriteEndObject();
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static void WriteDrPepperPrimarySchema(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[]
+                 {
+                     "rowId", "page", "section", "rowOrder", "occurrence", "itemNumber",
+                     "description", "barcode", "wholesale", "cases", "units", "net", "tax",
+                     "amount",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        WriteField(w, "pageUpsideDown", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[]
+                 {
+                     "rowId", "page", "section", "rowOrder", "occurrence", "itemNumber",
+                     "description", "barcode", "wholesale", "cases", "units", "net", "tax",
+                     "amount", "isCredit", "pageUpsideDown",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        foreach (string name in new[]
+                 {
+                     "rowId", "page", "section", "rowOrder", "description", "wholesale",
+                     "cases", "net", "tax", "isCredit",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteStartObject("packageSubtotals");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        WriteField(w, "groupId", "string");
+        w.WriteStartObject("rowIds");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "string");
+        w.WriteEndObject();
+        w.WriteEndObject();
+        foreach (string name in new[] { "cases", "units", "amount" })
+            WriteField(w, name, "string");
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("groupId");
+        w.WriteStringValue("rowIds");
+        w.WriteStringValue("cases");
+        w.WriteStringValue("units");
+        w.WriteStringValue("amount");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        foreach (string name in new[]
+                 {
+                     "totalSaleCases", "totalSaleUnits", "totalSaleAmount", "salesCases",
+                     "salesUnits", "salesAmount", "creditCases", "creditUnits", "creditAmount",
+                     "amountDue",
+                 })
+            WriteField(w, name, "string");
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        foreach (string name in new[]
+                 {
+                     "rows", "packageSubtotals", "totalSaleCases", "totalSaleUnits",
+                     "totalSaleAmount", "salesCases", "salesUnits", "salesAmount",
+                     "creditCases", "creditUnits", "creditAmount", "amountDue",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteEndObject();
     }
 
     private static void WriteBimboPrimarySchema(Utf8JsonWriter w)
@@ -1313,6 +1753,134 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
     /// Pulls the reading out of Gemini's envelope. Anything unexpected anywhere gives null, which
     /// the caller treats as a page that could not be read.
     /// </summary>
+    private static DrPepperVisionReading? ParseDrPepperReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var read = new List<DrPepperVisionRow>();
+        var ids = new Dictionary<string, string>(StringComparer.Ordinal);
+        var localIds = new HashSet<string>(StringComparer.Ordinal);
+        int index = 0;
+        foreach (var row in rows.EnumerateArray())
+        {
+            index++;
+            string page = Text(row, "page") ?? "1";
+            string section = (Text(row, "section") ?? "SALES").Trim().ToUpperInvariant();
+            string order = Text(row, "rowOrder") ?? index.ToString(CultureInfo.InvariantCulture);
+            string occurrence = Text(row, "occurrence") ?? "1";
+            string modelId = Text(row, "rowId") ?? $"row-{index}";
+            string baseId = $"p{page}-{section.ToLowerInvariant()}-r{order}-o{occurrence}";
+            string localId = baseId;
+            for (int suffix = 2; !localIds.Add(localId); suffix++) localId = $"{baseId}-{suffix}";
+            ids.TryAdd(modelId, localId);
+
+            var found = new DrPepperVisionRow
+            {
+                RowId = localId,
+                Page = page,
+                Section = section,
+                RowOrder = order,
+                Occurrence = occurrence,
+                ItemNumber = Text(row, "itemNumber") ?? "",
+                Description = Text(row, "description") ?? "",
+                Barcode = Text(row, "barcode"),
+                Wholesale = Text(row, "wholesale"),
+                Cases = Text(row, "cases"),
+                Units = Text(row, "units"),
+                Net = Text(row, "net"),
+                Tax = Text(row, "tax"),
+                Amount = Text(row, "amount"),
+                // The sign of the line. Where the model left the flag off, the section it read off
+                // the printed banner says the same thing — that is still its own reading of the
+                // page, not a guess of ours, and it beats refusing the invoice over a missing
+                // boolean.
+                IsCredit = NullableFlag(row, "isCredit") ?? section == "CREDITS",
+                PageUpsideDown = Flag(row, "pageUpsideDown"),
+            };
+            if (found.ItemNumber.Length == 0 && found.Description.Length == 0
+                && found.Barcode is null && found.Units is null && found.Amount is null)
+                continue;
+            read.Add(found);
+        }
+        // What "incomplete" is allowed to mean.
+        //
+        // This gate decides whether a reply is usable at all, and it used to demand a filled CASES,
+        // NET, TAX and WHSLE on every row plus seven top-level figures — so one blank cell anywhere
+        // threw the whole invoice away, retried, threw it away again and asked for a rescan. On
+        // 2026-08-13 it did exactly that to a flawless reading of a 49-row ticket: 50 rows, 13
+        // package subtotals, every figure present and correct, refused because `totalSale*` came
+        // back empty. That invoice carries returns, so it prints a SALES SUMMARY block **instead
+        // of** a TOT SALE line — the figure is not on the paper, and the model was right to leave
+        // it null.
+        //
+        // So the bar is now what a file actually needs: at least one row worth posting, and the
+        // invoice's own AMOUNT DUE. AMOUNT DUE is what makes a half-read page visible — the lines
+        // will not come to it and the converted file says so. Everything else is a note, and a
+        // column that never reaches the XML at all is not grounds to refuse a delivery.
+        if (read.Count == 0 || string.IsNullOrWhiteSpace(Text(root, "amountDue"))) return null;
+
+        var subtotals = new List<DrPepperVisionPackageSubtotal>();
+        if (root.TryGetProperty("packageSubtotals", out var groups)
+            && groups.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var group in groups.EnumerateArray())
+            {
+                var rowIds = new List<string>();
+                var groupIds = new HashSet<string>(StringComparer.Ordinal);
+                if (group.TryGetProperty("rowIds", out var groupRows)
+                    && groupRows.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var idElement in groupRows.EnumerateArray())
+                    {
+                        string? modelId = idElement.ValueKind == JsonValueKind.String
+                            ? idElement.GetString() : null;
+                        if (modelId is null || !ids.TryGetValue(modelId, out string? localId)
+                            || !groupIds.Add(localId)) return null;
+                        rowIds.Add(localId);
+                    }
+                }
+                if (rowIds.Count == 0
+                    || string.IsNullOrWhiteSpace(Text(group, "cases"))
+                    || string.IsNullOrWhiteSpace(Text(group, "units"))
+                    || string.IsNullOrWhiteSpace(Text(group, "amount"))) return null;
+                subtotals.Add(new DrPepperVisionPackageSubtotal
+                {
+                    GroupId = Text(group, "groupId") ?? $"group-{subtotals.Count + 1}",
+                    RowIds = rowIds,
+                    Cases = Text(group, "cases"),
+                    Units = Text(group, "units"),
+                    Amount = Text(group, "amount"),
+                });
+            }
+        }
+
+        var summary = new DrPepperVisionSummary
+        {
+            SalesCases = Text(root, "salesCases"),
+            SalesUnits = Text(root, "salesUnits"),
+            SalesAmount = Text(root, "salesAmount"),
+            CreditCases = Text(root, "creditCases"),
+            CreditUnits = Text(root, "creditUnits"),
+            CreditAmount = Text(root, "creditAmount"),
+        };
+        return new DrPepperVisionReading
+        {
+            Status = DrPepperVisionStatus.Success,
+            Rows = read,
+            PackageSubtotals = subtotals,
+            TotalSaleCases = Text(root, "totalSaleCases"),
+            TotalSaleUnits = Text(root, "totalSaleUnits"),
+            TotalSaleAmount = Text(root, "totalSaleAmount"),
+            Summary = summary,
+            AmountDue = Text(root, "amountDue"),
+        };
+    }
+
     private static BimboVisionReading? ParseBimboReply(Stream stream)
     {
         string? json = ReplyPayload(stream);
@@ -1408,14 +1976,32 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
         };
     }
 
-    private static string? ReplyPayload(Stream stream)
+    /// <summary>
+    /// The JSON the model actually wrote, or null if it did not write usable JSON.
+    ///
+    /// A reply that ran out of room comes back as a 200 with `finishReason` MAX_TOKENS and either a
+    /// truncated string or no `parts` at all — so this reads defensively rather than indexing
+    /// straight into `content`, and reports *why* through <paramref name="cutShort"/> instead of
+    /// letting a truncation look the same as a model that answered badly. They have different
+    /// fixes, and for most of 2026-08-13 the first was wearing the second's clothes.
+    /// </summary>
+    private static string? ReplyPayload(Stream stream, out bool cutShort)
     {
+        cutShort = false;
         using var doc = JsonDocument.Parse(stream);
         if (!doc.RootElement.TryGetProperty("candidates", out var candidates)
             || candidates.ValueKind != JsonValueKind.Array
             || candidates.GetArrayLength() == 0) return null;
 
-        var parts = candidates[0].GetProperty("content").GetProperty("parts");
+        var candidate = candidates[0];
+        cutShort = candidate.TryGetProperty("finishReason", out var reason)
+                   && reason.ValueKind == JsonValueKind.String
+                   && reason.GetString() is "MAX_TOKENS" or "LENGTH";
+
+        if (!candidate.TryGetProperty("content", out var content)
+            || !content.TryGetProperty("parts", out var parts)
+            || parts.ValueKind != JsonValueKind.Array) return null;
+
         var text = new StringBuilder();
         foreach (var part in parts.EnumerateArray())
             if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
@@ -1423,21 +2009,31 @@ public sealed class GeminiVisionReader : IInvoiceVisionReader, IBimboVisionReade
         return text.Length == 0 ? null : text.ToString();
     }
 
+    private static string? ReplyPayload(Stream stream) => ReplyPayload(stream, out _);
+
+    /// <summary>True when Google says it stopped because it ran out of output room.</summary>
+    private static bool RanOutOfRoom(Stream stream)
+    {
+        try
+        {
+            ReplyPayload(stream, out bool cutShort);
+            return cutShort;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static VisionReading? ParseReply(Stream stream)
     {
-        using var doc = JsonDocument.Parse(stream);
-        if (!doc.RootElement.TryGetProperty("candidates", out var candidates)
-            || candidates.ValueKind != JsonValueKind.Array
-            || candidates.GetArrayLength() == 0) return null;
+        // Through the same defensive reader as every other vendor: a candidate that ran out of room
+        // has no `parts` to index into, and reaching for one threw where it should have returned
+        // "nothing usable came back".
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
 
-        var parts = candidates[0].GetProperty("content").GetProperty("parts");
-        var text = new StringBuilder();
-        foreach (var part in parts.EnumerateArray())
-            if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
-                text.Append(t.GetString());
-        if (text.Length == 0) return null;
-
-        using var payload = JsonDocument.Parse(text.ToString());
+        using var payload = JsonDocument.Parse(json);
         var root = payload.RootElement;
         if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
             return null;

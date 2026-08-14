@@ -193,18 +193,16 @@ public sealed record LineFieldRequest(
     /// The same column names as words, for the rows where the printed header cannot be cut.
     ///
     /// The strip above the row is not decoration and it is not the answer to the question — it is
-    /// there so that a cut-out row means something. By item 16 the printed
-    /// "DESCRIPTION UPC/SKU / WHSLE CASES UNITS NET TAX AMOUNT" is a foot up the page and off the
-    /// top of the snip, so without it the operator is looking at a bare line of figures with no way
-    /// to tell which one is the amount. It goes missing on three real cases: a Dr Pepper header the
-    /// scan chewed up until it no longer reads as one, a Red Bull page where none was found, and a
-    /// row with no line number to cut by at all.
+    /// there so that a cut-out row means something. By item 16 the printed column names are a foot
+    /// up the page and off the top of the snip. Dr Pepper never uses this backstop: its request must
+    /// carry the photographed SALES/CREDITS banner plus both column-header lines or the question is
+    /// refused.
     ///
-    /// So this is the fallback, and it is deliberately the weaker of the two. A cut header is
+    /// For vendors that opt in, this is deliberately the weaker fallback. A cut header is
     /// **aligned** — it comes off the same page at the same width, so UNITS sits over the units.
     /// Typed-out names cannot be, so they read left to right as an ordered list and nothing more.
-    /// Written by the vendor's own section: Dr Pepper's credits print no WHSLE column, and
-    /// showing one over a credit row would have the operator counting to the wrong figure.
+    /// Dr Pepper's credits print no WHSLE column, which is one reason Dr Pepper permits only the
+    /// real section-specific photographed header.
     ///
     /// Never marked, either way. The box goes on the figure being typed, never on a column name —
     /// pointing at the word AMOUNT answers a question nobody asked.
@@ -225,7 +223,8 @@ public sealed record LineFieldRequest(
     /// </summary>
     string Hint = "",
     /// <summary>
-    /// True when <see cref="Snip"/> is the whole page rather than a cut-out row — which happens where
+    /// True when <see cref="Snip"/> is the whole page rather than a cut-out row — which happens for
+    /// vendors that permit it where
     /// the text layer read nothing and the rows came off the picture, so there are no coordinates to
     /// cut by and nothing can be marked.
     ///
@@ -283,6 +282,13 @@ public interface IInvoiceDetailsPrompt
     /// silently swaps readers.
     /// </summary>
     bool ConfirmBimboOcrFallback(string fileName) => false;
+
+    /// <summary>
+    /// AI is Dr Pepper's normal reader. The legacy OCR parser may run only after this explicit
+    /// once-per-batch approval when AI is unavailable. The default declines, preventing a silent
+    /// reader swap in headless callers.
+    /// </summary>
+    bool ConfirmDrPepperOcrFallback(string fileName) => false;
 }
 
 /// <summary>
@@ -311,6 +317,19 @@ public interface IBatchFileConverter
 }
 
 /// <summary>
+/// A converter that can say what it is currently waiting on.
+///
+/// The queue only ever knew two things about a file being converted: that it started and how it
+/// finished. For a picture-primary vendor everything in between is network reads, and on
+/// 2026-08-13 that meant a window reading "Converting..." for four minutes with no way to tell work
+/// from a hang. Anything sent here is shown as it arrives and replaced by the outcome.
+/// </summary>
+public interface IProgressReportingConverter
+{
+    event Action<string>? Progress;
+}
+
+/// <summary>
 /// Presentation logic for the main window, free of any WinForms dependency:
 /// maintains the file queue, drives statuses (Waiting → Converting → Converted/Warning/
 /// Failed/Canceled), revalidates the destination folder before every conversion, and asks
@@ -331,10 +350,34 @@ public sealed class ConversionCoordinator
     /// <summary>Raised (on a worker thread) with a final plain-language summary when the queue drains.</summary>
     public event Action<string>? BatchCompleted;
 
+    /// <summary>
+    /// The file currently being converted, so a progress line from the converter lands on the right
+    /// row. Written by the single queue worker and read by whichever thread the converter's read is
+    /// on, which is why it goes through <see cref="Volatile"/>.
+    /// </summary>
+    private QueuedFile? _converting;
+
     public ConversionCoordinator(IFileConverter converter, IDestinationProvider destination)
     {
         _converter = converter;
         _destination = destination;
+        if (converter is IProgressReportingConverter reporting) reporting.Progress += OnConverterProgress;
+    }
+
+    /// <summary>
+    /// Shows what the converter is waiting on, on the row it is waiting for.
+    ///
+    /// Only ever while that file is still converting: a line that arrives late — a barcode pass
+    /// finishing after the invoice was written — must not overwrite the outcome the operator needs
+    /// to read.
+    /// </summary>
+    private void OnConverterProgress(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+        QueuedFile? file = Volatile.Read(ref _converting);
+        if (file is null || file.Status != FileStatus.Converting) return;
+        file.Detail = message;
+        RaiseFileChanged(file);
     }
 
     /// <summary>
@@ -474,6 +517,7 @@ public sealed class ConversionCoordinator
             RaiseFileChanged(item);
 
             ConversionOutcome outcome;
+            Volatile.Write(ref _converting, item);
             try
             {
                 outcome = _converter.ConvertFile(item, folder);
@@ -485,6 +529,10 @@ public sealed class ConversionCoordinator
                     Success = false,
                     UserMessage = $"Could not convert {item.FileName}.\n\nAn unexpected problem occurred ({ex.GetType().Name}). The original file was not changed.",
                 };
+            }
+            finally
+            {
+                Volatile.Write(ref _converting, null);
             }
 
             if (outcome.Success)

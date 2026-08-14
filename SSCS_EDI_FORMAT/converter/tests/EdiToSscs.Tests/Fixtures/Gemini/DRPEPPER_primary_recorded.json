@@ -1,0 +1,45 @@
+{
+  "rows": [
+    {
+      "rowId": "model-sale-1",
+      "page": "1",
+      "section": "SALES",
+      "rowOrder": "1",
+      "occurrence": "1",
+      "itemNumber": "10000069",
+      "description": "16z12 Dr Pepper",
+      "barcode": "078000200287",
+      "wholesale": "35.90",
+      "cases": "1",
+      "units": "12",
+      "net": "20.66",
+      "tax": "0.00",
+      "amount": "20.66",
+      "barcodeLeft": "520",
+      "barcodeTop": "310",
+      "barcodeWidth": "240",
+      "barcodeHeight": "35",
+      "isCredit": false,
+      "pageUpsideDown": false
+    }
+  ],
+  "packageSubtotals": [
+    {
+      "groupId": "pkg-1",
+      "rowIds": ["model-sale-1"],
+      "cases": "1",
+      "units": "12",
+      "amount": "20.66"
+    }
+  ],
+  "totalSaleCases": "1",
+  "totalSaleUnits": "12",
+  "totalSaleAmount": "20.66",
+  "salesCases": "1",
+  "salesUnits": "12",
+  "salesAmount": "20.66",
+  "creditCases": "0",
+  "creditUnits": "0",
+  "creditAmount": "0.00",
+  "amountDue": "20.66"
+}

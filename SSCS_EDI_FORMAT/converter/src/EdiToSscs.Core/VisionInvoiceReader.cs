@@ -274,3 +274,22 @@ public interface IInvoiceVisionReader
     /// </summary>
     VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor);
 }
+
+/// <summary>
+/// A reader that can say which attempt it is currently waiting on.
+///
+/// A picture-primary invoice is three network reads before the first window opens, and each one may
+/// work through several keys and models. Without this the whole of that is one word — "Converting..."
+/// — and a slow read is indistinguishable from a hung application, which is exactly the report that
+/// started this (2026-08-13, four minutes on one Dr Pepper ticket).
+///
+/// Whatever is said here has to be **true of what the app can actually observe**. A synchronous
+/// HTTPS request either returns or it has not returned yet; nothing tells the caller whether the far
+/// end is working on it. So "the request is out and nothing has come back" is sayable and "Google is
+/// processing your invoice" is not.
+/// </summary>
+public interface IVisionProgressReporter
+{
+    /// <summary>Where to send progress lines, or null for silence. Set by whoever owns the reader.</summary>
+    Action<string>? Progress { get; set; }
+}

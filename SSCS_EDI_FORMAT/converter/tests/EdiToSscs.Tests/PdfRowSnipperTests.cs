@@ -172,26 +172,26 @@ public class PdfRowSnipperTests
     }
 
     /// <summary>
-    /// Dr Pepper's heading is one printed line and stays one. The two-line cut is Bimbo's, driven by
-    /// the line above carrying RETAIL; Dr Pepper's says "DESCRIPTION UPC/SKU", so nothing changes for
-    /// it. Worth a test because the two vendors share one <see cref="PdfRowSnipper.TryCutHeader"/>
-    /// and a heading that quietly grew a line would push the row itself off the top of the dialog.
+    /// Dr Pepper's photographed heading includes its SALES/CREDITS banner and both printed column
+    /// lines. Cutting only the lower line was the regression that made the prompt replace the
+    /// invoice's own header with a synthetic typed one and hid which section the row belonged to.
     /// </summary>
     [Fact]
-    public void DrPeppersHeadingIsStillTheSingleLineItAlwaysWas()
+    public void DrPeppersPhotographedHeadingIncludesBothPrintedLines()
     {
         byte[] pdf = Bytes(DrPepperCredits);
 
-        var header = PdfRowSnipper.TryCutHeader(pdf, 40);
+        var header = PdfRowSnipper.TryCutDrPepperHeader(pdf, 40, credit: false);
         Assert.NotNull(header);
 
         var oneLine = PdfRowSnipper.TryCutHeaderLine(pdf, 1);
         Assert.NotNull(oneLine);
 
-        // Same band height as any other single line on the same page, within the rounding a
-        // different font size on the heading row can produce.
-        Assert.True(header!.Height <= oneLine!.Height * 3 / 2,
-            $"the Dr Pepper heading grew from {oneLine.Height}px to {header.Height}px");
+        Assert.True(header!.Height > oneLine!.Height * 5 / 2,
+            $"the {header.Height}px header does not include SALES and both column lines");
+        Assert.True(header.Height < oneLine.Height * 7 / 2,
+            $"the {header.Height}px header includes more than the three requested printed lines");
+        Assert.Equal(0, header.FocusHeight);
     }
 
     /// <summary>
@@ -292,12 +292,9 @@ public class PdfRowSnipperTests
     }
 
     /// <summary>
-    /// A barcode is marked whole or not at all. The scan welds a description character onto the front
-    /// of a code and drops marks into the middle of one, and once the transcription and the paper
-    /// disagree about how many characters a token has, no marker drawn from it covers the right
-    /// digits — so a code with a mark in it gets the whole line rather than eleven of its twelve
-    /// digits. An operator typing eleven digits would get a check digit invented for them and a
-    /// barcode that is not the item.
+    /// A barcode is marked exactly or not at all. Once OCR and paper disagree about the token, no
+    /// slice of OCR character positions is allowed to masquerade as the complete UPC. A vendor may
+    /// separately provide its verified UPC column, which is tested below.
     /// </summary>
     [Theory]
     [InlineData(DrPepperCredits)]
@@ -332,17 +329,48 @@ public class PdfRowSnipperTests
             }
             else
             {
-                // Damaged: the token as a whole, whose outside edges are still honest - never a
-                // slice of it, because OCR spreads its extra characters across the token's real
-                // width and a slice would confidently cover ten of the twelve digits.
+                // Damaged and no vendor column supplied: the whole row, never the combined UPC/SKU
+                // token and never a misleading eleven-digit slice of it.
                 whole++;
-                Assert.InRange(left, word.Left - Slack, word.Left + Slack);
-                Assert.InRange(right, word.Right - Slack, word.Right + Slack);
+                Assert.InRange(left, -Slack, Slack);
+                Assert.InRange(right, PageWidth(pdf, lines[i - 1].PageNumber) - Slack,
+                    PageWidth(pdf, lines[i - 1].PageNumber) + Slack);
             }
         }
 
         Assert.True(exact > 0, "no clean barcode was marked exactly - the test proved nothing");
         Assert.True(exact + whole > 5);
+    }
+
+    /// <summary>
+    /// Dr Pepper's verified fallback marks only the UPC half of its fixed UPC/SKU cell. This is the
+    /// path used when the photograph is legible but hidden OCR damaged the code itself.
+    /// </summary>
+    [Fact]
+    public void ADamagedDrPepperBarcodeFallbackExcludesTheSku()
+    {
+        byte[] pdf = Bytes(DrPepperTwice);
+        var lines = PdfTextExtractor.ExtractPositionedLines(pdf);
+        var damaged = lines.SelectMany(line => line.Words.Select(word => (line, word)))
+            .First(x =>
+            {
+                int slash = x.word.Text.LastIndexOf('/');
+                return slash >= 12
+                       && !x.word.Text.Skip(slash - 12).Take(12).All(char.IsAsciiDigit);
+            });
+
+        var snip = PdfRowSnipper.TryCut(
+            pdf, damaged.line.LineNumber, damaged.line.LineNumber,
+            focusLineNo: damaged.line.LineNumber, markWholeCode: true,
+            fallbackColumn: new PdfColumnBand(0.42, 0.69));
+
+        Assert.NotNull(snip);
+        double left = snip!.FocusLeft / (double)snip.Width;
+        double right = (snip.FocusLeft + snip.FocusWidth) / (double)snip.Width;
+        Assert.InRange(left, 0.40, 0.44);
+        Assert.InRange(right, 0.68, 0.71);
+        Assert.True(snip.FocusWidth < snip.Width * 0.35,
+            "the barcode marker reached into the SKU half of the printed cell");
     }
 
     /// <summary>

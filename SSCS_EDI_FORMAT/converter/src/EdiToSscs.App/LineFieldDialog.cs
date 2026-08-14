@@ -56,6 +56,7 @@ internal sealed class LineFieldDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = false;
+        AutoScroll = true;
         Font = new Font("Segoe UI", 10f);
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -156,7 +157,15 @@ internal sealed class LineFieldDialog : Form
 
         AcceptButton = ok;
         CancelButton = cancel;
-        Shown += (_, _) => { _input.Focus(); _input.SelectAll(); };
+        Shown += (_, _) =>
+        {
+            Rectangle working = Screen.FromControl(this).WorkingArea;
+            MaximumSize = new Size(Math.Max(520, working.Width - 32), Math.Max(420, working.Height - 32));
+            if (Width > MaximumSize.Width || Height > MaximumSize.Height)
+                Size = new Size(Math.Min(Width, MaximumSize.Width), Math.Min(Height, MaximumSize.Height));
+            _input.Focus();
+            _input.SelectAll();
+        };
     }
 
     /// <summary>
@@ -253,6 +262,16 @@ internal sealed class LineFieldDialog : Form
                     MessageBox.Show(this,
                         $"Bimbo prints 10 UPC digits; that is {digits.Length}. Type the digits under "
                         + "UPC, or a complete valid 12-digit UPC-A.",
+                        Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return false;
+                }
+                if (string.Equals(_request.Vendor, "Dr Pepper", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (digits.Length == 12 && Upc.IsValidUpcA12(digits)) return true;
+                    MessageBox.Show(this,
+                        "Dr Pepper requires the complete valid 12-digit UPC-A printed on the "
+                        + $"invoice; that entry has {digits.Length} digits. It will not be padded, "
+                        + "repaired, or accepted with a bad check digit.",
                         Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return false;
                 }

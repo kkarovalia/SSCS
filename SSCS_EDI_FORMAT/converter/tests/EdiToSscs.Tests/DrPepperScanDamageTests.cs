@@ -22,6 +22,7 @@ public class DrPepperScanDamageTests
     /// </summary>
     private sealed class ScriptedPrompt(string invoiceNumber, decimal total = 0m) : IInvoiceDetailsPrompt
     {
+        public bool ConfirmDrPepperOcrFallback(string fileName) => true;
         public List<InvoiceDetailsRequest> Prompts { get; } = [];
         public List<LineFieldRequest> LineFields { get; } = [];
         public Dictionary<(int Position, LineField Field), string> Paper { get; } = [];

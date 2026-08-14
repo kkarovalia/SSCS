@@ -1195,20 +1195,17 @@ public static partial class DrPepperPdfParser
             if (slash > 0) answer = answer[..slash];
 
             string digits = Upc.DigitsOnly(answer);
-            // An 11-digit body is a whole barcode with the check digit left off; the digit is
-            // arithmetic on the other eleven, so putting it back is exact rather than a guess.
-            if (digits.Length == 11) digits = Upc.AppendCheckDigit(digits);
-
-            if (digits.Length is < 11 or > 14)
+            // Dr Pepper prints the complete UPC-A. Eleven digits therefore means damage, not an
+            // invitation to manufacture the missing digit. The explicitly approved legacy parser
+            // follows the same rule as the AI-primary path.
+            if (digits.Length != 12 || !Upc.IsValidUpcA12(digits))
                 throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
-                    $"\"{typed}\" is not a barcode, so {r.Description} could not be filled in. "
-                    + "The original file was not changed.");
+                    $"\"{typed}\" is not the complete valid 12-digit UPC-A printed for "
+                    + $"{r.Description}. Eleven digits are never padded or repaired. The original "
+                    + "file was not changed.");
 
             warnings.Add(new ConversionWarning(r.LineNo, PdfReasonCodes.UpcCheckDigit,
-                Upc.IsValidGtin(digits)
-                    ? $"{r.Description} - the barcode did not scan. You typed {digits}."
-                    : $"{r.Description} - you typed {digits}, which fails its own check digit. Used as "
-                      + "typed - check this line in SSCS."));
+                $"{r.Description} - the barcode did not scan. You typed {digits}."));
             r.Upc = digits;
         }
     }
@@ -1646,7 +1643,7 @@ public sealed record DrPepperUnknownField(
     int LineNo = 0,
     /// <summary>
     /// 1-based page this row is on, for a row read off the picture. With no line number there is no
-    /// band to cut, and the whole page is shown instead - so the caller has to know which page.
+    /// band to cut. Dr Pepper refuses the question rather than showing an unmarked whole page.
     /// </summary>
     int Page = 0,
     /// <summary>Whether that page went through the scanner the wrong way up.</summary>
@@ -1656,7 +1653,17 @@ public sealed record DrPepperUnknownField(
     /// no WHSLE — so the legend shown above the row has to follow it. Sales columns over a credit
     /// row would have the operator counting across to the figure next door.
     /// </summary>
-    bool IsCredit = false);
+    bool IsCredit = false,
+    /// <summary>
+    /// Exact product-line coordinate supplied by the Gemini adapter. -1 means the approved legacy
+    /// parser supplied only <see cref="LineNo"/>; 0 means Gemini geometry could not locate it.
+    /// </summary>
+    int ProductLineNo = -1,
+    /// <summary>
+    /// Exact priced-line coordinate supplied by the Gemini adapter. -1 means the approved legacy
+    /// parser supplied only <see cref="LineNo"/>; 0 means Gemini geometry could not locate it.
+    /// </summary>
+    int AmountLineNo = -1);
 
 /// <summary>Asks for one figure on one Dr Pepper row. Returns what the operator typed.</summary>
 public delegate string AskDrPepperField(DrPepperUnknownField field);

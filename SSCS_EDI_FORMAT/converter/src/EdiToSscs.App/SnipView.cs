@@ -17,6 +17,11 @@ internal static class SnipView
     /// <summary>How wide the row is drawn. Wide enough to read at arm's length on a shop PC.</summary>
     private const int DisplayWidth = 860;
 
+    // The Bimbo highlight palette is the one shared by every cropped invoice row. Dr Pepper goes
+    // through this same renderer, so its box cannot drift to a vendor-specific colour or opacity.
+    private static readonly Color HighlightWash = Color.FromArgb(46, 255, 193, 7);
+    private static readonly Color HighlightEdge = Color.FromArgb(190, 198, 138, 0);
+
     /// <summary>
     /// How tall the picture may get before it is put in a scroller instead of shown whole.
     ///
@@ -136,8 +141,8 @@ internal static class SnipView
                 int span = Math.Min((int)Math.Round(snip.FocusWidth * scale), canvas.Width - left - 1);
                 if (band > 0 && span > 0 && top < canvas.Height)
                 {
-                    using var wash = new SolidBrush(Color.FromArgb(46, 255, 193, 7));
-                    using var edge = new Pen(Color.FromArgb(190, 198, 138, 0), 2f);
+                    using var wash = new SolidBrush(HighlightWash);
+                    using var edge = new Pen(HighlightEdge, 2f);
                     var marked = new Rectangle(left, top, span, band);
                     g.FillRectangle(wash, marked);
                     g.DrawRectangle(edge, marked);

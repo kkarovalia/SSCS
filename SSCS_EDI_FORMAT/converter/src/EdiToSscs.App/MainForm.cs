@@ -5,7 +5,7 @@ using EdiToSscs.Core;
 namespace EdiToSscs.App;
 
 public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt, IInvoiceVisionReader,
-    IBimboVisionReader
+    IBimboVisionReader, IDrPepperVisionReader
 {
     // Option A — navy primary, light surfaces, red used sparingly for brand accent.
     private static readonly Color ThemeBg = Color.FromArgb(248, 249, 252);
@@ -139,10 +139,17 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             catch (InvalidOperationException) { return null; }
         }
 
-        using var dialog = new InvoiceNumberDialog(request);
-        return dialog.ShowDialog(this) == DialogResult.OK
-            ? new InvoiceDetails(dialog.InvoiceNumber, dialog.Date, dialog.Total)
-            : null;
+        try
+        {
+            using var dialog = new InvoiceNumberDialog(request);
+            return dialog.ShowDialog(this) == DialogResult.OK
+                ? new InvoiceDetails(dialog.InvoiceNumber, dialog.Date, dialog.Total)
+                : null;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
     }
 
     /// <summary>
@@ -160,8 +167,15 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             catch (InvalidOperationException) { return null; }
         }
 
-        using var dialog = new BarcodeDialog(request);
-        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Barcode : null;
+        try
+        {
+            using var dialog = new BarcodeDialog(request);
+            return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Barcode : null;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
     }
 
     /// <summary>
@@ -179,8 +193,15 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             catch (InvalidOperationException) { return null; }
         }
 
-        using var dialog = new LineFieldDialog(request);
-        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Value : null;
+        try
+        {
+            using var dialog = new LineFieldDialog(request);
+            return dialog.ShowDialog(this) == DialogResult.OK ? dialog.Value : null;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
     }
 
     public bool ConfirmBimboOcrFallback(string fileName)
@@ -192,12 +213,50 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             catch (InvalidOperationException) { return false; }
         }
 
-        return MessageBox.Show(this,
-            $"AI reading is unavailable for {fileName}.\n\nUse the legacy PDF text reader for "
-            + "this Bimbo batch? It is less reliable on scanned tickets. This question is shown "
-            + "only once for the current batch.",
-            "Bimbo AI reading unavailable", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        try
+        {
+            return MessageBox.Show(this,
+                $"AI reading is unavailable for {fileName}.\n\nUse the legacy PDF text reader for "
+                + "this Bimbo batch? It is less reliable on scanned tickets. This question is shown "
+                + "only once for the current batch.",
+                "Bimbo AI reading unavailable", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
+    }
+
+    public bool ConfirmDrPepperOcrFallback(string fileName)
+    {
+        if (IsDisposed || !IsHandleCreated) return false;
+        if (InvokeRequired)
+        {
+            try { return (bool)Invoke(() => ConfirmDrPepperOcrFallback(fileName)); }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        try
+        {
+            return MessageBox.Show(this,
+                $"Gemini is unavailable for {fileName}.\n\nUse the legacy OCR parser for this "
+                + "Dr Pepper batch? It is less reliable and will run only if you approve it here. "
+                + "This question is shown once for the current batch.",
+                "Dr Pepper AI reading unavailable", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
+    }
+
+    private void RepaintConversionQueues()
+    {
+        QueueRepaintPolicy.AfterPrompt(
+            () => _ediTab?.ForceRepaint(),
+            () => _pdfTab?.ForceRepaint());
     }
 
     public void SaveFolder(string folder)
@@ -482,8 +541,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         // saves into the list and clears that field, so asking it whether a key exists answered "no"
         // for a store that had just added one — and then told them to go and get a free Google key.
         _visionValueLabel.Text = s.IsActive
-            ? "On. Bimbo is read from the page picture and its UPCs are read again independently.\n"
-              + "Other scanned vendors use the picture to cross-check the PDF reading."
+            ? "On. Bimbo and Dr Pepper are read from page pictures; each UPC is read three "
+              + "independent times.\nOCR is used only to place exact question highlights."
             : s.AllProtectedKeys.Count == 0
                 ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
                   + "Open AI Reading Settings to switch it on with a free Google key."
@@ -549,6 +608,24 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             return BimboBarcodeVerification.Unavailable();
         }
     }
+
+    public DrPepperVisionReading ReadDrPepper(byte[] pdfBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadDrPepper(pdfBytes)
+                   ?? DrPepperVisionReading.Unavailable(
+                       "AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return DrPepperVisionReading.Unavailable();
+        }
+    }
+
+    // Dr Pepper's two extra barcode passes were removed on 2026-08-13. It prints a whole UPC-A,
+    // which checks itself for free; Bimbo above still has all three because its codes carry no
+    // check digit at all.
 
     private GeminiVisionReader? CreateVisionReader()
     {
@@ -737,6 +814,13 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         }
 
         public bool IsBusy => _coordinator.IsBusy;
+
+        /// <summary>
+        /// Forces the native list view to repaint after a modal prompt closes. Its backing model can
+        /// update while the dialog owns the UI thread; without this explicit invalidation a later
+        /// queued file can appear as a blank white list until the operator clicks it.
+        /// </summary>
+        public void ForceRepaint() => RepaintFileList();
 
         public void Build(TabPage page)
         {

@@ -187,6 +187,11 @@ public class RedBullPipelineTests
     /// <summary>
     /// Cancelling a line prompt skips the file rather than inventing a figure, and says so in
     /// plain language.
+    ///
+    /// Skipped is <b>Canceled</b>, not Failed. Pressing "Skip this file" is a decision, exactly
+    /// like dismissing the invoice-number prompt, and it used to come back red with a scan-damage
+    /// reason code attached — which is how a queue ends up showing somebody their own click as a
+    /// fault in the paper, with no way to tell it from an invoice the app genuinely refused.
     /// </summary>
     [Fact]
     public void SkippingALinePromptSkipsTheFile()
@@ -198,7 +203,9 @@ public class RedBullPipelineTests
             .ConvertFile(RedBull(Place(tmp, "2036629372_300dpi_damaged_money", "rb10.pdf")), dest);
 
         Assert.False(outcome.Success);
-        Assert.Contains("not supplied", outcome.UserMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.True(outcome.Canceled);
+        Assert.Null(outcome.ReasonCode);
+        Assert.Contains("dismissed", outcome.UserMessage, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(Directory.GetFiles(dest));
     }
 

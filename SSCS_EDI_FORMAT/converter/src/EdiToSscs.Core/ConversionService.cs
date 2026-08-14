@@ -46,13 +46,14 @@ public sealed class ConversionOutcome
 /// file in the destination, flushed, re-read and verified, then atomically moved to a
 /// non-conflicting final name. A failure never leaves a partial or misleading file behind.
 /// </summary>
-public sealed class ConversionService : IFileConverter, IBatchFileConverter
+public sealed class ConversionService : IFileConverter, IBatchFileConverter, IProgressReportingConverter
 {
     private readonly ConversionLogger _logger;
     private readonly string _appVersion;
     private readonly IInvoiceDetailsPrompt? _invoiceDetailsPrompt;
     private readonly IInvoiceVisionReader? _visionReader;
     private bool? _bimboOcrFallbackForBatch;
+    private bool? _drPepperOcrFallbackForBatch;
 
     public ConversionService(
         ConversionLogger? logger = null,
@@ -64,10 +65,33 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
         _appVersion = appVersion ?? typeof(ConversionService).Assembly.GetName().Version?.ToString() ?? "unknown";
         _invoiceDetailsPrompt = invoiceDetailsPrompt;
         _visionReader = visionReader;
+
+        // A picture-primary vendor spends its whole conversion inside network reads before any
+        // window opens, so the reader is the only thing that knows anything is still happening.
+        if (visionReader is IVisionProgressReporter reporter) reporter.Progress = ReportProgress;
     }
 
-    /// <summary>Clears the one Bimbo fallback decision when a new queue batch starts.</summary>
-    public void BeginBatch() => _bimboOcrFallbackForBatch = null;
+    /// <summary>
+    /// Raised on the conversion thread while a long read is outstanding, so the queue can say what
+    /// it is waiting on instead of "Converting..." for four minutes.
+    /// </summary>
+    public event Action<string>? Progress;
+
+    private void ReportProgress(string message)
+    {
+        try { Progress?.Invoke(message); }
+        catch
+        {
+            // A subscriber throwing is a UI problem; it must never fail the invoice being read.
+        }
+    }
+
+    /// <summary>Clears each vendor's once-per-queue fallback decision.</summary>
+    public void BeginBatch()
+    {
+        _bimboOcrFallbackForBatch = null;
+        _drPepperOcrFallbackForBatch = null;
+    }
 
     /// <summary>
     /// What the second reader cost on the file being converted, for the log. Reset per file; one
@@ -166,10 +190,11 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
         log.RecordsProcessed = converted.RecordCount;
         log.UpcERecordsExpanded = converted.UpcExpanded;
         log.OutputBytes = converted.Documents.Sum(d => d.Bytes.LongLength);
-        // Everything is logged, including the routine notes that deliberately do not raise the file's
-        // status. The log is the record of what happened to a ticket, not a to-do list.
+        // Logs retain only coordinates and reason codes. Warning text can contain descriptions,
+        // UPCs, quantities, or money and therefore stays in the in-memory UI result only.
         if (converted.Warnings.Count > 0)
-            log.Warnings = converted.Warnings.Select(w => $"line {w.LineNumber} [{w.ReasonCode}]: {w.Message}").ToList();
+            log.Warnings = converted.Warnings
+                .Select(w => $"line {w.LineNumber} [{w.ReasonCode}]").ToList();
 
         // Every document is written and verified as a temporary file BEFORE any of them claims a
         // final name, so a ticket that produces two invoices never lands half-written.
@@ -303,14 +328,15 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
                 TextOr([], () => PdfTextExtractor.ExtractPages(inputBytes), vendor),
                 inputFileName, warnings, inputBytes);
 
-        // Bimbo still runs the text-layer pass, but the AI-primary path receives only its
-        // coordinates. Keeping the positioned records here prevents an OCR value from being wired
-        // back into a row while still allowing the question dialog to cut out the exact line.
-        if (vendor == PdfVendor.Bimbo)
+        // Bimbo and Dr Pepper still run the text-layer pass, but their AI-primary paths receive only
+        // highlight coordinates. No value from these records is allowed into an AI-owned invoice.
+        if (vendor is PdfVendor.Bimbo or PdfVendor.DrPepper)
         {
             IReadOnlyList<PdfTextLine> positioned = TextOr(
                 [], () => PdfTextExtractor.ExtractPositionedLines(inputBytes), vendor);
-            return ConvertBimbo(positioned, inputFileName, warnings, inputBytes);
+            return vendor == PdfVendor.Bimbo
+                ? ConvertBimbo(positioned, inputFileName, warnings, inputBytes)
+                : ConvertDrPepper(positioned, inputFileName, warnings, inputBytes);
         }
 
         IReadOnlyList<string> lines =
@@ -322,7 +348,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
         if (vendor == PdfVendor.Chubiwinos)
             return ConvertChubiwinos(lines, inputFileName, warnings);
 
-        return ConvertDrPepper(lines, inputFileName, warnings, inputBytes);
+        throw new EdiConversionException(PdfReasonCodes.VendorNoParser,
+            "This PDF vendor is not supported.");
     }
 
     /// <summary>
@@ -343,62 +370,106 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
             return extract();
         }
         catch (EdiConversionException ex) when (ex.ReasonCode == PdfReasonCodes.NoText
-                                                && _visionReader is not null
-                                                && vendor is PdfVendor.RedBull or PdfVendor.DrPepper
-                                                    or PdfVendor.Bimbo)
+                                                && (vendor == PdfVendor.DrPepper
+                                                    || _visionReader is not null
+                                                    && vendor is PdfVendor.RedBull or PdfVendor.Bimbo))
         {
             return nothing;
         }
     }
 
     /// <summary>
-    /// A Dr Pepper invoice prints its own header, but the **invoice number is typed anyway**, the
-    /// same as every other PDF vendor. It is the one field on the page nothing can check — no check
-    /// digit, no total to reconcile against, one printed copy — and this scanner demonstrably flips
-    /// digits in short numeric fields: two scans of ticket 5218300220 read its printed TIME as 11:29
-    /// and 11:19. A wrong number breaks the match with the store's payable and has no symptom.
+    /// Dr Pepper: one picture request, then XML.
     ///
-    /// That one window carries the rest of the header with it. The date and the total are **shown**
-    /// beside the box when the scan read them — which is the only check those two can have, and it
-    /// lands while the operator is holding the paper — and turn into boxes of their own only when
-    /// the scan destroyed them. A row's own figures are asked for from inside the parser, by which
-    /// point the package subtotals have already settled everything they can.
+    /// It used to be three requests — a full read plus two independent barcode passes that had to
+    /// agree — and it asked the operator about every code they did not agree on. That design is
+    /// Bimbo's, and Bimbo needs it: Bimbo prints a UPC body with no check digit, so a code there
+    /// cannot say for itself whether it was read correctly. Dr Pepper prints a whole UPC-A. The
+    /// check digit catches a misread for free, without a network request, and on 2026-08-13 it
+    /// caught three misreads out of three while the two extra passes caught nothing the check digit
+    /// had not already found — and produced 29 false questions on one thirty-row ticket.
+    ///
+    /// Dropping them also stretches the free allowance three-fold, which decides how good the
+    /// reading is: the day those passes were running, both Flash models were exhausted by early
+    /// afternoon and every invoice after that was read by Flash-Lite.
+    ///
+    /// So nothing here interrogates the model any more. Invoice number and date are still absent
+    /// from the AI contract and typed into empty boxes.
     /// </summary>
     private Converted ConvertDrPepper(
-        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings, byte[] pdfBytes)
+        IReadOnlyList<PdfTextLine> positionedLines, string inputFileName,
+        List<ConversionWarning> warnings, byte[] pdfBytes)
     {
-        // The picture first, because whether this page is readable at all now depends on it.
-        var seen = ReadWithVision(pdfBytes, VisionVendor.DrPepper);
-
-        // Before anything is asked: a page that reads as nothing at all is not an invoice with a
-        // damaged field on it, and putting three prompts in front of the operator before saying so
-        // is three windows they cannot answer.
-        //
-        // Unless the picture read it. A sheet that went through crooked is perfectly legible to a
-        // person and that is the whole reason for a second reader — but the text layer is then
-        // **discarded entirely**, not merely tolerated. The upside-down scan is not blank: it has 136
-        // lines on it and some of them match as product rows ("SO'6Z ZI T 9Yd"), so leaving them in
-        // would put that garbage into the invoice alongside what the picture read.
-        if (!DrPepperPdfParser.LooksReadable(lines))
+        DrPepperVisionTicket? ticket = null;
+        if (_visionReader is IDrPepperVisionReader ai)
         {
-            if (seen.Rows.Count == 0) DrPepperPdfParser.RequireAReadableInvoice(lines);
-            lines = [];
+            DrPepperVisionReading reading;
+            try
+            {
+                reading = ai.ReadDrPepper(pdfBytes);
+            }
+            catch
+            {
+                reading = DrPepperVisionReading.Unavailable();
+            }
+            if (reading.Note.Length > 0) _visionNote = $"DrPepper AI: {reading.Note}";
+
+            if (reading.Status == DrPepperVisionStatus.Success)
+            {
+                ticket = DrPepperVisionParser.Parse(reading, warnings);
+            }
+            else if (reading.Status == DrPepperVisionStatus.Unreadable)
+            {
+                throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                    "AI reached this Dr Pepper invoice but could not read a complete, valid invoice "
+                    + "after one fresh retry. Re-scan the complete invoice and try again. OCR values "
+                    + "were not substituted.");
+            }
         }
 
-        decimal? total = DrPepperPdfParser.FindAmountDue(lines) ?? seen.PrintedTotal;
+        if (ticket is null)
+        {
+            if (!UseDrPepperOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Dr Pepper invoice used the legacy OCR parser "
+                + "after the operator approved that fallback for this batch."));
 
-        // Asking for the total does not weaken the sum-must-match gate, it restores it: a figure a
-        // person read off the paper is worth more than one OCR guessed at.
-        var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Dr Pepper", total ?? 0m, 0, 1, 1, "Dr Pepper",
-            NeedsTotal: total is null));
+            var lines = positionedLines.Select(l => l.Text).ToList();
+            DrPepperPdfParser.RequireAReadableInvoice(lines);
+            decimal? legacyAmountDue = DrPepperPdfParser.FindAmountDue(lines);
+            if (legacyAmountDue is null)
+                throw new EdiConversionException(PdfReasonCodes.NoTotal,
+                    "The legacy parser could not read AMOUNT DUE for validation. Re-scan the "
+                    + "invoice; AMOUNT DUE is never typed or used to derive missing line values.");
 
-        Invoice invoice = DrPepperPdfParser.Parse(
-            lines, warnings, f => AskDrPepperField(inputFileName, f, pdfBytes),
-            keyed.Date, keyed.InvoiceNumber, total ?? (keyed.Total == 0m ? null : keyed.Total), seen);
+            var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
+                inputFileName, "Dr Pepper", legacyAmountDue.Value, 0, 1, 1, "Dr Pepper"));
+            Invoice legacy = DrPepperPdfParser.Parse(
+                lines, warnings, f => AskDrPepperField(inputFileName, f, pdfBytes),
+                keyed.Date, keyed.InvoiceNumber, legacyAmountDue);
+            var legacyDoc = new ConvertedDocument(
+                OutputNaming.BuildOutputFileName(inputFileName), NaxmlBuilder.Build(legacy));
+            return new Converted([legacyDoc], "PDF/DrPepper legacy OCR", legacy.Lines.Count,
+                warnings, 0, null, Headline(legacy));
+        }
 
-        var doc = new ConvertedDocument(OutputNaming.BuildOutputFileName(inputFileName), NaxmlBuilder.Build(invoice));
-        return new Converted([doc], "PDF/DrPepper", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+        // Both header boxes begin empty. The AI response shape has no invoice number or date, and
+        // AMOUNT DUE is validation context only, never an operator-entered field.
+        var details = AskInvoiceDetails(new InvoiceDetailsRequest(
+            inputFileName, "Dr Pepper", ticket.Total, ticket.Lines.Count, 1, 1, "Dr Pepper"));
+        Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
+        var doc = new ConvertedDocument(
+            OutputNaming.BuildOutputFileName(inputFileName), NaxmlBuilder.Build(invoice));
+        return new Converted([doc], "PDF/DrPepper AI", invoice.Lines.Count,
+            warnings, 0, null, Headline(invoice));
+    }
+
+    private bool UseDrPepperOcrFallback(string inputFileName)
+    {
+        if (_drPepperOcrFallbackForBatch is bool decided) return decided;
+        _drPepperOcrFallbackForBatch =
+            _invoiceDetailsPrompt?.ConfirmDrPepperOcrFallback(inputFileName) == true;
+        return _drPepperOcrFallbackForBatch.Value;
     }
 
     /// <summary>
@@ -407,7 +478,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
     /// does not have to count down the page. Cancelling skips the file: a made-up quantity books
     /// stock that never arrived, and nothing downstream would catch it.
     /// </summary>
-    private string AskDrPepperField(string inputFileName, DrPepperUnknownField field, byte[] pdfBytes)
+    private string AskDrPepperField(
+        string inputFileName, DrPepperUnknownField field, byte[] pdfBytes)
     {
         string what = field.Field switch
         {
@@ -421,27 +493,76 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
                 $"The {what} for \"{field.Description}\" could not be read from this invoice and could not be "
                 + "worked out from the rest of it, so it has to be typed in - but no prompt is available.");
 
-        // The row itself, so the answer is on screen rather than somewhere on the paper. The line
-        // above is the product line, which is what makes the row recognisable.
-        // The barcode is printed on the product line, one above the priced row; units and amount are
-        // on the priced row itself.
+        // Dr Pepper prints one product over two lines: description + UPC, then the priced figures.
+        // Gemini's adapter supplies both exact line numbers. The approved legacy OCR parser reports
+        // the priced line, so its product line is the one immediately above. OCR is allowed to
+        // locate these rectangles, never to supply or arbitrate an AI value.
         bool barcode = field.Field == LineField.Barcode;
-        int focusLine = barcode ? Math.Max(1, field.LineNo - 1) : field.LineNo;
-        var snip = field.LineNo > 0
-            ? PdfRowSnipper.TryCut(
-                pdfBytes, Math.Max(1, field.LineNo - 1), field.LineNo,
-                field.PrintedValue, focusLine, barcode,
-                lastOfDuplicates: field.Field == LineField.Amount)
-            : PdfRowSnipper.TryCutWholePage(
-                pdfBytes, field.Page, field.PageUpsideDown);
+        bool aiGeometry = field.ProductLineNo >= 0 || field.AmountLineNo >= 0;
+        int productLine = aiGeometry ? field.ProductLineNo : field.LineNo - 1;
+        int amountLine = aiGeometry ? field.AmountLineNo : field.LineNo;
+        int focusLine = barcode ? productLine : amountLine;
+        int firstLine = Math.Min(productLine, amountLine);
+        int lastLine = Math.Max(productLine, amountLine);
 
-        bool wholePage = field.LineNo <= 0 && snip is not null;
+        // Fixed-form fallbacks measured from the real SALES and CREDITS forms. They are used only
+        // if the exact printed token cannot be placed. The vertical coordinate still comes from the
+        // exact row, so this can box a field whose hidden OCR token was dropped without guessing a
+        // row. These are form columns, not a product catalogue.
+        PdfColumnBand exactColumn = field.Field switch
+        {
+            // Only the twelve-digit UPC half of the UPC/SKU cell. The slash and eight-digit SKU
+            // are deliberately outside the box because they are not what the operator is asked to
+            // type.
+            LineField.Barcode => new PdfColumnBand(0.42, 0.69),
+            LineField.Units => new PdfColumnBand(0.34, 0.43),
+            LineField.Amount => new PdfColumnBand(0.82, 0.99),
+            _ => throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                $"Dr Pepper cannot ask for the unsupported {field.Field} field."),
+        };
+
+        PdfRowSnip? snip = firstLine > 0 && lastLine > 0
+            ? PdfRowSnipper.TryCut(
+                pdfBytes, firstLine, lastLine,
+                field.PrintedValue, focusLine, barcode,
+                lastOfDuplicates: field.Field == LineField.Amount,
+                fallbackColumn: exactColumn)
+            : null;
+        PdfRowSnip? header = focusLine > 0
+            ? PdfRowSnipper.TryCutDrPepperHeader(pdfBytes, focusLine, field.IsCredit)
+            : null;
+
+        // The exact boxed row is what a Dr Pepper question is meant to be, and it is still the only
+        // thing shown when it can be cut. What changed on 2026-08-13 is what happens when it cannot.
+        //
+        // The store's scanner is producing pages with no text layer at all, so there are no line
+        // coordinates, so nothing can be cut or boxed. Refusing there threw away a whole delivery
+        // over one barcode the model duplicated a zero in — a code any person can read off the page
+        // in two seconds. So the page itself is shown, with the row named above it, exactly as Red
+        // Bull already does. It is worse than a boxed row and it looks it; it is far better than
+        // sending the ticket back.
+        //
+        // The old objection stands and is why `ColumnLegend` is still empty here: a *drawn* column
+        // header cannot line up with a scan, and Dr Pepper's CREDITS section has no WHSLE column, so
+        // a legend can walk the operator onto the neighbouring figure. A photograph of the page has
+        // the real columns on it in the right places.
+        bool wholePage = snip is null || snip.FocusWidth < 1 || snip.FocusHeight < 1 || header is null;
+        if (wholePage)
+        {
+            snip = PdfRowSnipper.TryCutWholePage(pdfBytes, field.Page, field.PageUpsideDown);
+            header = null;
+        }
+
+        if (snip is null)
+            throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                $"The {what} for \"{field.Description}\" has to be typed in, and this invoice could "
+                + "not be shown as a picture at all. Re-scan the complete invoice and try again.");
 
         string? typed = _invoiceDetailsPrompt.AskLineField(new LineFieldRequest(
             inputFileName, "Dr Pepper", field.Field, field.Position, field.LineCount,
             field.Gtin, field.Description, field.PrintedValue, null, field.Amount, snip,
-            snip is null || wholePage ? null : PdfRowSnipper.TryCutHeader(pdfBytes, field.LineNo),
-            ColumnLegend: ColumnLegend(PdfVendor.DrPepper, field.IsCredit),
+            header,
+            ColumnLegend: "",
             ColumnName: field.Field switch
             {
                 LineField.Units => "UNITS",
@@ -456,10 +577,11 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
             }),
             WholePage: wholePage));
 
-        if (string.IsNullOrWhiteSpace(typed))
-            throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
-                $"Skipped - the {what} for \"{field.Description}\" on {inputFileName} was not supplied. "
-                + "The original file was not changed.");
+        // Skip this file is the operator's decision, exactly like dismissing the invoice-number
+        // prompt, and it is reported as Canceled for the same reason. It used to come back as a
+        // red Failed with a scan-damage reason code on it, which is how a queue ends up showing
+        // somebody their own click as a fault in the invoice.
+        if (string.IsNullOrWhiteSpace(typed)) throw new OperationCanceledException();
 
         return typed;
     }
@@ -467,29 +589,25 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
     /// <summary>
     /// The vendor's column names, in the order they are printed, for the strip above the row.
     ///
-    /// A backstop for the printed header rather than a replacement: <see cref="PdfRowSnipper"/> cuts
-    /// the real one off the same page at the same width, which is far better because it lines up —
-    /// UNITS sits over the units. This is what gets shown when there is nothing to cut, and there
-    /// are three ways to get there. A Dr Pepper header the scan damaged until it no longer reads as
-    /// one; a Red Bull page where none was found; a row with no line number at all.
+    /// A backstop for vendors that permit one: <see cref="PdfRowSnipper"/> cuts the real header off
+    /// the same page at the same width, which is far better because it lines up — UNITS sits over
+    /// the units. Dr Pepper deliberately returns an empty string here; its questions require the
+    /// photographed SALES/CREDITS header and fail closed when that cannot be located.
     ///
     /// Worth having anyway, because the strip is what makes a cut-out row readable. A snip is a
     /// couple of printed lines out of the middle of a ticket, and by item 16 the column names are a
     /// foot further up the page — so a row without them is a line of bare figures and no way to tell
     /// the NET from the AMOUNT.
     ///
-    /// <paramref name="credit"/> picks the section, which is a real difference and not a detail:
-    /// Dr Pepper's CREDITS block prints no WHSLE column, so a sales legend over a credit row would
-    /// have the operator counting across to the wrong figure. Red Bull prints one column set for
-    /// both and only brackets the figures.
+    /// <paramref name="credit"/> remains part of the shared adapter signature. Vendors that still
+    /// use this textual backstop print the same column set in both sections.
     /// </summary>
     private static string ColumnLegend(PdfVendor vendor, bool credit) => vendor switch
     {
         PdfVendor.RedBull => "ID   QTY   UNITS   DESCRIPTION   PRICE   DEP   DISC   SUGAR   TOTAL",
-        PdfVendor.DrPepper when credit =>
-            "DESCRIPTION   UPC/SKU\nCASES   UNITS   NET   TAX   AMOUNT",
-        PdfVendor.DrPepper =>
-            "DESCRIPTION   UPC/SKU\nWHSLE   CASES   UNITS   NET   TAX   AMOUNT",
+        // Dr Pepper never receives a synthetic legend. Its prompt is refused unless the real
+        // photographed SALES or CREDITS header can be cut from the invoice.
+        PdfVendor.DrPepper => "",
         // One column set for both bands: Bimbo's RETURNS block prints the same headings as its
         // DELIVERIES block and only puts a minus in front of the figures, so unlike Dr Pepper there
         // is no second legend to pick between. Two lines because that is how the ticket prints it,
@@ -982,10 +1100,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
             }),
             WholePage: wholePage));
 
-        if (string.IsNullOrWhiteSpace(typed))
-            throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
-                $"Skipped - the {what} for line {line.Position} of {inputFileName} was not supplied. "
-                + "The original file was not changed.");
+        // Skip this file is a decision, not a defect - see the matching note on the Dr Pepper ask.
+        if (string.IsNullOrWhiteSpace(typed)) throw new OperationCanceledException();
 
         warnings.Add(new ConversionWarning(line.LineNumber, PdfReasonCodes.UnreadableLine,
             $"{(line.Description.Length > 0 ? line.Description : line.ItemNumber)} - the {what} was "
@@ -1105,16 +1221,24 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter
     {
         log.Status = "Failed";
         log.ReasonCode = reasonCode;
-        log.UserFriendlyReason = userMessage;
-        log.ExceptionDetail = ex.ToString();
+        // Exception/user text can embed an invoice description, UPC, amount, or a Gemini value.
+        // The UI still receives the useful message; the persistent log stores metadata only.
+        log.UserFriendlyReason = reasonCode is null ? "Conversion failed." : $"Conversion failed: {reasonCode}.";
+        log.ExceptionDetail = ex.GetType().FullName;
         log.VisionRead = _visionNote;
         _logger.TryWrite(log);
         return new ConversionOutcome { Success = false, UserMessage = userMessage, ReasonCode = reasonCode };
     }
 
+    /// <summary>
+    /// Why the file was refused, first. The queue's Details column shows one line, so leading with
+    /// "Could not convert X" spent it saying what the red word already said and hid the reason
+    /// below the fold — a real refusal, a checksum that did not settle and a page that could not be
+    /// drawn all read identically in the list.
+    /// </summary>
     private static string BuildConversionFailureMessage(string fileName, EdiConversionException ex)
     {
-        return $"Could not convert {fileName}.\n\n{ex.UserMessage}\nThe original file was not changed.";
+        return $"{ex.UserMessage}\n\nCould not convert {fileName}. The original file was not changed.";
     }
 
     private static string ReadFailureMessage(string fileName, Exception ex) => ex switch

@@ -49,8 +49,8 @@ store's existing `07189905101` in department ICE CREAM. Restore the check digit 
 **A sixth, 2026-08-11: a second *reader* is not a second calculation.** `QTY x PRICE` checked against
 `TOTAL` is the same OCR pass twice, which is why it cannot see a glyph the scanner renders wrongly in
 both columns. A vision model reading the **picture** fails differently. It confirms the established
-Dr Pepper and Red Bull parsers; Bimbo is now picture-first and uses a second, focused picture request
-to verify every check-digit-less UPC. See `GeminiVisionReader.cs`.
+Red Bull's parser; Bimbo and Dr Pepper are now picture-primary and use three independent picture
+passes for every UPC. See `GeminiVisionReader.cs`.
 
 **A fifth, learned the hard way on 2026-08-11: a checksum may confirm a figure, never supply one.**
 Red Bull ticket 2035939353 reached its own printed $394.84 exactly, through four wrong rows whose
@@ -58,10 +58,10 @@ errors cancelled to the cent, and reported it with complete confidence. A calcul
 misread returns a confident wrong answer, and `QTY × PRICE` is not a second opinion about `TOTAL` —
 it is the same scan damage wearing a different hat. So where two *different* readings of a figure
 agree it is taken; where they do not, or where there is only one, the operator is shown the printed
-row and asked. This is why the PDF vendors prompt more than they used to: 64 questions across
-Red Bull's twelve samples, 8 across Dr Pepper's. **A barcode is the exception** — Red Bull's carries
-its own check digit, while Bimbo's must agree across two independent picture requests. That is
-verification rather than arithmetic.
+row and asked. Dr Pepper no longer uses OCR agreement at all: Gemini owns its values and OCR only
+locates the exact highlight for a question raised by Gemini's own checks. **A barcode is the
+exception** — Red Bull's carries its own check digit, while Bimbo and Dr Pepper require agreement
+across three independent picture requests. That is verification rather than arithmetic.
 
 
 ## Do / don't
@@ -98,12 +98,14 @@ verification rather than arithmetic.
   column that is not on their paper is worse than saying nothing. The ticket's own headings are cut
   from the same page at the same width and shown **directly on top of** the row, so UNITS sits over
   the units. That strip is what makes a snip readable at all: a cut is two printed lines out of the
-  middle of a ticket, and by item 16 the printed header is a foot further up the page. It goes
-  missing three ways — a Dr Pepper header the scan damaged past `IsColumnHeader`, a Red Bull page
-  with no header line, and a row with no line number — so `LineFieldRequest.ColumnLegend` carries the
-  names as words behind it, written per vendor **and per section**: Dr Pepper's CREDITS block prints
-  no WHSLE, and a sales legend over a credit row has the operator counting across to the figure next
-  door. **`IsColumnHeader` needs a pattern per vendor and it is not obvious that it does**
+  middle of a ticket, and by item 16 the printed header is a foot further up the page. Dr Pepper is
+  strict: the prompt requires the invoice's photographed three-line section strip (SALES/CREDITS
+  banner plus both column-header lines), a crop of
+  both lines of the requested product, and a box around only the requested value. It never uses
+  `ColumnLegend`, never opens a whole scrollable page, and refuses the question when any of those
+  coordinates are missing. This matters because CREDITS has no WHSLE column and a drawn sales legend
+  can shift the operator onto the neighbouring value. Other vendors may still use the deliberately
+  weaker typed fallback. **`IsColumnHeader` needs a pattern per vendor and it is not obvious that it does**
   (2026-08-12): it matched on `UNITS` + `AMOUNT`, which are Dr Pepper's words, so every Bimbo question
   silently fell through to the typed legend and shipped that way. Bimbo prints QTY rather than UNITS,
   and its scans render AMOUNT as `ANOLNT`, `AHRUNT`, `AH00NT`, `AHUUNI`, `ANOUNT`, `ANO NT`, `AMONT`
@@ -112,9 +114,11 @@ verification rather than arithmetic.
   printed lines (`ITEM / SUGG RETAIL / WHOLESALE` above `UPC No QTY RETAIL AMOUNT PRICE AMOUNT`), and
   the lower one alone reads "RETAIL AMOUNT PRICE AMOUNT" over four figures — naming two of them twice
   on the one vendor with two adjacent AMOUNT columns. The band is extended upward when the line above
-  carries RETAIL without PRICE, which is true of Bimbo's upper line and of nothing on Dr Pepper's
-  page. The failure mode to remember is that a missing cut **looks fine**: the typed legend renders,
-  it just cannot line up, so it reads as a cosmetic complaint rather than as the header being absent. The typed one is deliberately second best and looks it (grey ground, our own font), because
+  carries RETAIL without PRICE. Dr Pepper's two-line heading is extended upward separately when the
+  preceding line contains DESCRIPTION and UPC/SKU. The failure mode to remember is that a missing
+  cut **looks fine** if a typed legend renders, even though it cannot line up; Dr Pepper therefore
+  has no such fallback. Where another vendor permits one, it is deliberately second best and looks
+  it (grey ground, our own font), because
   it cannot align with a scan and must not invite anyone to read straight down off it. **Neither one
   is ever marked** — the box goes on the figure being typed, never on a column name. **Which lines a row spans is the parser's to say, never the snipper's:** Dr Pepper
   prints the barcode on the product line *above* the priced row and Red Bull prints it on the line
@@ -123,16 +127,12 @@ verification rather than arithmetic.
   to the log and to the file list, because by the time one is written there is nothing left to do
   about it. Best-effort by design: `TryCut` never throws and
   returns null for a PDF that was never a scan, because the message it decorates has to stand on its
-  own. **Where the text layer read the row the figure itself is boxed; where the row came off the
-  picture nothing is marked at all** (2026-08-12). The model's `verticalPosition` was drawn as a band
-  for a day; rendering every prompt the store's thirty samples raise and looking at each one put it on
-  the right row **6 times out of 11 on Red Bull and 0 out of 8 on Dr Pepper** — twice on the address
-  block, twice on the totals — and a sharper instruction did not change the shape. Half-right is the
-  one result that cannot ship, because a marker on the wrong row is read, typed, and books a real
-  figure off another product with every total still agreeing. `verticalPosition` is gone entirely:
-  the page opens **at the top**, and `LineFieldRequest.WholePage` makes the dialog print *which row*
-  above the picture — without that the operator gets small print, a box, and a hint reading "find the
-  row by its name" with no name anywhere on screen. A WinForms note that cost a day: a panel's
+  own. Dr Pepper's picture-primary rows are located from page, SALES/CREDITS section and page-local
+  row order in the OCR geometry; OCR text never supplies or checks the value. A Dr Pepper question
+  requires an exact value box rendered through the same `SnipView` colour palette as Bimbo, and
+  missing coordinates require a rescan rather than an unmarked
+  whole page. The model's old `verticalPosition` is not used. Red Bull's image-only fallback can
+  still open an unmarked whole page with the row named above it. A WinForms note that cost a day: a panel's
   `AutoScrollPosition` set **before layout** is silently clamped to zero (its maximum is still the
   default 100) and must be set again on `HandleCreated`. **Turn the page over is gone** (2026-08-12,
   at the user's request): a page nobody can read is a page to re-feed at the scanner in five seconds,
@@ -144,7 +144,45 @@ verification rather than arithmetic.
   transcribes the printed **bars** into a token of ones (`1111'1"III511111` above `611269332827`) and
   boxing it pointed confidently at something unreadable. A token that does not carry twelve digits is
   not the code and gets no box (`RedBullSnipTests.TheBarsAreNeverMarkedAsIfTheyWereTheCode`).
-- `DrPepperPdfParser.cs` — Dr Pepper PDF → `Invoice`. Three things beyond the plain layout. **Ink:**
+- `DrPepperVisionReader.cs`, `GeminiVisionReader.cs`, and `DrPepperVisionParser.cs` — **one picture
+  request, then XML** (rewritten 2026-08-13). Gemini owns every value; the parser maps them and
+  never argues. OCR is not consulted at all on this path any more — Dr Pepper asks no line
+  questions, so there is nothing to draw a highlight on.
+
+  **It does not refuse invoices.** The old parser had twenty-three ways to, and across a full day of
+  the store's real tickets not one caught a real error while every refusal that day traced back to
+  our own handling. A figure that does not reconcile is now written into the file with a note on it.
+  The only refusal left is a reading with no postable row in it — a row needs a barcode, a unit
+  count and an amount, and a row missing one is dropped and named with its money so it can be added
+  by hand. `ParseDrPepperReply` is the matching gate on the AI side and requires exactly two things:
+  one usable row, and AMOUNT DUE. **Do not add fields back to it.** It used to demand CASES, NET,
+  TAX and WHSLE on every row plus seven top-level figures, and refused a flawless 49-row reading
+  because `totalSale*` was empty — a ticket carrying returns prints a SALES SUMMARY block *instead
+  of* a TOT SALE line, so that figure is not on the paper.
+
+  **Two checks survive, and neither blocks.** The UPC-A check digit (arithmetic on twelve digits, no
+  request, no prompt) and the printed unit count. They are kept because these are the two mistakes
+  nothing downstream can see: a wrong code posts the delivery to a duplicate item nobody will ever
+  scan, so the real product shows nothing received; a wrong count balances to the penny and leaves
+  the shelf short for good. Both produce a note naming the row. A code that fails its check digit
+  **ships as read** — never padded, repaired, or replaced by a catalogue lookup, because a repaired
+  code looks perfect and is the one failure that hides.
+
+  **The two extra barcode passes are gone.** They were Bimbo's design, and Bimbo needs them: it
+  prints a UPC body with no check digit. Dr Pepper prints a whole UPC-A. On the day they were
+  removed the check digit had caught three misreads out of three while the extra passes caught
+  nothing it had not — and one of them slid a row out of step and turned a thirty-row ticket whose
+  money was exact into twenty-nine questions. They also cost two thirds of the free allowance, which
+  is what decides whether an invoice is read by Flash or by Flash-Lite.
+
+  The prompt is where a misread is actually caught, because the model can look at the page again and
+  we cannot — hence the explicit final pass in `DrPepperPrimaryPrompt` (count the digits, verify the
+  check digit, multiply the row out, add the subtotals up). Those checks say *where to look again*,
+  never what to write. Invoice number and date stay absent from the schema and typed into empty
+  boxes. If Gemini is unavailable the legacy parser still requires explicit once-per-batch approval;
+  "unreadable" is a rescan and never a quiet OCR read. Routine credits remain green as negative
+  quantities at positive costs.
+- `DrPepperPdfParser.cs` - explicitly approved legacy Dr Pepper OCR parser. Three things beyond the plain layout. **Ink:**
   invoices come back marked up in pen and OCR turns a stroke into a stray token, so a token with no
   digit in it is discarded — but only white space and the unused NET/TAX columns may absorb one. A
   mark *welded to* a figure comes off only when the figure is **money** (`20.66-`), because money is
@@ -165,8 +203,8 @@ verification rather than arithmetic.
   is shown to the operator instead. With no prompt available the invoice is refused, never guessed. A damaged **AMOUNT is never back-filled from AMOUNT DUE**: that
   would satisfy the only checksum by construction. WHSLE and CASES are the exception that does *not*
   ask, because they seed nothing but a new item's shelf price. Its **invoice number is typed like
-  every other vendor's** (2026-08-10) and overrides the printed one; the date and total are shown in
-  the same window for checking, and become boxes only when the scan destroyed them. **An invoice
+  every other vendor's** (2026-08-10) and overrides the printed one. In production the date is also
+  typed into an empty box and AMOUNT DUE is validation-only; the legacy parser never asks for it. **An invoice
   that does not reach its own AMOUNT DUE is no longer refused** (2026-08-11): the total says
   *something* is wrong, so the rows that cannot be right are asked about first — `CASES x NET` is
   the row printing its own money a second time in different glyphs, and on the two samples that hit
@@ -298,42 +336,21 @@ verification rather than arithmetic.
   so one slow page can cost 90s twice over), a genuine 429 costing a 20- or 50-second sleep, or a
   slow line. A read that comes back empty still writes its note, because two minutes and nothing is a
   different fault from two minutes and forty rows.
-- **A page the text layer cannot read is no longer a lost file.** Where the OCR found no product
-  rows and the picture did, the picture *is* the invoice: `RowsFromThePicture` builds the rows on
-  Red Bull and Dr Pepper and `SectionsFromThePicture` on Bimbo, `PdfTextExtractor`'s
-  `PDF_NO_TEXT_LAYER` refusal is deferred (`ConversionService.
-  TextOr`), and Dr Pepper's `LooksReadable` gate now **discards the text layer whole** rather than
-  merely tolerating it — the upside-down scan is not blank, it has 136 lines and some of them match
-  as product rows (`SO'6Z ZI T 9Yd`), so leaving them in would put garbage in beside the reading.
-  Those rows are **not** then "corroborated" by the same picture (`Settle` is handed an empty
-  reading), because one reader agreeing with itself would wave every figure through; what checks
-  them is `QTY x PRICE = TOTAL` over three separately-read figures and the ticket's own total, which
-  is why the model is asked for QTY at all. Two things the picture path has to do for itself that the
-  text layer got for free (2026-08-11): **a barcode still has to pass its own check digit** — the
-  model misreads a digit exactly as the scanner does, one sample's printed `810128528191` came back
-  `810128529191`, and the invoice still reached its own AMOUNT DUE to the cent with a line booked onto
-  a product that never arrived — and **Dr Pepper's pallets and shells are not goods**
-  (`IsReturnableEquipment`), which the text layer never had to know because they carry no
-  `<barcode>/<SKU>` token, while on the picture a name, a number and a count is exactly the shape of a
-  product row. And the quietest of the three: **`TOT SALE` has to gate the quantities here too** — the
-  hard units check existed but its figure came only from the text layer, so on a page with no text
-  layer it never ran, and one sample booked 342 units against the paper's 326 while reporting the
-  ticket's own `$588.97` to the cent. **Line number 0 throughout**: with no text layer there
-  are no coordinates, and an invented line number would mark a figure on some other row — a question
-  with no picture is worth having, one with the wrong picture is not. Where both readers found rows
-  but not the same number, that is said out loud and **not** patched: a lost row takes its money
-  with it so no total can see it, but swapping ten double-read rows for a single-reader list to
-  recover one is the worse trade.
-- How a vision reading is used: it is a **second reader, never an oracle**. It joins the existing
+- **A page the text layer cannot read is no longer a lost file.** Dr Pepper sends the complete page
+  pictures to its dedicated Gemini-primary reader even when no OCR text exists. OCR is optional
+  geometry for exact operator highlights only; it never contributes a row or figure. The primary
+  response must carry every physical product, package subtotal, TOTAL SALE, sales/credit summary and
+  AMOUNT DUE, and Core validates those independent checks. Bimbo has the same picture-primary value
+  boundary. Red Bull retains its separate `RowsFromThePicture` second-reader path.
+- How a Red Bull vision reading is used: it is a **second reader, never an oracle**. It joins the existing
   settle ladders as another candidate — in Red Bull's `SettleByPrintedTotal` the printed total may
   now confirm a *picture* reading as well as a TOTAL column, which is what repairs a row that
   reconciles with itself (one ticket prints $54.70 and the scan renders `$64.70` in PRICE and TOTAL
   both). Where the two readers agree, the figure is taken. Where they disagree, only arithmetic over
   genuinely different glyphs may overrule the picture — so a **QTY 1 row may not**, because its
   `QTY x PRICE` is the same figure twice. Where nothing independent separates them, the operator is
-  still asked. Dr Pepper's rungs are the same shape: a lost AMOUNT confirmed by `CASES x NET`, a row
-  the picture reads differently that lands the invoice on its own AMOUNT DUE, and a package group's
-  counts confirmed by its printed subtotal — all of them confirmation, never derivation.
+  still asked. Dr Pepper does not enter this settle ladder: Gemini is authoritative, and its own
+  row/subtotal/summary checks can raise an exact highlighted question but never accept an OCR value.
 - `PdfBarcodeReader.cs` — decodes the printed **bars** off a scanned page (ZXing), tied to the text
   line they sit on. Red Bull only; Dr Pepper prints no bars. This is the one encoding on these pages
   with error correction in it, read by code that shares nothing with the OCR — so it fails

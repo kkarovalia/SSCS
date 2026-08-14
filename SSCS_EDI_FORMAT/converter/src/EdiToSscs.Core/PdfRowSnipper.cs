@@ -126,14 +126,44 @@ public static class PdfRowSnipper
             {
                 if (!IsColumnHeader(lines[i].Text)) continue;
 
-                // Bimbo splits its column names over two printed lines - "ITEM / SUGG RETAIL /
-                // WHOLESALE" sits above "UPC No QTY RETAIL AMOUNT PRICE AMOUNT", and which money
-                // column is which is only legible with both. Cutting the lower line alone gives a
-                // strip reading "RETAIL AMOUNT PRICE AMOUNT" over four figures, which names two of
-                // them twice. The upper line carries RETAIL on all eleven readable samples and no
-                // other vendor's header has a second line above it, so this stays off Dr Pepper.
+                // Both fixed forms split their real headings over two printed lines. Bimbo puts
+                // ITEM/SUGG RETAIL/WHOLESALE above UPC/QTY/RETAIL AMOUNT/PRICE/AMOUNT. Dr Pepper
+                // puts DESCRIPTION/UPC-SKU above WHSLE/CASES/UNITS/NET/TAX/AMOUNT (or the shorter
+                // CREDITS set). Keeping both lines is what makes this a photograph of the vendor's
+                // header rather than a partial strip that no longer identifies the product column.
                 int first = i > 0 && Continues(lines[i - 1].Text) ? i : i + 1;
                 return Cut(pdfBytes, first, i + 1, null, i + 1, false, mark: false);
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Dr Pepper's complete photographed section header: the SALES or CREDITS banner, followed by
+    /// DESCRIPTION/UPC-SKU and that section's numeric columns. Unlike the shared best-effort header
+    /// cutter, this is strict about both the vendor form and the requested section. A Dr Pepper
+    /// question must never put a SALES strip over a credit row or substitute drawn column names.
+    /// </summary>
+    public static PdfRowSnip? TryCutDrPepperHeader(
+        byte[] pdfBytes, int beforeLineNo, bool credit)
+    {
+        try
+        {
+            var lines = PdfTextExtractor.ExtractPositionedLines(pdfBytes);
+            for (int i = Math.Min(beforeLineNo, lines.Count) - 1; i >= 2; i--)
+            {
+                if (!IsDrPepperColumnHeader(lines[i].Text)
+                    || !IsDrPepperUpperHeader(lines[i - 1].Text)
+                    || !IsDrPepperSection(lines[i - 2].Text, credit)
+                    || lines[i - 2].PageNumber != lines[i].PageNumber) continue;
+
+                // i is zero-based for the lower column line. Cut wants one-based line numbers, so
+                // i-1 is the SALES/CREDITS banner and i+1 is the lower column line.
+                return Cut(pdfBytes, i - 1, i + 1, null, i + 1, false, mark: false);
             }
             return null;
         }
@@ -265,10 +295,21 @@ public static class PdfRowSnipper
     /// survive on all eleven, and no Bimbo product row carries either word.
     /// </summary>
     private static bool IsColumnHeader(string line) =>
-        (line.Contains("UNITS", StringComparison.OrdinalIgnoreCase)
-         && line.Contains("AMOUNT", StringComparison.OrdinalIgnoreCase))
+        IsDrPepperColumnHeader(line)
         || (line.Contains("RETAIL", StringComparison.OrdinalIgnoreCase)
             && line.Contains("PRICE", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsDrPepperColumnHeader(string line) =>
+        line.Contains("UNITS", StringComparison.OrdinalIgnoreCase)
+        && line.Contains("AMOUNT", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDrPepperUpperHeader(string line) =>
+        line.Contains("DESCRIPTION", StringComparison.OrdinalIgnoreCase)
+        && (line.Contains("UPC", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("SKU", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsDrPepperSection(string line, bool credit) =>
+        line.Trim().Equals(credit ? "CREDITS" : "SALES", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether the line above a column header is the top half of the same header — Bimbo prints
@@ -279,7 +320,8 @@ public static class PdfRowSnipper
     /// </summary>
     private static bool Continues(string line) =>
         line.Contains("RETAIL", StringComparison.OrdinalIgnoreCase)
-        && !line.Contains("PRICE", StringComparison.OrdinalIgnoreCase);
+        && !line.Contains("PRICE", StringComparison.OrdinalIgnoreCase)
+        || IsDrPepperUpperHeader(line);
 
     private static PdfRowSnip? Cut(
         byte[] pdfBytes, int firstLineNo, int lastLineNo,
@@ -465,12 +507,11 @@ public static class PdfRowSnipper
     ///    character for character, each character's own box is where that character is printed, and
     ///    the twelve digits before the slash can be marked exactly — SKU outside, description
     ///    outside.
-    ///  * **A damaged code gets a box around the whole token instead.** Where the scan read more
-    ///    characters than the paper has ("Limda0i8000200.287/2.0.020,4.68" for a token of 26
-    ///    printed characters), OCR spreads its characters evenly across the token's real width: the
-    ///    advance comes out at 3.5pt where the paper's is 4.2. The token's *outside edges* stay
-    ///    honest, so it can be boxed as a whole — but nothing inside it can, and a box drawn from
-    ///    those positions covers ten of the twelve digits while looking perfectly confident.
+    ///  * **A damaged code is not sliced from OCR character positions.** Where the scan read more
+    ///    characters than the paper has ("Limda0i8000200.287/2.0.020,4.68"), OCR spreads its
+    ///    characters across the token's real width. A vendor adapter can then use its verified UPC
+    ///    column; without that geometry the caller falls back to the whole row rather than drawing
+    ///    a confident box around the wrong eleven digits or around the unwanted SKU.
     ///
     /// Marking part of a barcode is not a smaller version of marking all of it. It is a wrong answer
     /// that gets typed in: eleven digits inside a box would have a check digit worked out for them
@@ -493,9 +534,10 @@ public static class PdfRowSnipper
             if (start >= 0 && word.Text.AsSpan(start, BarcodeDigits).IndexOfAnyExcept(Digits) < 0)
                 return Span(word, start, BarcodeDigits);
 
-            // Damaged. The token's edges are still where the token is printed, so box the lot; the
-            // hint under the box says which half to type, and typing both halves is accepted anyway.
-            return (word.Left, word.Right);
+            // Damaged. Do not box the UPC/SKU token as a whole: the SKU is not the requested value.
+            // A vendor adapter with verified form geometry can now select only the UPC column;
+            // without one, the caller gets the unconfident whole-row fallback.
+            return null;
         }
 
         return null;
