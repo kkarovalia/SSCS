@@ -6,7 +6,7 @@
 
 The second input path, for vendors who don't send EDI. Vendors: **Dr Pepper**, **Blue Bell**,
 **Bimbo Bakeries** and **Red Bull**, all verified end-to-end in live SSCS; and **Chubiwinos S&G**,
-which reconciles against eight and whose line figures are pinned against a hand-keyed SSCS screen but
+which reconciles against nine fixtures and whose line figures are pinned against a hand-keyed SSCS screen but
 which has not been round-tripped either. Per-vendor detail lives in [vendors/](./vendors/); the
 output format is in [FORMAT_SPEC.md](./FORMAT_SPEC.md).
 
@@ -15,8 +15,9 @@ wrong vendor is refused rather than mis-read.
 
 ## Architecture: two stages, shared backend
 
-1. **Per-vendor extraction** (the only vendor-specific work): read the PDF's text layer into a
-   header plus a list of line items.
+1. **Per-vendor extraction** (the only vendor-specific work): read the vendor's complete page
+   pictures on the normal path, or the PDF text layer in an explicitly approved legacy fallback,
+   into a header plus a list of line items.
    - header: `{ supplier name, invoice no, date, total }`
    - line: `{ gtin, description, units, unit cost, retail }`
 2. **Shared writer**: `NaxmlBuilder` turns that structure into XML bytes — the same target the EDI
@@ -25,9 +26,10 @@ wrong vendor is refused rather than mis-read.
 Only stage 1 differs per vendor. **Never hand-format XML inside a vendor parser** — always go
 through the one builder.
 
-### Dr Pepper and Bimbo are picture-primary
+### All five PDF vendors are picture-primary
 
-Dr Pepper and Bimbo do not use the PDF OCR text layer as a value reader. Gemini reads and
+Blue Bell, Chubiwinos, Dr Pepper, Bimbo and Red Bull do not use the PDF OCR text layer as a value reader on their normal
+paths. Gemini reads and
 cross-checks the invoice picture. OCR is used only to locate exact highlight coordinates. OCR
 values must never override, reject, confirm, or modify Gemini values. The legacy OCR parser runs
 only after explicit once-per-batch approval when Gemini is unavailable; there is no silent fallback.
@@ -130,7 +132,17 @@ has to be checked against SSCS, on a real ticket, before the shape of the output
 
 ## What Chubiwinos added to the architecture
 
-Chubiwinos (2026-07-26) is the first vendor whose scans damage the **money columns** often enough
+As of 2026-08-14 Chubiwinos' normal path is one vendor-specific Gemini request containing every
+page picture, followed by deterministic Core parsing and XML. It asks no product-row question.
+Whole 12-digit UPC-A and 13-digit EAN-13 values ship exactly as printed (hyphens removed only). When
+the vendor prints an 11-digit UPC-A body, Core appends its mathematically determined check digit, so
+the row is not lost (`85088300206` → `850883002062`). A printed failed check digit ships flagged,
+QTY is already individual units, and DUMP rows are negative units at positive cost. Row arithmetic,
+section totals, printed unit counts, grand totals, tax and vendor
+markers are warnings; only no postable row refuses. The legacy catalogue and repair search are not
+consulted on this path and remain unchanged behind explicit once-per-batch fallback approval.
+
+Chubiwinos' legacy OCR parser (2026-07-26) was the first whose scans damage the **money columns** often enough
 that a row cannot simply be read. Six rows across eight samples have a mangled price or extended.
 See [vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §4; the three ideas worth reusing:
 
@@ -162,21 +174,19 @@ to nothing. The OCR parser also proved unable to preserve every visibly readable
 receipt scans. Bimbo therefore became the first **picture-primary** vendor on 2026-08-13. See
 [vendors/BIMBO.md](./vendors/BIMBO.md). Four ideas are meant to be reused:
 
-- **Have the model read the whole invoice, then make Core prove it.** The first request copies every
-  row and the delivery, return, ticket and cash totals. Its vendor-specific prompt tells the model to
-  inspect each row twice and cross-check all four levels without changing a printed value. Core then
-  strictly parses the returned strings and independently repeats row, band and ticket arithmetic.
-  A disputed value is shown to the operator; model output is not serialized blindly.
-- **Verify check-digit-less UPCs with two different follow-up reads.** The second pass receives the
-  original page plus non-UPC row locators, never the first UPC. The third receives only one enlarged
-  UPC cell per row: no full invoice, description, item number, quantity, amount or prior answer. A
-  UPC is accepted only when all three independently return the same ten printed digits. Even a
-  two-to-one majority asks for that exact highlighted row; the August batch proved that two
-  full-page reads can repeat the same ambiguous glyph.
+- **Have the model read the whole invoice once, then write XML.** One request copies every row and
+  the delivery, return, ticket and cash totals. Its vendor-specific prompt tells the model to inspect
+  each row twice and cross-check all four levels while it can still look at the picture. Core repeats
+  those checks only to produce warnings; it does not reject the invoice or ask a line question.
+- **Accept the ten printed UPC digits as read.** The two follow-up barcode requests were removed on
+  2026-08-13 by explicit store-owner decision. Bimbo's printed body has no check digit, so a wrong
+  digit can ship silently and create a duplicate item in SSCS. Do not add verification, a suspicious
+  prefix warning or a catalogue back; fixing a code in SSCS was chosen over questions that cost a
+  complete delivery.
 - **Do not hardcode a product catalogue.** Bimbo buys new items continuously. Product-number → UPC
   data in source made every new item a code change and rebuild, and stale mappings were another way
   to turn a good read into the wrong product. The table was deleted; new products flow through the
-  three-read rule without a release.
+  one-read rule without a release.
 - **Keep fallback modes explicit.** If AI is unavailable before reading the page, the app asks once
   per queue batch whether to use the legacy PDF text parser. If AI reaches the page but its result is
   still incomplete or inconsistent after one fresh read, the page is rescanned. OCR values are never
@@ -189,6 +199,18 @@ cannot be wired in as a suggestion by accident. See
 [vendors/CHUBIWINOS.md](./vendors/CHUBIWINOS.md) §8.
 
 ## What Red Bull added to the architecture
+
+As of 2026-08-14, Red Bull's normal path is one vendor-specific Gemini request containing every
+page picture, followed by deterministic Core parsing and XML. It asks no product-row questions.
+Core posts `UNITS` directly, derives unit cost only as `TOTAL / UNITS`, sends credits as negative
+units at positive cost, and ships a failed-check-digit UPC exactly as read with a warning. Row math,
+footer-total and printed-unit disagreements are also warnings; only a reply with no postable row is
+refused. Invoice number and date stay outside the AI schema and are typed into empty boxes.
+
+The OCR, printed-bar decoder, catalogue repairs, settlement search and row questions described
+below remain unchanged behind an explicit once-per-batch legacy fallback approval. They are not
+consulted on the AI path. The lessons from that legacy implementation remain useful because they
+explain why the total is a warning rather than a gate.
 
 Red Bull (2026-08-04) is the first vendor whose **own printed total cannot gate the parse**, and the
 reason generalises: a checksum is only worth having if it is independent of the thing it checks.

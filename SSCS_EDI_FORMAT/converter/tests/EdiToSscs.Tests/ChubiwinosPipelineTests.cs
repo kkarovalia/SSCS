@@ -34,6 +34,11 @@ public class ChubiwinosPipelineTests
             BarcodePrompts.Add(request);
             return _next < barcodes.Length ? barcodes[_next++] : null;
         }
+
+        // This suite pins the unchanged legacy parser and its barcode prompts. Production now
+        // reaches it only through this explicit once-per-batch approval; the AI-primary contract
+        // is covered separately by ChubiwinosVisionPrimaryTests.
+        public bool ConfirmChubiwinosOcrFallback(string fileName) => true;
     }
 
     private static ConversionService Service(TempDir tmp, IInvoiceDetailsPrompt prompt) =>

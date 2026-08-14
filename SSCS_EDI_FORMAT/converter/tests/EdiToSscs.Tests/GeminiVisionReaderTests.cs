@@ -15,6 +15,8 @@ public class GeminiVisionReaderTests
 {
     private const string Scan = @"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf";
     private const string BimboScan = @"Fixtures\PDF\BIMBO_84294890013239_sscs_verified.pdf";
+    private const string BlueBellScan = @"Fixtures\PDF\BLUEBELL_033100786112.pdf";
+    private const string ChubiwinosScan = @"Fixtures\PDF\CHUBIWINOS_6V9389.pdf";
 
     /// <summary>
     /// Answers each request from a script and records what it was sent.
@@ -610,67 +612,466 @@ public class GeminiVisionReaderTests
     }
 
     [Fact]
-    public void BimboThreePassesAreIndependentAndCannotCarryHeaderSuggestions()
+    public void BimboUsesOneRequestAndArithmeticDisagreementDoesNotTriggerARetry()
     {
-        const string primaryUpc = "7432309183";
         var handler = new Stub(
             Reply("""
                 {"rows":[{"itemNumber":"008788","description":"BIM PANQUE NUE FS FC",
                 "barcode":"7432309183","units":"4","price":"3.0100","amount":"12.04",
-                "isCredit":false}],"deliveryUnits":"4","deliveryAmount":"12.04",
-                "ticketUnits":"4","ticketTotal":"12.04","cashDue":"12.04"}
-                """),
-            Reply("""{"rows":[{"rowId":"p1-r1","barcode":"7432309183"}]}"""),
-            Reply("""{"rows":[{"rowId":"p1-r1","barcode":"7432309183"}]}"""));
+                "isCredit":false}],"deliveryUnits":"5","deliveryAmount":"99.99",
+                "ticketUnits":"5","ticketTotal":"99.99","cashDue":"99.99"}
+                """));
         var reader = new GeminiVisionReader(
             ["k"], OneModel, new HttpClient(handler), NoWait);
 
         byte[] pdf = File.ReadAllBytes(BimboScan);
         var reading = reader.ReadBimbo(pdf);
-        int lineNumber = PdfTextExtractor.ExtractPositionedLines(pdf)
-            .First(l => l.Text.Contains("008788", StringComparison.Ordinal)).LineNumber;
-        BimboBarcodeTarget[] targets =
-        [
-            new BimboBarcodeTarget(
-                "p1-r1", 1, 1, "008788", "BIM PANQUE NUE FS FC", "4", "12.04", lineNumber),
-        ];
-        var verified = reader.VerifyBimboBarcodes(pdf, targets);
-        var isolated = reader.VerifyBimboBarcodeCrops(pdf, targets);
 
         Assert.Equal(BimboVisionStatus.Success, reading.Status);
-        Assert.Equal(BimboVisionStatus.Success, verified.Status);
-        Assert.Equal(BimboVisionStatus.Success, isolated.Status);
-        Assert.Equal(3, handler.Sent.Count);
+        Assert.Single(reading.Rows);
+        Assert.Equal("5", reading.TicketUnits);
+        Assert.Equal("99.99", reading.TicketTotal);
+        Assert.Single(handler.Sent);
 
         using var first = JsonDocument.Parse(handler.Sent[0]);
-        string primaryPrompt = first.RootElement.GetProperty("contents")[0]
-            .GetProperty("parts")[1].GetProperty("text").GetString()!;
-        Assert.Contains("inspect each row twice", primaryPrompt, StringComparison.Ordinal);
+        var parts = first.RootElement.GetProperty("contents")[0].GetProperty("parts");
+        string primaryPrompt = parts[parts.GetArrayLength() - 1].GetProperty("text").GetString()!;
+        Assert.Contains("Before you answer", primaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("QTY x PRICE", primaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("exactly ten printed digits", primaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("do not compute a check digit", primaryPrompt, StringComparison.Ordinal);
+        Assert.Contains("CASH DUE is an account-balance figure, not the invoice total", primaryPrompt,
+            StringComparison.Ordinal);
+        Assert.Contains("they agree only when PRIOR BALANCE is zero", primaryPrompt,
+            StringComparison.Ordinal);
+        Assert.Contains("They never tell you what to write", primaryPrompt, StringComparison.Ordinal);
         Assert.Contains("Ignore the printed invoice number and date", primaryPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("suggestedInvoice", handler.Sent[0], StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("suggestedDate", handler.Sent[0], StringComparison.OrdinalIgnoreCase);
+    }
 
-        using var second = JsonDocument.Parse(handler.Sent[1]);
-        string barcodePrompt = second.RootElement.GetProperty("contents")[0]
-            .GetProperty("parts")[1].GetProperty("text").GetString()!;
-        Assert.DoesNotContain(primaryUpc, barcodePrompt, StringComparison.Ordinal);
-        Assert.Contains("p1-r1", barcodePrompt, StringComparison.Ordinal);
+    /// <summary>
+    /// TICKET TOTALS is not part of the gate. Requiring it made this reader stricter than the
+    /// parser it feeds — the parser invoices such a ticket for the sum of its own rows and says so,
+    /// and that path could never run — so a smudged summary line cost a delivery of legible product
+    /// rows a second request and then a rescan.
+    /// </summary>
+    [Fact]
+    public void ABimboTicketWhoseTotalsLineWasLostIsReadInOneRequestAndNotRetried()
+    {
+        var handler = new Stub(
+            Reply("""
+                {"rows":[{"itemNumber":"008788","description":"BIM PANQUE NUE FS FC",
+                "barcode":"7432309183","units":"4","price":"3.0100","amount":"12.04",
+                "isCredit":false}],"deliveryUnits":"4","deliveryAmount":"12.04"}
+                """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
 
-        using var third = JsonDocument.Parse(handler.Sent[2]);
-        var parts = third.RootElement.GetProperty("contents")[0].GetProperty("parts");
-        string cropPrompt = parts[0].GetProperty("text").GetString()!;
-        Assert.Contains("digit by digit", cropPrompt, StringComparison.Ordinal);
-        Assert.DoesNotContain(primaryUpc, cropPrompt, StringComparison.Ordinal);
-        Assert.DoesNotContain("008788", handler.Sent[2], StringComparison.Ordinal);
-        Assert.DoesNotContain("PANQUE", handler.Sent[2], StringComparison.Ordinal);
-        Assert.DoesNotContain("12.04", handler.Sent[2], StringComparison.Ordinal);
+        var reading = reader.ReadBimbo(File.ReadAllBytes(BimboScan));
 
-        byte[] cropBytes = Convert.FromBase64String(parts[2]
-            .GetProperty("inline_data").GetProperty("data").GetString()!);
-        using var crop = new System.Drawing.Bitmap(new MemoryStream(cropBytes));
-        Assert.True(crop.Width > crop.Height * 3,
-            $"isolated UPC crop was unexpectedly {crop.Width}x{crop.Height}");
+        Assert.Equal(BimboVisionStatus.Success, reading.Status);
+        Assert.Single(reading.Rows);
+        Assert.Null(reading.TicketTotal);
+        Assert.Single(handler.Sent);
 
-        string combined = string.Concat(handler.Sent);
-        Assert.DoesNotContain("suggestedInvoice", combined, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("suggestedDate", combined, StringComparison.OrdinalIgnoreCase);
+        var ticket = BimboVisionParser.Parse(reading, []);
+        Assert.Equal(12.04m, ticket.Total);
+    }
+
+    /// <summary>The gate that is left: something Core can actually post.</summary>
+    [Fact]
+    public void ABimboReplyWithNoPostableRowIsStillIncomplete()
+    {
+        var handler = new Stub(
+            Reply("""
+                {"rows":[{"itemNumber":"008788","description":"BIM PANQUE NUE FS FC",
+                "barcode":null,"units":null,"price":null,"amount":null,"isCredit":false}],
+                "ticketUnits":"4","ticketTotal":"12.04","cashDue":"12.04"}
+                """),
+            Reply("""
+                {"rows":[{"itemNumber":"008788","description":"BIM PANQUE NUE FS FC",
+                "barcode":null,"units":null,"price":null,"amount":null,"isCredit":false}],
+                "ticketUnits":"4","ticketTotal":"12.04","cashDue":"12.04"}
+                """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadBimbo(File.ReadAllBytes(BimboScan));
+
+        Assert.Equal(BimboVisionStatus.Unreadable, reading.Status);
+    }
+
+    [Fact]
+    public void RedBullUsesOneCompleteTicketRequestAndItsOwnVendorContract()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"itemNumber":"RB1718","description":"RED BULL 8.4OZ LS",
+            "barcode":"611269991000","cases":"1","units":"24","price":"40.75",
+            "deposit":"0.00","discount":"0.00","sugar":"0.00","amount":"40.75",
+            "isCredit":false}],"pageSummaries":[{"page":"1","unitsDelivered":"24",
+            "invoice":"40.75","roa":"40.75"}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadRedBull(File.ReadAllBytes(Scan));
+
+        Assert.Equal(RedBullVisionStatus.Success, reading.Status);
+        Assert.Single(reading.Rows);
+        Assert.Equal("1", Assert.Single(reading.PageSummaries).Page);
+        Assert.Single(handler.Sent); // both fixture pages are inline parts of one request
+
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var parts = request.RootElement.GetProperty("contents")[0].GetProperty("parts");
+        Assert.Equal(5, parts.GetArrayLength()); // page label + image, twice, then prompt
+        string prompt = parts[parts.GetArrayLength() - 1].GetProperty("text").GetString()!;
+        Assert.Contains("only reader", prompt, StringComparison.Ordinal);
+        Assert.Contains("physical print", prompt, StringComparison.Ordinal);
+        Assert.Contains("line BELOW", prompt, StringComparison.Ordinal);
+        Assert.Contains("Do not read the bars", prompt, StringComparison.Ordinal);
+        Assert.Contains("cases is QTY", prompt, StringComparison.Ordinal);
+        Assert.Contains("units is UNITS", prompt, StringComparison.Ordinal);
+        Assert.Contains("rightmost TOTAL", prompt, StringComparison.Ordinal);
+        Assert.Contains("This does not", prompt, StringComparison.Ordinal);
+        Assert.Contains("hold on a credit row", prompt, StringComparison.Ordinal);
+        Assert.Contains("never tell you what to write", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Ignore the printed invoice number and date", prompt, StringComparison.Ordinal);
+
+        // Every wrong code this vendor has produced was a filled-in 8 read as 6, 0 or 9, so the
+        // prompt names the confusion, shows real examples off the store's own tickets, and still
+        // forbids adjusting a digit to make the check digit come out.
+        Assert.Contains("filled-in 8", prompt, StringComparison.Ordinal);
+        Assert.Contains("611269818994 read as 611269816994", prompt, StringComparison.Ordinal);
+        Assert.Contains("Never adjust one merely to make the check digit come out", prompt,
+            StringComparison.Ordinal);
+        Assert.Contains("worse than one that fails it", prompt, StringComparison.Ordinal);
+
+        string body = handler.Sent[0];
+        Assert.DoesNotContain("suggestedInvoice", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("suggestedDate", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RedBullSchemaKeepsCasesUnitsAndMoneyAsSeparateTextFields()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"barcode":"611269991000","units":"24","amount":"40.75",
+            "isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        reader.ReadRedBull(File.ReadAllBytes(Scan));
+
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var schema = request.RootElement.GetProperty("generationConfig")
+            .GetProperty("responseSchema");
+        var row = schema.GetProperty("properties").GetProperty("rows")
+            .GetProperty("items");
+        var fields = row.GetProperty("properties");
+        Assert.Equal("string", fields.GetProperty("cases").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("units").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("price").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("amount").GetProperty("type").GetString());
+        Assert.Contains("isCredit", row.GetProperty("required").EnumerateArray()
+            .Select(value => value.GetString()));
+        Assert.DoesNotContain(fields.EnumerateObject(), field =>
+            field.Name.Contains("invoice", StringComparison.OrdinalIgnoreCase)
+            || field.Name.Contains("date", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Footer damage is a parser warning at most; it is never part of the reply gate.</summary>
+    [Fact]
+    public void RedBullReplyGateDoesNotRequirePrintedTotalOrPrintedUnits()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"itemNumber":"RB1718","description":"RED BULL 8.4OZ LS",
+            "barcode":"611269991000","cases":"1","units":"24","price":"99.99",
+            "deposit":"0.00","discount":"0.00","sugar":"0.00","amount":"40.75",
+            "isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadRedBull(File.ReadAllBytes(Scan));
+
+        Assert.Equal(RedBullVisionStatus.Success, reading.Status);
+        Assert.Single(reading.Rows);
+        Assert.Empty(reading.PageSummaries);
+        Assert.Single(handler.Sent); // arithmetic disagreement did not buy a retry
+    }
+
+    [Fact]
+    public void RedBullFailedCheckDigitIsStillPostableAtTheReplyGate()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"barcode":"611269991001","units":"24","amount":"40.75",
+            "isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadRedBull(File.ReadAllBytes(Scan));
+
+        Assert.Equal(RedBullVisionStatus.Success, reading.Status);
+        Assert.Equal("611269991001", Assert.Single(reading.Rows).Barcode);
+        Assert.Single(handler.Sent);
+    }
+
+    [Fact]
+    public void RedBullReplyGateRejectsMalformedValuesRatherThanAnyNonemptyString()
+    {
+        const string Bad = """
+            {"rows":[{"barcode":"N/A","units":"-8-","amount":"unknown",
+            "isCredit":false}]}
+            """;
+        var handler = new Stub(Reply(Bad), Reply(Bad));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadRedBull(File.ReadAllBytes(Scan));
+
+        Assert.Equal(RedBullVisionStatus.Unreadable, reading.Status);
+        Assert.True(handler.Sent.Count >= 2, "the one fresh retry did not run");
+    }
+
+    [Fact]
+    public void BlueBellUsesOneCompleteTicketRequestAndItsOwnVendorContract()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"page":"1","productNumber":"0151","description":"DZ VANILLA SAND",
+            "upc":"007189921122","quantity":"2.00","price":"6.48","extended":"12.96",
+            "packSize":"12","isCredit":false}],"pageSummaries":[{"page":"1",
+            "isCredit":false,"totalQuantity":"2.00","totalAmount":"12.96",
+            "balanceDue":"12.96"}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadBlueBell(File.ReadAllBytes(BlueBellScan));
+
+        Assert.Equal(BlueBellVisionStatus.Success, reading.Status);
+        Assert.Equal("2.00", Assert.Single(reading.Rows).Quantity);
+        Assert.Equal("12.96", Assert.Single(reading.PageSummaries).TotalAmount);
+        Assert.Single(handler.Sent);
+
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var parts = request.RootElement.GetProperty("contents")[0].GetProperty("parts");
+        Assert.Equal(5, parts.GetArrayLength()); // both fixture pages, one complete-ticket request
+        string prompt = parts[parts.GetArrayLength() - 1].GetProperty("text").GetString()!;
+        Assert.Contains("only reader", prompt, StringComparison.Ordinal);
+        Assert.Contains("physical printed print", prompt, StringComparison.Ordinal);
+        Assert.Contains("handwritten number", prompt, StringComparison.Ordinal);
+        Assert.Contains("tick, circle", prompt, StringComparison.Ordinal);
+        Assert.Contains("PICK LIST", prompt, StringComparison.Ordinal);
+        Assert.Contains("EA/COST | RETAIL | BX CNT | QTY | PRICE | EXTENDED", prompt,
+            StringComparison.Ordinal);
+        Assert.Contains("not a UPC-A and carry no check digit", prompt, StringComparison.Ordinal);
+        Assert.Contains("leading zero", prompt, StringComparison.Ordinal);
+        Assert.Contains("-11/12", prompt, StringComparison.Ordinal);
+        Assert.Contains("packSize", prompt, StringComparison.Ordinal);
+        Assert.Contains("BARS RETURNED", prompt, StringComparison.Ordinal);
+        Assert.Contains("never let its large-font reading override", prompt, StringComparison.Ordinal);
+        Assert.Contains("checks only tell you where to look again", prompt, StringComparison.Ordinal);
+        Assert.Contains("Ignore every printed invoice number and invoice date", prompt,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BlueBellSchemaPreservesFractionalQuantityAndOffersNoBlankColumns()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"upc":"007189921122","quantity":"-11/12","extended":"5.94",
+            "packSize":"12","isCredit":true}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadBlueBell(File.ReadAllBytes(BlueBellScan));
+
+        Assert.Equal(BlueBellVisionStatus.Success, reading.Status);
+        Assert.Equal("-11/12", Assert.Single(reading.Rows).Quantity);
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var row = request.RootElement.GetProperty("generationConfig")
+            .GetProperty("responseSchema").GetProperty("properties").GetProperty("rows")
+            .GetProperty("items");
+        var fields = row.GetProperty("properties");
+        Assert.Equal("string", fields.GetProperty("quantity").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("price").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("extended").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("packSize").GetProperty("type").GetString());
+        Assert.False(fields.TryGetProperty("units", out _));
+        Assert.False(fields.TryGetProperty("retail", out _));
+        Assert.False(fields.TryGetProperty("eaCost", out _));
+        Assert.DoesNotContain(fields.EnumerateObject(), field =>
+            field.Name.Contains("invoice", StringComparison.OrdinalIgnoreCase)
+            || field.Name.Contains("date", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void BlueBellReplyGateNeedsOnlyOnePostableRowNotTotalsOrArithmetic()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"productNumber":"0925","description":"PT GR SUPREME",
+            "upc":"007189905101","quantity":"10","price":"99.99","extended":"29.80",
+            "packSize":"1","isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadBlueBell(File.ReadAllBytes(BlueBellScan));
+
+        Assert.Equal(BlueBellVisionStatus.Success, reading.Status);
+        Assert.Empty(reading.PageSummaries);
+        Assert.Single(handler.Sent); // bad row math and an unreadable TOTAL do not buy a retry
+    }
+
+    [Fact]
+    public void BlueBellReplyWithNoPostableRowRetriesThenReportsUnreadable()
+    {
+        const string Bad = """
+            {"rows":[{"upc":"N/A","quantity":"-8-","price":null,"extended":"unknown",
+            "isCredit":false}],"pageSummaries":[{"totalAmount":"12.96"}]}
+            """;
+        var handler = new Stub(Reply(Bad), Reply(Bad));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadBlueBell(File.ReadAllBytes(BlueBellScan));
+
+        Assert.Equal(BlueBellVisionStatus.Unreadable, reading.Status);
+        Assert.True(handler.Sent.Count >= 2, "the one fresh retry did not run");
+    }
+
+    [Fact]
+    public void ChubiwinosUsesOneCompleteInvoiceRequestAndItsOwnVendorContract()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"itemNumber":"220","description":"CHEETO COLMILLO -100 g",
+            "barcode":"7500478044207","quantity":"20","price":"2.79","amount":"55.80",
+            "isCredit":false}],"sectionTotals":[{"section":"SALES","quantity":"20",
+            "amount":"55.80"}],"sales":"55.80","netAmount":"55.80","salesTax":"0.00",
+            "totalDue":"55.80","totalPayment":"0.00","invoiceBalance":"55.80",
+            "vendorMarkers":["CHUBIWINOS S&G","SALES SECTION"]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadChubiwinos(File.ReadAllBytes(ChubiwinosScan));
+
+        Assert.Equal(ChubiwinosVisionStatus.Success, reading.Status);
+        Assert.Single(reading.Rows);
+        Assert.Single(reading.SectionTotals);
+        Assert.Equal("55.80", reading.NetAmount);
+        Assert.Equal(2, reading.VendorMarkers.Count);
+        Assert.Single(handler.Sent);
+
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var parts = request.RootElement.GetProperty("contents")[0].GetProperty("parts");
+        string prompt = parts[parts.GetArrayLength() - 1].GetProperty("text").GetString()!;
+        Assert.Contains("only reader", prompt, StringComparison.Ordinal);
+        Assert.Contains("physical printed print", prompt, StringComparison.Ordinal);
+        Assert.Contains("Ignore handwriting", prompt, StringComparison.Ordinal);
+        Assert.Contains("twelve-digit UPC-A", prompt, StringComparison.Ordinal);
+        Assert.Contains("thirteen-digit", prompt, StringComparison.Ordinal);
+        Assert.Contains("eleven-digit UPC-A body", prompt, StringComparison.Ordinal);
+        Assert.Contains("Never pad, truncate, normalize", prompt, StringComparison.Ordinal);
+        Assert.Contains("DUMP SECTION", prompt, StringComparison.Ordinal);
+        Assert.Contains("Stop product parsing at the summary", prompt, StringComparison.Ordinal);
+        Assert.Contains("They never tell you what to write", prompt, StringComparison.Ordinal);
+        Assert.Contains("Ignore the printed invoice number and date", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("suggestedInvoice", handler.Sent[0], StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("suggestedDate", handler.Sent[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ChubiwinosSchemaOffersOneCountNoRetailAndTextMoney()
+    {
+        var handler = new Stub(Reply("""
+            {"rows":[{"barcode":"850158007331","quantity":"1","amount":"2.79",
+            "isCredit":true}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        reader.ReadChubiwinos(File.ReadAllBytes(ChubiwinosScan));
+
+        using var request = JsonDocument.Parse(handler.Sent[0]);
+        var schema = request.RootElement.GetProperty("generationConfig")
+            .GetProperty("responseSchema");
+        var row = schema.GetProperty("properties").GetProperty("rows")
+            .GetProperty("items");
+        var fields = row.GetProperty("properties");
+        Assert.Equal(
+            ["itemNumber", "description", "barcode", "quantity", "price", "amount", "isCredit"],
+            fields.EnumerateObject().Select(field => field.Name));
+        Assert.Equal("string", fields.GetProperty("quantity").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("price").GetProperty("type").GetString());
+        Assert.Equal("string", fields.GetProperty("amount").GetProperty("type").GetString());
+        Assert.DoesNotContain(fields.EnumerateObject(), field =>
+            field.Name.Contains("case", StringComparison.OrdinalIgnoreCase)
+            || field.Name.Contains("retail", StringComparison.OrdinalIgnoreCase)
+            || field.Name.Equals("units", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(schema.GetProperty("properties").EnumerateObject(), field =>
+            field.Name.Contains("invoiceNumber", StringComparison.OrdinalIgnoreCase)
+            || field.Name.Contains("date", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ChubiwinosReplyGateNeedsOnlyOnePostableRowNotTotalsMathOrCheckDigit()
+    {
+        const string PrintedBadCode = "850158007331";
+        var handler = new Stub(Reply("""
+            {"rows":[{"itemNumber":"918","description":"WINNUTS CHICHARRONES",
+            "barcode":"850158007331","quantity":"1","price":"2.79","amount":"99.99",
+            "isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadChubiwinos(File.ReadAllBytes(ChubiwinosScan));
+
+        Assert.Equal(ChubiwinosVisionStatus.Success, reading.Status);
+        Assert.Equal(PrintedBadCode, Assert.Single(reading.Rows).Barcode);
+        Assert.Null(reading.NetAmount);
+        Assert.Empty(reading.SectionTotals);
+        Assert.Single(handler.Sent);
+    }
+
+    [Fact]
+    public void ChubiwinosReplyGateAcceptsAnElevenDigitPrintedUpcBody()
+    {
+        const string PrintedBody = "85088300206";
+        var handler = new Stub(Reply("""
+            {"rows":[{"itemNumber":"905","description":"WINNUTS PAPAS DIABLA-6oz.",
+            "barcode":"85088300206","quantity":"12","price":"2.49","amount":"29.88",
+            "isCredit":false}]}
+            """));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadChubiwinos(File.ReadAllBytes(ChubiwinosScan));
+
+        Assert.Equal(ChubiwinosVisionStatus.Success, reading.Status);
+        Assert.Equal(PrintedBody, Assert.Single(reading.Rows).Barcode);
+        Assert.Single(handler.Sent);
+    }
+
+    [Fact]
+    public void ChubiwinosReplyWithNoPostableRowRetriesThenReportsUnreadable()
+    {
+        const string Bad = """
+            {"rows":[{"barcode":"N/A","quantity":"-8-","price":null,"amount":"unknown",
+            "isCredit":false}],"netAmount":"12.96"}
+            """;
+        var handler = new Stub(Reply(Bad), Reply(Bad));
+        var reader = new GeminiVisionReader(
+            ["k"], OneModel, new HttpClient(handler), NoWait);
+
+        var reading = reader.ReadChubiwinos(File.ReadAllBytes(ChubiwinosScan));
+
+        Assert.Equal(ChubiwinosVisionStatus.Unreadable, reading.Status);
+        Assert.True(handler.Sent.Count >= 2, "the one fresh retry did not run");
     }
 }

@@ -31,6 +31,9 @@ public class BlueBellPipelineTests
             return number is null ? null
                 : new InvoiceDetails(number, new DateOnly(2026, 3, 19));
         }
+
+        // These tests intentionally prove the unchanged legacy parser against its OCR fixtures.
+        public bool ConfirmBlueBellOcrFallback(string fileName) => true;
     }
 
     private static ConversionService Service(TempDir tmp, IInvoiceDetailsPrompt prompt) =>

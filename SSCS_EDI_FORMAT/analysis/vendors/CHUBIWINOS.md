@@ -1,17 +1,40 @@
 # Chubiwinos S&G — PDF invoice profile
 
-Fourth PDF vendor. Parser: `converter/src/EdiToSscs.Core/ChubiwinosPdfParser.cs`,
-catalogue: `converter/src/EdiToSscs.Core/ChubiwinosCatalog.cs`.
+Fifth PDF vendor. Normal path: `converter/src/EdiToSscs.Core/ChubiwinosVisionReader.cs` +
+`ChubiwinosVisionParser.cs`. Explicit legacy fallback: `ChubiwinosPdfParser.cs` +
+`ChubiwinosCatalog.cs`.
 Read [../ADDING_A_PDF_VENDOR.md](../ADDING_A_PDF_VENDOR.md) first if you are new to this path.
 
 CHUBIWINOS S&G INC. of Willis, TX — a DSD snack route (Sabritas / Barcel / Winnuts lines), route
 2948, delivering to BEST STOP #14 roughly every two weeks. Paid on delivery; the store books it as a
 paidout with remark `PPT DSD` against Vendor ID `CHUBIWINOS`.
 
-**Status: parsed and reconciled against nine real invoices (11/27/25 – 07/03/26); NOT yet
-round-tripped through live SSCS.** The line-level figures are nevertheless pinned against live SSCS,
+**Status: AI-primary path implemented 2026-08-14; parsed and reconciled against nine fixture
+invoices (11/27/25 – 07/03/26); NOT yet round-tripped through live SSCS.** The line-level figures
+are nevertheless pinned against live SSCS,
 because the store had already keyed invoice **6V9389** by hand and its Line Items tab was
 photographed — see §8. Two open questions before this is called done: §9.
+
+### AI-primary boundary (2026-08-14)
+
+One Gemini request receives every page picture and returns printed rows, SALES/DUMP section totals,
+all summary-band figures and the vendor markers it can physically see. OCR text and the catalogue
+contribute no value. Core posts a row when it has an 11-digit UPC-A body or the whole printed 12- or
+13-digit barcode, QTY and either PRICE or TOTAL. It removes hyphens and appends the mathematically
+determined check digit to an 11-digit body (`85088300206` → `850883002062`); a printed failed check
+digit ships unchanged and flagged. DUMP rows are negative quantities at positive costs, retail is
+seeded at 50%, and the invoice total
+is the signed line sum.
+
+Row math, section money, `Totals:` unit counts, the three grand-total copies, nonzero tax and missing
+vendor markers are warnings on a written file. No postable row is the only parser refusal. Invoice
+number and date remain outside the schema and are typed into empty boxes; no product-row question
+exists on this path. Unavailable AI may offer the unchanged legacy parser once per queue batch;
+unreadable AI requires a rescan and never mixes OCR values into a partial picture reading.
+
+Sections 2–7 below preserve the evidence and repair rules of that legacy OCR fallback. Their
+arithmetic refusals, majority vote, catalogue replacement and barcode prompt do not run on the
+AI-primary path.
 
 ---
 
@@ -72,7 +95,7 @@ and its barcode.
 | QTY | **Individual units.** Never cases — see §3 | `Units` |
 | PRICE | **Cost of one unit** | `UnitCost` |
 | TOTAL | `QTY × PRICE` | per-line checksum |
-| (next line) | The whole barcode, 12 or 13 digits, check digit included | `Gtin` |
+| (next line) | An 11-digit UPC-A body, or whole 12-/13-digit barcode | `Gtin`; append the exact check digit to an 11-digit body |
 
 **DUMP SECTION** is credits — goods that went back on the truck. Its money is printed in
 parentheses. It becomes negative units at a positive cost, exactly as the store keys it by hand.
@@ -217,7 +240,7 @@ warning says the list may need updating.
 
 | Item | Product | Why not |
 |---|---|---|
-| 905 | WINNUTS PAPAS DIABLA 6oz | only ever scanned as 11 digits (`85088300206`) |
+| 905 | WINNUTS PAPAS DIABLA 6oz | vendor prints the 11-digit body `85088300206`; AI path restores `850883002062` |
 | 918 | WINNUTS CHICHARRONES CHILE-LIMON | **the number printed on the paper does not validate** — see below |
 
 ### Item 918 — the invoice's own printed barcode fails its check digit
@@ -384,11 +407,16 @@ message says so, and says to re-scan.
 ## 13. Files
 
 ```
-converter/src/EdiToSscs.Core/ChubiwinosPdfParser.cs      the parser
-converter/src/EdiToSscs.Core/ChubiwinosCatalog.cs        item number → barcode
+converter/src/EdiToSscs.Core/ChubiwinosVisionReader.cs   AI contract
+converter/src/EdiToSscs.Core/ChubiwinosVisionParser.cs   AI reading → invoice lines
+converter/src/EdiToSscs.Core/GeminiVisionReader.cs       prompt, schema, one-request adapter
+converter/src/EdiToSscs.Core/ChubiwinosPdfParser.cs      unchanged legacy OCR fallback
+converter/src/EdiToSscs.Core/ChubiwinosCatalog.cs        legacy item number → barcode
 converter/src/EdiToSscs.App/BarcodeDialog.cs             the "type this barcode" prompt
+                                                         (legacy fallback only)
 converter/tests/EdiToSscs.Tests/ChubiwinosPdfTests.cs        parser proofs, all 9 samples
-converter/tests/EdiToSscs.Tests/ChubiwinosPipelineTests.cs   end to end, prompts included
+converter/tests/EdiToSscs.Tests/ChubiwinosPipelineTests.cs   legacy fallback proofs
+converter/tests/EdiToSscs.Tests/ChubiwinosVisionPrimaryTests.cs  AI-primary proofs
 converter/tests/EdiToSscs.Tests/Fixtures/PDF/CHUBIWINOS_*.pdf   the 9 real invoices; the
     _faint_header one is 0V8790, whose vendor name is unreadable - keep it, it is the regression
     test for the vendor check

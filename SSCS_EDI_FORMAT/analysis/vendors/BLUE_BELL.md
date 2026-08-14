@@ -1,6 +1,7 @@
 # Blue Bell Creameries, L.P. — PDF invoice profile
 
-Second PDF vendor. Parser: `BlueBellPdfParser.cs`. Supplier name written into the XML: `BLUE BELL`.
+Second PDF vendor. Normal path: `BlueBellVisionReader.cs` + `BlueBellVisionParser.cs`; explicitly
+approved fallback: unchanged `BlueBellPdfParser.cs`. Supplier name written into the XML: `BLUE BELL`.
 
 Derived from seven sample delivery tickets (BEST STOP #14, ship-to 369260, branch 33, route 10),
 dated 10-30-2025 through 05-28-2026. Examples 2 and 7 are byte-identical, so there are six distinct
@@ -78,10 +79,11 @@ unit cost = PRICE ÷ 12
 from the invoice either way — but it books one twelfth of the real quantity and prices a single
 sandwich like a carton ($11.49 instead of $0.99).
 
-The pack size comes from the catalogue in §6, **not** from the printed description, because "DZ" is
-exactly the kind of thing the scanner destroys — on the Returns page of that same invoice it read
-`07 VANILLA SAND`. For a PROD number not in the catalogue the description is the only clue left, so
-a leading `DZ` is treated as twelve and a warning is raised.
+On the normal picture-primary path, Gemini returns pack size from the physically printed
+description: `12` when it begins `DZ`, otherwise `1`. Core uses that reading. The catalogue in §6
+is a warning-only cross-check; disagreement is `PDF_PACK_SIZE_MISMATCH` and the picture reading
+still ships. This differs deliberately from the legacy OCR fallback, where the catalogue remains
+the source because OCR destroys `DZ` — one Returns page transcribes it as `07 VANILLA SAND`.
 
 ### Partial cartons: returns are counted in bars
 
@@ -93,10 +95,10 @@ A store can send back loose bars, and Blue Bell then writes the quantity as a **
         BARS RETURNED   -11.00                       note: BARS, not UNITS
 ```
 
-This needs no special handling. `-11/12` matches no money pattern and is ignored; the unit count
-comes from `-5.94 ÷ 0.54 = -11`, exactly the eleven bars the `BARS RETURNED` line names, and live
-SSCS holds that credit as `-11.00 @ 0.54`. Booking `-1` carton would have credited twelve bars when
-eleven came back.
+The picture-primary reader preserves `-11/12` as text. Core recognises `n/12` on a pack-12 row as
+`n` sellable bars, so this becomes `-11 @ 0.54`. The legacy fallback reaches the same result through
+`-5.94 ÷ 0.54 = -11`. Live SSCS holds that credit as `-11.00 @ 0.54`; booking `-1` carton would
+have credited twelve bars when eleven came back.
 
 ### What this means for the two quantity checksums
 
@@ -209,7 +211,30 @@ So `BlueBellPdfParser.ToGtin` drops the pad zero and calls `Upc.AppendCheckDigit
 
 ---
 
-## 4. The scan is the hard part
+## 4. Normal path: one picture read, then XML
+
+All page pictures go to Gemini in one request. The reply contains every invoice row plus each Sales
+or Returns block's printed `TOTAL` quantity and money, `UNITS RETURNED` / `BARS RETURNED`, and
+`BALANCE DUE` where legible. A PICK LIST contributes no rows. Invoice number and date are absent
+from the schema and typed into empty boxes; all Sales and Returns rows become one payable.
+
+The reply gate checks shape only: at least one row must carry the twelve printed UPC characters,
+a quantity, and either PRICE or EXTENDED. TOTAL, returned counts, page counts, pack agreement and
+arithmetic do not gate a read. Core restores the UPC-A check digit with `BlueBellPdfParser.ToGtin`,
+expands `DZ` cartons, handles `n/12` returns and seeds retail. Missing rows and every arithmetic,
+total, quantity or catalogue-pack disagreement are warnings on a written file. The parser's only
+business refusal is no postable row.
+
+Tickets return from delivery marked in pen. The prompt therefore excludes every handwritten
+number, tick, circle, cross, signature, initials, arrow and underline, even when the handwritten
+number happens to be the right net total. Ink over print is read through where possible; if the
+vendor print is genuinely obscured, the field is null rather than replaced by the handwriting.
+
+If Gemini is unavailable before reading, the operator may approve the unchanged legacy OCR parser
+once for the queue batch. If Gemini reached the pictures but still found no postable row after its
+one fresh retry, the ticket requires a rescan; OCR values are never mixed into a partial AI read.
+
+### Legacy OCR fallback: the scan is the hard part
 
 These are photographs of a dot-matrix print with a watermark over the middle columns. The OCR text
 layer is materially corrupted — **worse than Dr Pepper's**. Measured against the ground truth read
@@ -412,9 +437,21 @@ figure would remove the only thing standing between a misread ticket and the reg
 
 ---
 
-## 8. Checksums
+## 8. Checksums and warning boundary
 
-Every ticket reconciles **two independent ways**, both enforced:
+The primary AI path checks every independent figure but does not refuse over arithmetic:
+
+1. Each row's printed `QTY × PRICE` is compared with EXTENDED.
+2. Rows are compared with each block's printed `TOTAL` money.
+3. The TOTAL row's QTY count is compared in the invoice's own units, while `UNITS RETURNED` or
+   `BARS RETURNED` is compared in individual sellable items.
+
+Disagreement is a warning and the printed row values still ship. If a TOTAL is unreadable, the
+signed line sum becomes invoice total and `PDF_NO_TOTAL` says so. A missing UPC, quantity, or both
+money figures drops only that row and names it with its printed money; no postable row is the sole
+refusal.
+
+The explicitly approved legacy OCR fallback retains its two established checks:
 
 1. `Σ (units × unit cost)` **must** equal the printed `TOTAL` — a mismatch refuses the file.
 2. `Σ units` is compared against the printed unit count (or `UNITS RETURNED`) — a mismatch warns

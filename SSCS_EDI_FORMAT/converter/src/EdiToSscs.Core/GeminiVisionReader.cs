@@ -9,31 +9,25 @@ namespace EdiToSscs.Core;
 /// <summary>
 /// Reads an invoice off the picture using Google's Gemini API.
 ///
-/// One request per page, rather than one for the whole ticket. A page is the unit the scanner
-/// produced, the requests stay small enough to go inline, and a page that fails — a bad image, a
-/// refused request — costs only its own rows instead of the ticket's.
+/// Confirmation reads use one request per page. Picture-primary Bimbo, Dr Pepper and Red Bull reads
+/// send all pages of one ticket in a single request so one model answer owns the complete invoice.
 ///
 /// The model is asked for what is **printed**, never for what follows from it. It is told in as many
-/// words to leave a figure out when it cannot read it, because a plausible invented amount is far
-/// worse here than a missing one: a missing amount asks a person, and an invented one that happens
-/// to reconcile is booked in silence. Money comes back as text for the same reason a cent is never
-/// held as a float.
+/// words to leave a genuinely illegible figure out rather than invent it. Money comes back as text
+/// for the same reason a cent is never held as a float.
 ///
-/// The established confirmation path fails empty. Bimbo's picture-primary contract instead reports
+/// The established confirmation path fails empty. Each picture-primary contract instead reports
 /// unavailable separately from unreadable: unavailable can offer the operator-approved OCR fallback,
-/// while a model that reached the page but could not produce a consistent invoice requires a rescan.
+/// while a model that reached the page but could not produce a postable invoice requires a rescan.
 /// </summary>
 public sealed class GeminiVisionReader
-    : IInvoiceVisionReader, IBimboVisionReader, IDrPepperVisionReader, IVisionProgressReporter
+    : IInvoiceVisionReader, IBimboVisionReader, IDrPepperVisionReader, IRedBullVisionReader,
+      IBlueBellVisionReader, IChubiwinosVisionReader, IVisionProgressReporter
 {
     /// <summary>
     /// What the operator is told is happening, in the words of the job rather than the protocol.
-    /// Three passes read one invoice, and "Converting..." for all three of them is what made a
-    /// hundred-second read look like a hung window.
     /// </summary>
     private const string ReadingPhase = "Reading the invoice";
-    private const string BarcodePhase = "Checking the barcodes";
-    private const string CloseUpPhase = "Checking each barcode close up";
 
     /// <summary>
     /// The model to read with.
@@ -186,7 +180,26 @@ public sealed class GeminiVisionReader
     /// cannot tell anybody which happened — the 12:38 run read "8 throttled" for six 503s and two
     /// 429s, and those want opposite responses.
     /// </summary>
-    private enum AttemptOutcome { Read, Incomplete, RateLimited, Overloaded, Refused, Network, Canceled }
+    private enum AttemptOutcome
+    {
+        Read, Incomplete,
+        /// <summary>HTTP 429, and Google named a **per-day** quota. Gone until tomorrow.</summary>
+        RateLimited,
+        /// <summary>
+        /// HTTP 429, and Google named a **per-minute** quota — or would not say which. A different
+        /// fault from <see cref="RateLimited"/> wearing the same status code, and the opposite
+        /// response is correct: this one clears in under a minute.
+        ///
+        /// The store's dashboard read 6 of 20 requests for the whole day while every invoice was
+        /// being pushed off gemini-3.7-flash by 429s. Nothing was exhausted. The ladder was
+        /// rate-limiting itself: a refused key and a throttled key both answer instantly, so five
+        /// or six requests left in about a second, tripped the five-per-minute limit, and every
+        /// rung after that got a 429 caused by the rung before it. Nine invoices in a row were read
+        /// by a worse model than the store had available, which is where bad barcodes come from.
+        /// </summary>
+        TooFast,
+        Overloaded, Refused, Network, Canceled,
+    }
 
     /// <summary>
     /// What one read cost, tallied as it happens so <see cref="VisionReading.Note"/> can say where
@@ -217,7 +230,8 @@ public sealed class GeminiVisionReader
                 $"{Requests} request{(Requests == 1 ? "" : "s")}",
                 $"{rows} row{(rows == 1 ? "" : "s")} read",
             };
-            Add(AttemptOutcome.RateLimited, "out of free allowance (HTTP 429)");
+            Add(AttemptOutcome.RateLimited, "out of free allowance (HTTP 429 per-day)");
+            Add(AttemptOutcome.TooFast, "sent too fast (HTTP 429 per-minute)");
             Add(AttemptOutcome.Overloaded, "model busy (HTTP 5xx)");
             Add(AttemptOutcome.Refused, "refused (other HTTP error)");
             Add(AttemptOutcome.Network, "could not reach Google");
@@ -262,6 +276,7 @@ public sealed class GeminiVisionReader
     private static string Describe(AttemptOutcome outcome) => outcome switch
     {
         AttemptOutcome.RateLimited => "today's free AI allowance is used up",
+        AttemptOutcome.TooFast => "that key has sent too many requests this minute",
         AttemptOutcome.Overloaded => "Google's AI is busy",
         AttemptOutcome.Refused => "Google refused the request",
         AttemptOutcome.Network => "could not reach Google",
@@ -360,9 +375,9 @@ public sealed class GeminiVisionReader
 
 
     /// <summary>
-    /// Reads Bimbo as the source invoice rather than as a confirmation of OCR. This deliberately
-    /// uses its own prompt, schema and result type: changing it must not change one byte of the
-    /// established Dr Pepper or Red Bull requests.
+    /// Reads the complete Bimbo ticket in one picture request. This deliberately uses its own
+    /// prompt, schema and result type: changing it must not change one byte of the established Dr
+    /// Pepper or Red Bull requests.
     /// </summary>
     public BimboVisionReading ReadBimbo(byte[] pdfBytes)
     {
@@ -380,45 +395,16 @@ public sealed class GeminiVisionReader
                 return BimboVisionReading.Unreadable("The PDF had no page image to read.");
             tally.Pages = pages.Count;
 
-            var rows = new List<BimboVisionRow>();
-            BimboVisionBandTotal? deliveries = null, returns = null;
-            string? ticketUnits = null, ticketTotal = null, cashDue = null;
-
-            for (int number = 1; number <= pages.Count; number++)
-            {
-                string body = BuildBimboPrimaryBody(pages[number - 1]);
-                var page = ReadSpecialPage(
-                    body, tally, ParseBimboReply, out bool answered, ReadingPhase);
-                reachedApi |= answered;
-                if (page is null) continue;
-
-                rows.AddRange(page.Rows.Select(r => r with { Page = number }));
-                deliveries ??= page.Deliveries;
-                returns ??= page.Returns;
-                ticketUnits ??= page.TicketUnits;
-                ticketTotal ??= page.TicketTotal;
-                cashDue ??= page.CashDue;
-            }
-
-            string note = tally.Describe(clock.ElapsedMilliseconds, rows.Count);
-            if (rows.Count == 0 || string.IsNullOrWhiteSpace(ticketUnits)
-                                || string.IsNullOrWhiteSpace(ticketTotal)
-                                || rows.Any(r => r.IsCredit is null))
+            string body = BuildBimboPrimaryBody(pages);
+            var reading = ReadSpecialPage(
+                body, tally, ParseBimboReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null)
                 return reachedApi
                     ? BimboVisionReading.Unreadable(note)
                     : BimboVisionReading.Unavailable(note);
 
-            return new BimboVisionReading
-            {
-                Status = BimboVisionStatus.Success,
-                Rows = rows,
-                Deliveries = deliveries,
-                Returns = returns,
-                TicketUnits = ticketUnits,
-                TicketTotal = ticketTotal,
-                CashDue = cashDue,
-                Note = note,
-            };
+            return reading with { Status = BimboVisionStatus.Success, Note = note };
         }
         catch
         {
@@ -430,19 +416,14 @@ public sealed class GeminiVisionReader
     }
 
     /// <summary>
-    /// A focused second read of Bimbo's check-digit-less UPC column. The target locators contain no
-    /// primary barcode, so agreement means the picture was actually read twice rather than one
-    /// answer being echoed back.
+    /// Reads every page of one Blue Bell ticket in one picture request. The response has no
+    /// invoice-number or date field, and no OCR or product catalogue contributes a row value.
     /// </summary>
-    public BimboBarcodeVerification VerifyBimboBarcodes(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    public BlueBellVisionReading ReadBlueBell(byte[] pdfBytes)
     {
-        ArgumentNullException.ThrowIfNull(targets);
-        if (!IsConfigured) return BimboBarcodeVerification.Unavailable("AI reading is not configured.");
+        if (!IsConfigured) return BlueBellVisionReading.Unavailable("AI reading is not configured.");
         if (pdfBytes is null || pdfBytes.Length == 0)
-            return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
-        if (targets.Count == 0)
-            return new BimboBarcodeVerification { Status = BimboVisionStatus.Success };
+            return BlueBellVisionReading.Unreadable("The PDF had no page image to read.");
 
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var tally = new Tally();
@@ -451,163 +432,108 @@ public sealed class GeminiVisionReader
         {
             var pages = PdfPageImages.TryReadAll(pdfBytes);
             if (pages.Count == 0)
-                return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
+                return BlueBellVisionReading.Unreadable("The PDF had no page image to read.");
+            tally.Pages = pages.Count;
 
-            // Start the verification on another configured model/key where one exists. A separate
-            // focused request on the same model is still useful; a different model is better.
-            if (Combinations > 1) _at = (_at + 1) % Combinations;
-
-            var rows = new List<BimboBarcodeRow>();
-            foreach (var group in targets.GroupBy(t => Math.Clamp(t.Page, 1, pages.Count)))
-            {
-                tally.Pages++;
-                var wanted = group.ToList();
-                var ids = wanted.Select(t => t.RowId).ToHashSet(StringComparer.Ordinal);
-                string body = BuildBimboBarcodeBody(pages[group.Key - 1], wanted);
-                var page = ReadSpecialPage(
-                    body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered,
-                    BarcodePhase);
-                reachedApi |= answered;
-                if (page is not null) rows.AddRange(page.Rows);
-            }
-
-            string note = tally.Describe(clock.ElapsedMilliseconds, rows.Count);
-            if (rows.Count != targets.Count)
+            string body = BuildBlueBellPrimaryBody(pages);
+            var reading = ReadSpecialPage(
+                body, tally, ParseBlueBellReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null)
                 return reachedApi
-                    ? BimboBarcodeVerification.Unreadable(note)
-                    : BimboBarcodeVerification.Unavailable(note);
+                    ? BlueBellVisionReading.Unreadable(note)
+                    : BlueBellVisionReading.Unavailable(note);
 
-            return new BimboBarcodeVerification
-            {
-                Status = BimboVisionStatus.Success,
-                Rows = rows,
-                Note = note,
-            };
+            return reading with { Status = BlueBellVisionStatus.Success, Note = note };
         }
         catch
         {
             string note = tally.Describe(clock.ElapsedMilliseconds, 0);
             return reachedApi
-                ? BimboBarcodeVerification.Unreadable(note)
-                : BimboBarcodeVerification.Unavailable(note);
+                ? BlueBellVisionReading.Unreadable(note)
+                : BlueBellVisionReading.Unavailable(note);
         }
     }
 
     /// <summary>
-    /// A third UPC read whose visual input is materially different from both full-page reads. Each
-    /// image contains only one enlarged UPC cell; no description, item number, quantity, money, or
-    /// earlier barcode is present for the model to echo or infer from.
+    /// Reads every page of one Chubiwinos invoice in one picture request. Its response deliberately
+    /// has no invoice-number or date field, and neither OCR nor the legacy catalogue contributes a
+    /// row value.
     /// </summary>
-    public BimboBarcodeVerification VerifyBimboBarcodeCrops(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
+    public ChubiwinosVisionReading ReadChubiwinos(byte[] pdfBytes)
     {
-        ArgumentNullException.ThrowIfNull(targets);
-        if (!IsConfigured) return BimboBarcodeVerification.Unavailable("AI reading is not configured.");
+        if (!IsConfigured)
+            return ChubiwinosVisionReading.Unavailable("AI reading is not configured.");
         if (pdfBytes is null || pdfBytes.Length == 0)
-            return BimboBarcodeVerification.Unreadable("The PDF had no page image to read.");
-        if (targets.Count == 0)
-            return new BimboBarcodeVerification { Status = BimboVisionStatus.Success };
+            return ChubiwinosVisionReading.Unreadable("The PDF had no page image to read.");
 
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var tally = new Tally { Pages = targets.Select(t => t.Page).Distinct().Count() };
+        var tally = new Tally();
         bool reachedApi = false;
         try
         {
-            var crops = targets
-                .Select(t => new BimboUpcCrop(t.RowId, TryMakeBimboUpcCrop(pdfBytes, t)))
-                .Where(c => c.Png is not null)
-                .Select(c => c with { Png = c.Png! })
-                .ToList();
-            if (crops.Count == 0)
-                return BimboBarcodeVerification.Unreadable(tally.Describe(clock.ElapsedMilliseconds, 0));
+            var pages = PdfPageImages.TryReadAll(pdfBytes);
+            if (pages.Count == 0)
+                return ChubiwinosVisionReading.Unreadable("The PDF had no page image to read.");
+            tally.Pages = pages.Count;
 
-            // The second pass starts one combination on; the third starts two on. With fewer than
-            // three combinations a model can repeat, but the third visual input remains independent:
-            // it contains only the isolated cell and none of the context or prior answers.
-            if (Combinations > 1) _at = (_at + 2) % Combinations;
-
-            var ids = crops.Select(c => c.RowId).ToHashSet(StringComparer.Ordinal);
-            string body = BuildBimboBarcodeCropBody(crops);
-            var reply = ReadSpecialPage(
-                body, tally, s => ParseBimboBarcodeReply(s, ids), out bool answered,
-                CloseUpPhase);
-            reachedApi |= answered;
-
-            string note = tally.Describe(clock.ElapsedMilliseconds, reply?.Rows.Count ?? 0);
-            if (reply is null || reply.Rows.Count != crops.Count)
+            string body = BuildChubiwinosPrimaryBody(pages);
+            var reading = ReadSpecialPage(
+                body, tally, ParseChubiwinosReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null)
                 return reachedApi
-                    ? BimboBarcodeVerification.Unreadable(note)
-                    : BimboBarcodeVerification.Unavailable(note);
+                    ? ChubiwinosVisionReading.Unreadable(note)
+                    : ChubiwinosVisionReading.Unavailable(note);
 
-            var read = reply.Rows.ToDictionary(r => r.RowId, StringComparer.Ordinal);
-            return new BimboBarcodeVerification
-            {
-                Status = BimboVisionStatus.Success,
-                // A row whose visual cell could not be isolated remains null and therefore goes to
-                // the operator; it does not make readable sibling rows lose their third opinion.
-                Rows = targets.Select(t => read.TryGetValue(t.RowId, out var row)
-                    ? row : new BimboBarcodeRow(t.RowId, null)).ToList(),
-                Note = note,
-            };
+            return reading with { Status = ChubiwinosVisionStatus.Success, Note = note };
         }
         catch
         {
             string note = tally.Describe(clock.ElapsedMilliseconds, 0);
             return reachedApi
-                ? BimboBarcodeVerification.Unreadable(note)
-                : BimboBarcodeVerification.Unavailable(note);
+                ? ChubiwinosVisionReading.Unreadable(note)
+                : ChubiwinosVisionReading.Unavailable(note);
         }
     }
 
-    private sealed record BimboUpcCrop(string RowId, byte[]? Png);
-
-    private static byte[]? TryMakeBimboUpcCrop(byte[] pdfBytes, BimboBarcodeTarget target)
+    /// <summary>
+    /// Reads every page of one Red Bull ticket in one picture request. The response deliberately
+    /// has no invoice-number or date field, and the legacy OCR/barcode readers are not consulted.
+    /// </summary>
+    public RedBullVisionReading ReadRedBull(byte[] pdfBytes)
     {
-        if (target.LineNumber < 1) return null;
+        if (!IsConfigured) return RedBullVisionReading.Unavailable("AI reading is not configured.");
+        if (pdfBytes is null || pdfBytes.Length == 0)
+            return RedBullVisionReading.Unreadable("The PDF had no page image to read.");
 
-        var snip = PdfRowSnipper.TryCut(
-            pdfBytes, target.LineNumber, target.LineNumber,
-            focusLineNo: target.LineNumber,
-            fallbackColumn: new PdfColumnBand(0.015, 0.185));
-        if (snip is null || snip.FocusWidth < 1 || snip.FocusHeight < 1) return null;
-
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
+        bool reachedApi = false;
         try
         {
-            using var page = new System.Drawing.Bitmap(new MemoryStream(snip.PagePng));
-            int x = Math.Clamp(snip.FocusLeft, 0, page.Width - 1);
-            int y = Math.Clamp(snip.Top + snip.FocusTop, 0, page.Height - 1);
-            int horizontalAir = Math.Max(2, snip.FocusHeight / 3);
-            int verticalAir = Math.Max(1, snip.FocusHeight / 5);
-            x = Math.Max(0, x - horizontalAir);
-            y = Math.Max(0, y - verticalAir);
-            int width = Math.Min(page.Width - x, snip.FocusWidth + horizontalAir * 2);
-            int height = Math.Min(page.Height - y, snip.FocusHeight + verticalAir * 2);
-            if (width < 2 || height < 2) return null;
+            var pages = PdfPageImages.TryReadAll(pdfBytes);
+            if (pages.Count == 0)
+                return RedBullVisionReading.Unreadable("The PDF had no page image to read.");
+            tally.Pages = pages.Count;
 
-            using var cell = page.Clone(
-                new System.Drawing.Rectangle(x, y, width, height), page.PixelFormat);
-            if (target.PageUpsideDown)
-                cell.RotateFlip(System.Drawing.RotateFlipType.Rotate180FlipNone);
+            string body = BuildRedBullPrimaryBody(pages);
+            var reading = ReadSpecialPage(
+                body, tally, ParseRedBullReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null)
+                return reachedApi
+                    ? RedBullVisionReading.Unreadable(note)
+                    : RedBullVisionReading.Unavailable(note);
 
-            double scale = Math.Max(3.0, 96.0 / Math.Max(1, cell.Height));
-            int enlargedWidth = Math.Max(1, (int)Math.Round(cell.Width * scale));
-            int enlargedHeight = Math.Max(1, (int)Math.Round(cell.Height * scale));
-            using var enlarged = new System.Drawing.Bitmap(enlargedWidth, enlargedHeight);
-            using (var graphics = System.Drawing.Graphics.FromImage(enlarged))
-            {
-                graphics.Clear(System.Drawing.Color.White);
-                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
-                graphics.DrawImage(cell, 0, 0, enlargedWidth, enlargedHeight);
-            }
-
-            using var output = new MemoryStream();
-            enlarged.Save(output, System.Drawing.Imaging.ImageFormat.Png);
-            return output.ToArray();
+            return reading with { Status = RedBullVisionStatus.Success, Note = note };
         }
         catch
         {
-            return null;
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? RedBullVisionReading.Unreadable(note)
+                : RedBullVisionReading.Unavailable(note);
         }
     }
 
@@ -715,14 +641,15 @@ public sealed class GeminiVisionReader
                 int index = (_at + tried) % Combinations;
                 var reading = Attempt(
                     index, body, tally, ParseReply, phase, tried + 1, Combinations,
-                    out _, out AttemptOutcome outcome);
+                    out _, out AttemptOutcome outcome, out _);
                 if (reading is not null)
                 {
                     _at = index;          // start here next page rather than re-probing empty quotas
                     return reading;
                 }
                 anythingWorthWaitingFor |= outcome
-                    is AttemptOutcome.RateLimited or AttemptOutcome.Overloaded
+                    is AttemptOutcome.RateLimited or AttemptOutcome.TooFast
+                    or AttemptOutcome.Overloaded
                     or AttemptOutcome.Network or AttemptOutcome.Canceled;
             }
 
@@ -792,7 +719,8 @@ public sealed class GeminiVisionReader
         // Something answered, and answered badly. One fresh attempt, at the combination that proved
         // it can reply — not another sweep.
         var again = Attempt(
-            answeredAt, body, tally, parse, phase, Combinations + 1, Combinations + 1, out _, out _);
+            answeredAt, body, tally, parse, phase, Combinations + 1, Combinations + 1,
+            out _, out _, out _);
         if (again is not null) Interlocked.Exchange(ref _at, answeredAt);
         return again;
     }
@@ -808,8 +736,11 @@ public sealed class GeminiVisionReader
     /// readable invoice gets refused, which is what happened to the store at 17:20 on 2026-08-13
     /// while the same file went through in one request two minutes later.
     ///
-    /// **Nothing here retries a 429.** An exhausted allowance does not come back before tomorrow,
-    /// and sleeping on one is exactly what used to leave an invoice at "Converting..." for minutes.
+    /// The same waits serve a **per-minute** 429, which is the other fault that clears on its own.
+    /// **A per-day 429 is still never retried.** An exhausted allowance does not come back before
+    /// tomorrow, and sleeping on one is exactly what used to leave an invoice at "Converting..."
+    /// for minutes; <see cref="IsAPerMinuteLimit"/> is what keeps the two apart, and an unclassified
+    /// 429 counts as the per-day one.
     /// </summary>
     private static readonly TimeSpan[] BusyModelWaits =
         [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6)];
@@ -831,7 +762,7 @@ public sealed class GeminiVisionReader
         {
             var reading = Attempt(
                 index, body, tally, parse, phase, number, of,
-                out bool answered, out AttemptOutcome outcome);
+                out bool answered, out AttemptOutcome outcome, out TimeSpan? askedToWait);
             if (answered)
             {
                 apiAnswered = true;
@@ -839,28 +770,37 @@ public sealed class GeminiVisionReader
             }
             if (reading is not null) return reading;
 
-            // Only busy earns another go, and only while there are goes left. Anything else - out
-            // of allowance, refused, unreachable, or answering badly - is not fixed by waiting.
-            if (outcome != AttemptOutcome.Overloaded || go >= _busyWaits.Length) return null;
+            // Two faults earn another go on this rung, and only while there are goes left: Google's
+            // server being busy, and this key having sent too many requests this minute. Both clear
+            // on their own. Anything else - the day's allowance gone, refused, unreachable, or
+            // answering badly - is not fixed by waiting.
+            bool worthWaitingFor = outcome is AttemptOutcome.Overloaded or AttemptOutcome.TooFast;
+            if (!worthWaitingFor || go >= _busyWaits.Length) return null;
 
-            TimeSpan wait = _busyWaits[go];
-            Report(phase, "Google's AI is busy - their server, not your allowance. Trying the same "
-                          + $"model again in {wait.TotalSeconds:0} seconds.");
-            if (wait > TimeSpan.Zero) Thread.Sleep(wait);
+            // Google's own retryDelay when it gave one, since it knows when the window reopens.
+            TimeSpan wait = askedToWait ?? _busyWaits[go];
+            Report(phase, outcome == AttemptOutcome.TooFast
+                ? "That key has sent too many requests this minute - not your daily allowance. "
+                  + $"Trying the same model again in {wait.TotalSeconds:0} seconds."
+                : "Google's AI is busy - their server, not your allowance. Trying the same "
+                  + $"model again in {wait.TotalSeconds:0} seconds.");
+            if (wait > TimeSpan.Zero) { Thread.Sleep(wait); tally.Waited += wait.TotalSeconds; }
         }
     }
 
     /// <summary>One attempt, tallied and announced. Never throws.</summary>
     private T? Attempt<T>(
         int index, string body, Tally tally, Func<Stream, T?> parse, string phase,
-        int number, int of, out bool apiAnswered, out AttemptOutcome outcome) where T : class
+        int number, int of, out bool apiAnswered, out AttemptOutcome outcome,
+        out TimeSpan? askedToWait) where T : class
     {
         var (key, model) = Pair(index);
         int keyNumber = index % _keys.Length + 1;
 
         Report(phase, $"try {number} of {of} sent (key {keyNumber}, {model}). No reply yet.");
         var reading = TryOnce(
-            body, key, model, parse, out apiAnswered, out outcome, out string? failure);
+            body, key, model, parse, out apiAnswered, out outcome, out string? failure,
+            out askedToWait);
         tally.Record(outcome, keyNumber, model, failure);
         if (reading is null) Report(phase, $"try {number} of {of}: {Describe(outcome)}.");
         return reading;
@@ -875,11 +815,13 @@ public sealed class GeminiVisionReader
     /// </summary>
     private T? TryOnce<T>(
         string body, string key, string model, Func<Stream, T?> parse,
-        out bool apiAnswered, out AttemptOutcome outcome, out string? failure) where T : class
+        out bool apiAnswered, out AttemptOutcome outcome, out string? failure,
+        out TimeSpan? askedToWait) where T : class
     {
         apiAnswered = false;
         outcome = AttemptOutcome.Read;
         failure = null;
+        askedToWait = null;
         try
         {
             using var request = new HttpRequestMessage(
@@ -912,9 +854,23 @@ public sealed class GeminiVisionReader
             }
 
             int status = (int)response.StatusCode;
-            outcome = status == 429 ? AttemptOutcome.RateLimited
-                : status >= 500 ? AttemptOutcome.Overloaded
-                : AttemptOutcome.Refused;
+            if (status == 429)
+            {
+                // Ask Google *which* 429 this is before deciding it is hopeless. A per-day quota is
+                // gone until tomorrow and waiting on it is the bug that used to leave an invoice at
+                // "Converting..." for minutes; a per-minute quota clears on its own and dropping the
+                // best model over one is how nine invoices in a row got read by a worse one.
+                using var refusal = new MemoryStream();
+                using (var stream = response.Content.ReadAsStream(CancellationToken.None))
+                    stream.CopyTo(refusal);
+                refusal.Position = 0;
+                bool perMinute = IsAPerMinuteLimit(refusal, out askedToWait);
+                outcome = perMinute ? AttemptOutcome.TooFast : AttemptOutcome.RateLimited;
+                failure = perMinute ? "HTTP 429 (per-minute limit)" : "HTTP 429 (daily allowance)";
+                return null;
+            }
+
+            outcome = status >= 500 ? AttemptOutcome.Overloaded : AttemptOutcome.Refused;
             failure = $"HTTP {status}";
             return null;
         }
@@ -1085,70 +1041,7 @@ public sealed class GeminiVisionReader
         and the response schema intentionally has no field capable of carrying either value.
         """;
 
-    private static string BuildBimboPrimaryBody(byte[] png) => BuildSpecialBody(
-        png,
-        """
-        You are the primary reader of a scanned Bimbo Bakeries delivery ticket. Copy what is
-        physically printed. Never use an OCR transcription and never invent or repair a digit.
-
-        Return every product row in page order. One row prints:
-          UPC | ITEM No | DESCRIPTION | QTY | SUGG RETAIL | RETAIL AMOUNT | PRICE | AMOUNT
-
-        barcode is exactly the ten UPC digits Bimbo prints, without its hyphen. Do not add a leading
-        zero, compute a check digit, or pad it to twelve digits. itemNumber is the six printed digits.
-        units is QTY and is already individual sellable units; there are no cases. price is the
-        second-to-last figure and has four decimal places. amount is the rightmost wholesale AMOUNT,
-        not the earlier retail amount. Set isCredit true only for a row under **RETURNS**. Return
-        magnitudes without minus signs; isCredit owns the sign.
-
-        Read deliveryUnits/deliveryAmount from DELIVERY TOTAL and returnUnits/returnAmount from
-        RETURNS TOTAL when those rows exist. Read ticketUnits and ticketTotal from TICKET TOTALS,
-        and cashDue from CASH DUE. ticketTotal is the last money figure on TICKET TOTALS.
-
-        Cross-check the page before answering: inspect each row twice, verify QTY x PRICE against the
-        rightmost AMOUNT, sum each band against its own total, then compare the bands with TICKET
-        TOTALS and CASH DUE. A failed check means look at the printed characters again; it never means
-        change a printed value to make the arithmetic work. If a row field is still unclear, return
-        null for that field so the operator can read it.
-
-        Ignore the printed invoice number and date completely. They are always typed by the operator
-        into empty boxes and there is intentionally no response field capable of carrying either one.
-        """,
-        WriteBimboPrimarySchema);
-
-    private static string BuildBimboBarcodeBody(
-        byte[] png, IReadOnlyList<BimboBarcodeTarget> targets)
-    {
-        string locators = JsonSerializer.Serialize(targets.Select(t => new
-        {
-            t.RowId,
-            t.Position,
-            t.ItemNumber,
-            t.Description,
-            t.Units,
-            t.Amount,
-        }));
-
-        return BuildSpecialBody(
-            png,
-            """
-            Independently re-read only the UPC column on this Bimbo Bakeries ticket. Bimbo prints a
-            ten-digit body with a hyphen after the fifth digit. Return exactly those ten printed
-            digits without the hyphen. Do not add a leading zero, compute a check digit, pad to twelve
-            digits, or infer a UPC from the item number or description. If any digit is unclear,
-            return null for that barcode.
-
-            The rows below are locators, not answers. They deliberately contain no UPC from the first
-            reading. Find each row on the picture using its position and the other printed fields,
-            then return the same rowId with your independent UPC reading. Return every rowId exactly
-            once. Ignore the invoice number and date.
-
-            Row locators:
-            """ + locators,
-            WriteBimboBarcodeSchema);
-    }
-
-    private static string BuildBimboBarcodeCropBody(IReadOnlyList<BimboUpcCrop> crops)
+    private static string BuildBimboPrimaryBody(IReadOnlyList<byte[]> pages)
     {
         var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer))
@@ -1157,28 +1050,21 @@ public sealed class GeminiVisionReader
             w.WriteStartArray("contents");
             w.WriteStartObject();
             w.WriteStartArray("parts");
-            w.WriteStartObject();
-            w.WriteString("text",
-                "Read each isolated Bimbo UPC cell independently, digit by digit. Each image contains "
-                + "only the printed UPC cell for the rowId immediately before it. Return exactly the "
-                + "ten printed digits without the hyphen. Do not add a leading zero, compute a check "
-                + "digit, or guess an unclear digit; return null for an unclear barcode. Return every "
-                + "rowId exactly once. You are not being shown either earlier reading.");
-            w.WriteEndObject();
-
-            foreach (var crop in crops)
+            for (int index = 0; index < pages.Count; index++)
             {
                 w.WriteStartObject();
-                w.WriteString("text", $"rowId: {crop.RowId}");
+                w.WriteString("text", $"Ticket page {index + 1} of {pages.Count}:");
                 w.WriteEndObject();
                 w.WriteStartObject();
                 w.WriteStartObject("inline_data");
                 w.WriteString("mime_type", "image/png");
-                w.WriteBase64String("data", crop.Png!);
+                w.WriteBase64String("data", pages[index]);
                 w.WriteEndObject();
                 w.WriteEndObject();
             }
-
+            w.WriteStartObject();
+            w.WriteString("text", BimboPrimaryPrompt);
+            w.WriteEndObject();
             w.WriteEndArray();
             w.WriteEndObject();
             w.WriteEndArray();
@@ -1186,15 +1072,71 @@ public sealed class GeminiVisionReader
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
             w.WriteString("responseMimeType", "application/json");
-            WriteBimboBarcodeSchema(w);
+            WriteBimboPrimarySchema(w);
             w.WriteEndObject();
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(buffer.ToArray());
     }
 
-    private static string BuildSpecialBody(
-        byte[] png, string prompt, Action<Utf8JsonWriter> writeSchema)
+    /// <summary>
+    /// Bimbo's one and only request. The final checks deliberately tell the model where to look
+    /// again while it still has the page; they never authorize changing a printed value to make the
+    /// arithmetic work. Bimbo's ten-digit body rule is intentionally unlike Dr Pepper's UPC-A rule.
+    /// </summary>
+    private const string BimboPrimaryPrompt = """
+        You are the only reader of this scanned Bimbo Bakeries delivery ticket. Nothing downstream
+        will re-read a product row or ask a person about it, so your answer is what reaches the
+        store's system. Read only the physical print visible in the supplied page pictures. Never
+        use an OCR transcription, product catalogue, remembered product, manufacturer prefix,
+        arithmetic inference, or a plausible repair. Inspect every printed character twice.
+
+        Return every actual product exactly once and in physical ticket order across all pages.
+        Exclude headings, DELIVERY TOTAL, RETURNS TOTAL, TICKET TOTALS, PRIOR BALANCE and CASH DUE.
+        One product row prints:
+          UPC | ITEM No | DESCRIPTION | QTY | SUGG RETAIL | RETAIL AMOUNT | PRICE | AMOUNT
+
+        barcode is exactly the TEN digits Bimbo prints in the UPC column, without its hyphen. Count
+        the ten printed digits one at a time. Do not add a leading zero, do not compute a check digit,
+        and do not pad or expand the value to twelve digits. Nothing printed on this ticket can
+        validate the UPC, so inspect the cell especially carefully and return the digits as read.
+        Return null only when the printed cell is genuinely illegible; never repair or replace a
+        digit to make the code look plausible.
+
+        itemNumber is the six printed ITEM No digits. units is QTY and is already the count of
+        individual sellable units; there are no cases. price is the second-to-last figure and has
+        four decimal places. amount is the rightmost wholesale AMOUNT, not the earlier RETAIL
+        AMOUNT. Never return SUGG RETAIL or RETAIL AMOUNT in either field. Set isCredit true only for
+        a row under RETURNS. Return numeric magnitudes without minus signs; isCredit owns the sign.
+
+        Read deliveryUnits and deliveryAmount from DELIVERY TOTAL, and returnUnits and returnAmount
+        from RETURNS TOTAL, when those rows exist. Read ticketUnits and ticketTotal from TICKET
+        TOTALS, and cashDue from CASH DUE. ticketTotal is the last money figure on TICKET TOTALS.
+        CASH DUE is an account-balance figure, not the invoice total; it can include PRIOR BALANCE.
+
+        Before you answer, work through every one of these checks and go back to the picture for any
+        row or total that fails one:
+
+        1. Count every UPC body. It must be exactly ten printed digits, with no leading zero or check
+           digit added. Re-read any nine- or eleven-digit result character by character.
+        2. On every delivery and return row, QTY x PRICE must equal the rightmost wholesale AMOUNT.
+           Make sure PRICE is the four-decimal figure and AMOUNT is the final figure on the row.
+        3. Add the QTY and wholesale AMOUNT values in DELIVERIES and compare them with DELIVERY TOTAL.
+           Separately add RETURNS and compare them with RETURNS TOTAL.
+        4. Subtract the return units and money from the delivery units and money, then compare those
+           signed results with TICKET TOTALS. Copy CASH DUE independently. Never change ticketTotal
+           or any product row to make CASH DUE match; they agree only when PRIOR BALANCE is zero.
+
+        These checks tell you where to look again. They never tell you what to write. Never change,
+        fill, reject or derive a value merely to make a check pass. If a non-barcode field is still
+        uncertain after looking again, return null for it. For a barcode, return a legible value as
+        read even when you remain unsure; return null only when the cell is genuinely illegible.
+
+        Ignore the printed invoice number and date completely. They are always typed into empty
+        boxes, and the response schema intentionally has no field capable of carrying either value.
+        """;
+
+    private static string BuildBlueBellPrimaryBody(IReadOnlyList<byte[]> pages)
     {
         var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer))
@@ -1203,14 +1145,20 @@ public sealed class GeminiVisionReader
             w.WriteStartArray("contents");
             w.WriteStartObject();
             w.WriteStartArray("parts");
+            for (int index = 0; index < pages.Count; index++)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", $"Ticket page {index + 1} of {pages.Count}:");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", "image/png");
+                w.WriteBase64String("data", pages[index]);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
             w.WriteStartObject();
-            w.WriteStartObject("inline_data");
-            w.WriteString("mime_type", "image/png");
-            w.WriteBase64String("data", png);
-            w.WriteEndObject();
-            w.WriteEndObject();
-            w.WriteStartObject();
-            w.WriteString("text", prompt);
+            w.WriteString("text", BlueBellPrimaryPrompt);
             w.WriteEndObject();
             w.WriteEndArray();
             w.WriteEndObject();
@@ -1219,12 +1167,350 @@ public sealed class GeminiVisionReader
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
             w.WriteString("responseMimeType", "application/json");
-            writeSchema(w);
+            WriteBlueBellPrimarySchema(w);
             w.WriteEndObject();
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(buffer.ToArray());
     }
+
+    /// <summary>
+    /// Blue Bell's one and only read. Its printed UPC is a padded body rather than a barcode, and
+    /// every handwriting instruction is explicit because these tickets come back marked in pen.
+    /// </summary>
+    private const string BlueBellPrimaryPrompt = """
+        You are the only reader of this scanned Blue Bell delivery ticket. Nothing downstream will
+        re-read a product row or ask a person about it, so your answer is what reaches the store's
+        system. Read only the physical printed print visible in the supplied page pictures. Never
+        use an OCR transcription, a product catalogue, a remembered product, a manufacturer prefix,
+        arithmetic inference, or a plausible repair. Inspect every printed character twice.
+
+        Ignore handwriting, pen and marker of every kind. A handwritten number, tick, circle,
+        cross, signature, initials, arrow or underline is a person's note and is never a value on
+        this invoice. A handwritten number can be the correct net total or quantity and is still
+        not the answer. Where ink sits over a printed figure, read the physical print underneath.
+        If that printed figure is genuinely unreadable, return null rather than the handwritten
+        version. Never use handwriting to resolve a disagreement between two printed figures.
+
+        Return every actual invoice product exactly once, in physical order across all pages. A
+        PICK LIST page headed PROD DESCRIPTION SELLBOX QTY is a packing slip, not an invoice: return
+        no rows or totals from it. Blue Bell's invoice columns are:
+
+          PROD | UPC | EA/COST | RETAIL | BX CNT | QTY | PRICE | EXTENDED
+
+        EA/COST and RETAIL are always blank. Do not return either field and never shift a neighbouring
+        value into either column. productNumber is PROD. description is the printed description.
+        upc is exactly the twelve characters physically printed in the UPC column, including its
+        leading zero. These characters are not a UPC-A and carry no check digit. Do not compute or
+        append a check digit, drop the leading zero, pad, expand, shorten, validate, repair or replace
+        the value. Core alone restores the barcode later.
+
+        quantity is the QTY cell exactly as printed, preserving its minus sign and a fraction such
+        as -11/12. Do not turn the fraction into a decimal, carton count or unit count. packSize is
+        the string "12" when the physically printed description begins DZ, otherwise "1". Read DZ
+        from the picture; never use PROD, a catalogue or remembered packaging to choose it. price
+        is PRICE and extended is EXTENDED. Return row money as printed numeric magnitudes and let
+        isCredit own the booking direction. Set isCredit true for every row in a Returns block and
+        false for every row in Sales. All Sales and Returns blocks in this PDF belong to one payable.
+
+        For each Sales or Returns block, return one pageSummaries entry with its physical page and
+        isCredit direction. Copy the TOTAL row's QTY as totalQuantity and money as totalAmount. Copy
+        UNITS RETURNED as unitsReturned or BARS RETURNED as barsReturned only where that exact label
+        and count are physically printed. Preserve every sign on these summary figures. Copy
+        BALANCE DUE into balanceDue only when legible, but never let its large-font reading override
+        the TOTAL row. A physical page can contain both Sales and Returns, so return two summaries
+        with the same page when it does.
+
+        Before you answer, work through every one of these checks and go back to the picture for any
+        cell that fails one:
+
+        1. UPC column: count exactly twelve physically printed characters including the leading
+           zero. Do not calculate a check digit or change a character to make a barcode valid.
+        2. Columns and pack: verify QTY, PRICE and EXTENDED came from their named columns, that blank
+           EA/COST and RETAIL stole nothing, and that packSize follows the printed leading DZ only.
+        3. Row figures: compare QTY x PRICE with EXTENDED, including a printed n/12 quantity on a DZ
+           row. If they disagree, re-read those physical cells without deriving or changing one.
+        4. Section checks: compare rows separately with that block's TOTAL QTY and money, and compare
+           loose returns with the printed UNITS RETURNED or BARS RETURNED count.
+        5. Source check: confirm every returned character is vendor print, never handwriting, a PICK
+           LIST value, OCR text, remembered product data or a value inferred from arithmetic.
+
+        These checks only tell you where to look again. They never tell you what to write and never
+        authorize changing, filling, rejecting, deriving or repairing a printed value to make
+        arithmetic work. Return null for a genuinely unreadable field.
+
+        Ignore every printed invoice number and invoice date completely, including a Returns block's
+        separate printed number. They are always typed into empty boxes, one number and one date for
+        the whole PDF, and the response schema intentionally has no field capable of carrying either.
+        """;
+
+    private static string BuildChubiwinosPrimaryBody(IReadOnlyList<byte[]> pages)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            for (int index = 0; index < pages.Count; index++)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", $"Invoice page {index + 1} of {pages.Count}:");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", "image/png");
+                w.WriteBase64String("data", pages[index]);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+            w.WriteStartObject();
+            w.WriteString("text", ChubiwinosPrimaryPrompt);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
+            w.WriteString("responseMimeType", "application/json");
+            WriteChubiwinosPrimarySchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// Chubiwinos' one and only read. Printed UPC-A bodies, whole UPC-A and EAN-13 values, DUMP
+    /// credits and handwriting rules are vendor-specific and do not share another prompt block.
+    /// </summary>
+    private const string ChubiwinosPrimaryPrompt = """
+        You are the only reader of this scanned Chubiwinos S&G invoice. Nothing downstream will
+        re-read a product row or ask a person about it, so your answer is what reaches the store's
+        system. Read only the physical printed print visible in the supplied page pictures. Never
+        use an OCR transcription, a product catalogue, a remembered product, a manufacturer prefix,
+        arithmetic inference, or a plausible repair. Inspect every printed character twice.
+
+        Ignore handwriting, pen and marker of every kind. A handwritten number, tick, circle,
+        cross, signature, initials, arrow or underline is a person's note and is never a value on
+        this invoice. A handwritten number can be the correct figure and is still not the answer:
+        it is not what the vendor printed. Where ink sits on top of a printed figure, read the
+        physical print underneath. If the ink makes that print genuinely unreadable, return null
+        rather than the handwritten version. Never use handwriting to resolve a disagreement
+        between two printed figures.
+
+        Return every actual product exactly once, in physical order across all supplied pages. A
+        product row starts with a three-digit item number at the very start of the printed line,
+        followed by a space, a description, QTY, PRICE and the rightmost TOTAL. Its barcode is
+        printed on the line BELOW it. A long description may wrap onto one line between the priced
+        row and the barcode. The shape is:
+
+          3-digit item number | description | QTY | PRICE | TOTAL
+                              whole printed barcode on the line below
+
+        Do not return the store street address, phone numbers, a Totals row, a barcode line by
+        itself, headings or summary figures as product rows. Stop product parsing at the summary
+        band beginning SALES: or SALES;. Anything below that band is not a product row. A second,
+        truncated copy of the invoice header on a later page is not a second invoice and contributes
+        no product rows. Every page in this PDF belongs to one payable.
+
+        itemNumber is the three printed digits at the start of the row. description is the printed
+        product wording, including a wrapped continuation where present. quantity is QTY and is
+        already the number of individual sellable units; there is no case or pack conversion on
+        this vendor. price is PRICE, the cost of one unit. amount is the rightmost TOTAL. Return
+        quantities and money as exact text and preserve their printed decimals.
+
+        A row under SALES SECTION sets isCredit false. A row under DUMP SECTION sets isCredit true.
+        DUMP money is printed in brackets. Return the numeric magnitudes for quantity, price and
+        amount and let isCredit own the sign. A DUMP row stays on this same payable.
+
+        barcode is the digits physically printed below this row, as printed, with hyphens removed.
+        Some products print an eleven-digit UPC-A body with its check digit omitted, some print a
+        whole twelve-digit UPC-A, and others print a whole thirteen-digit EAN-13. Return whichever
+        length is physically there. Never pad, truncate, normalize to twelve, add a leading zero,
+        remove a leading zero, or compute or replace a check digit yourself. Core will append the
+        one mathematically determined check digit when the paper contains an eleven-digit body.
+        For a printed twelve- or thirteen-digit code, verify its check digit and re-read the cell if
+        it fails, but return what you can actually see even if it still fails. A flagged code can be
+        corrected later; a null code loses the whole product line. Return null only when the printed
+        digit cell is genuinely illegible. Never use a catalogue, expected prefix or product memory.
+
+        For each SALES SECTION and DUMP SECTION, return one sectionTotals entry. section is SALES or
+        DUMP, quantity is the count printed after Totals:, and amount is that Totals row's money.
+        Copy each of these summary-band figures independently where physically printed, preserving
+        brackets and signs: SALES, CREDITS, NET AMOUNT, SALES TAX, TOTAL DUE, TOTAL PAYMENT and
+        INVOICE BALANCE. A total is a check only. Never use it to fill or change a product row.
+
+        In vendorMarkers, name only Chubiwinos markers you can physically see: the CHUBIWINOS S&G
+        vendor name, a SALES SECTION or DUMP SECTION banner, Route, Created, INVOICE BALANCE, or a
+        Totals row. A faint or damaged marker may be omitted. Markers help identify the selected
+        vendor but never authorize inventing a product or figure.
+
+        Before you answer, work through every one of these checks and go back to the picture for any
+        cell that fails one:
+
+        1. Row shape: every returned row begins with its physical three-digit item number and owns
+           the barcode printed below it. Exclude addresses, headings, Totals rows, the summary band
+           and any repeated header.
+        2. Barcode: count the physically printed digits one at a time. Keep eleven as eleven,
+           twelve as twelve and thirteen as thirteen. Verify a physically printed check digit and
+           re-read failures, but never change a visible digit merely to make the check pass.
+        3. Columns: verify quantity came from QTY, price from PRICE and amount from the rightmost
+           TOTAL. There is no case count and no retail column to return.
+        4. Direction: verify every SALES row has isCredit false and every DUMP row has isCredit true,
+           with bracketed DUMP money returned as a magnitude.
+        5. Row figures: compare QTY x PRICE with TOTAL and re-read any differing physical cells.
+           Never derive or change one merely to make the arithmetic work.
+        6. Section checks: separately add SALES and DUMP quantities and money and compare them with
+           their own printed Totals rows. Then compare the signed rows with each printed summary
+           figure, keeping SALES, CREDITS, NET AMOUNT, tax, due, payment and balance distinct.
+        7. Source check: confirm every returned character is vendor print, never handwriting, OCR
+           text, remembered product data, a catalogue value or a value inferred from arithmetic.
+
+        These checks tell you where to look again. They never tell you what to write and never
+        authorize changing, filling, rejecting, deriving or repairing a printed value to make
+        arithmetic work. Return null for a genuinely unreadable non-barcode field. For a legible
+        barcode, return the printed digits even when its check digit still fails.
+
+        Ignore the printed invoice number and date completely. They are always typed into empty
+        boxes, and the response schema intentionally has no field capable of carrying either value.
+        """;
+
+    private static string BuildRedBullPrimaryBody(IReadOnlyList<byte[]> pages)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            for (int index = 0; index < pages.Count; index++)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", $"Ticket page {index + 1} of {pages.Count}:");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", "image/png");
+                w.WriteBase64String("data", pages[index]);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+            w.WriteStartObject();
+            w.WriteString("text", RedBullPrimaryPrompt);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
+            w.WriteString("responseMimeType", "application/json");
+            WriteRedBullPrimarySchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// Red Bull's one and only primary read. The self-checks send the model back to the physical
+    /// cell while it can still look at it; none authorizes changing a value to make arithmetic work.
+    /// </summary>
+    private const string RedBullPrimaryPrompt = """
+        You are the only reader of this scanned Red Bull delivery ticket. Nothing downstream will
+        re-read a product row or ask a person about it, so your answer is what reaches the store's
+        system. Read only the physical print visible in the supplied page pictures. Never use an
+        OCR transcription, a product catalogue, a remembered product, a manufacturer prefix,
+        arithmetic inference, or a plausible repair. Inspect every printed character twice.
+
+        Return every actual product exactly once, in physical ticket order across all pages.
+        Exclude headings, totals, Units Delivered, Units Picked Up, ROA and per-page INVOICE figures
+        from rows. One product is a priced row followed by its printed barcode line:
+
+          ID | QTY | UNITS | DESCRIPTION | PRICE | DEP | DISC | SUGAR | TOTAL
+                               12 printed barcode digits on the line BELOW the description
+
+        The barcode is the twelve digits printed under the product description, including the
+        check digit. Count them one at a time. Verify the last digit against the other eleven with
+        the UPC-A rule and re-read the printed digit cell if it fails. Return the digits exactly as
+        read even if it still fails: a flagged code can be corrected, while a null code loses the
+        whole product line. Return null only when the printed digits are genuinely illegible. Never
+        repair, pad, replace or infer a digit, and never use a remembered 611269 prefix.
+
+        Do not read the bars. The printed bar pattern sits to the right of TOTAL and OCR often
+        renders it as a run of ones such as 1111'1"III511111. Those bars are not the digit cell and
+        are never a barcode value. Read only the twelve printed digits below the description.
+
+        These barcode digits are printed small and this scanner fills in the closed loops, so one
+        digit in particular is unreliable and it is always the same one. A printed 8 whose loops
+        have filled in reads as 6, as 0, or as 9. Every wrong code taken off these tickets so far
+        has been exactly that: 611269818994 read as 611269816994 and as 611269810994, 611269002867
+        read as 611269002667, 611269991000 read as 611269891000. The reverse also happens, less
+        often, where a 6 or a 0 sits next to heavy ink.
+
+        So when the check digit does not come out, look again at the digit cells specifically and
+        ask whether a character you read as 6, 0 or 9 is actually a filled-in 8. Judge it by the
+        shape you can actually see - an 8 has two closed loops stacked, a 6 has one loop with an
+        open tail above it, a 0 is a single loop, a 9 is one loop with a tail below. Compare the
+        suspect character against the other digits printed on the same line, which are the same
+        typeface at the same size and show you what a clean 8 and a clean 6 look like on this page.
+
+        Change a digit only when the second look at the printed shape genuinely shows a different
+        character. Never adjust one merely to make the check digit come out, and never fall back on
+        a code you remember or a prefix you expect. A wrong code that satisfies its check digit is
+        worse than one that fails it, because failing is the only way anyone finds out.
+
+        cases is QTY, the number of cases. units is UNITS, the number of individual sellable cans
+        or bottles. They are different columns and both must be returned when legible. price is the
+        printed PRICE: a case price on a delivery row and a truncated per-unit rate on a credit row.
+        amount is TOTAL, the rightmost money figure. deposit, discount and sugar are the DEP, DISC
+        and SUGAR figures between PRICE and TOTAL; every current sample prints $0.00 there. Never
+        return one of those middle figures as amount. Return every number and money figure as exact
+        text, preserving its printed decimals.
+
+        A credit is printed on its own page with fractional QTY, UNITS in brackets, and money in
+        brackets. Return magnitudes without signs and set isCredit true. A delivery must set
+        isCredit false. isCredit owns the direction; do not turn a routine return into an error.
+
+        For each physical page, also return one pageSummaries entry. Copy Units Delivered, Units
+        Picked Up, INVOICE and ROA only where that exact label and figure are physically printed on
+        that page. Preserve brackets or minus signs. These figures have different scopes: do not
+        replace one with another, and do not manufacture a net figure that is not printed. Every
+        page in this PDF belongs to one payable; a credit page's own printed INVOICE number does not
+        start a second invoice.
+
+        Ignore the printed invoice number and date completely. They are always typed into empty
+        boxes, and the response schema intentionally has no field capable of carrying either value.
+
+        Before you answer, work through every one of these checks and go back to the picture for any
+        row or footer cell that fails one:
+
+        1. Barcode: count exactly twelve printed digits under the description. Calculate the UPC-A
+           check digit from the other eleven. Do this for every single row, not only the ones that
+           looked hard. Where it fails, go back to that row's digit cells and read them one at a
+           time, longest look at any 6, 0 or 9, because on this scanner those are where a filled-in
+           8 hides. Do not use the bars or a known prefix.
+        2. Columns: verify that cases came from QTY, units came from UNITS, and amount came from the
+           rightmost TOTAL after DEP, DISC and SUGAR.
+        3. Delivery row: QTY x PRICE, less DEP, DISC and SUGAR, should equal TOTAL. This does not
+           hold on a credit row: credit PRICE is a truncated per-unit rate, so never "correct" a
+           credit from QTY x PRICE.
+        4. Page scope: compare delivery rows only with delivery-page figures and credit rows only
+           with credit-page figures. Never force the net invoice to equal a delivery subtotal, a
+           credit subtotal, ROA, or one page's INVOICE figure merely because it is nearby.
+        5. Counts: compare the physical product rows with the separately printed Units Delivered or
+           Units Picked Up on the same page, then re-read any differing cell.
+
+        These checks tell you where to look again. They never tell you what to write and never
+        authorize changing a printed value to make arithmetic work. Never fill, reject, derive or
+        repair a field merely to satisfy a check. If a non-barcode field is still uncertain after
+        looking again, return null. For a barcode, return legible digits as read even when the check
+        still fails; return null only when the printed digit cell is genuinely illegible.
+        """;
 
     private static void WriteDrPepperPrimarySchema(Utf8JsonWriter w)
     {
@@ -1346,34 +1632,197 @@ public sealed class GeminiVisionReader
         w.WriteEndObject();
         w.WriteStartArray("required");
         w.WriteStringValue("rows");
-        w.WriteStringValue("ticketUnits");
         w.WriteStringValue("ticketTotal");
         w.WriteEndArray();
         w.WriteEndObject();
     }
 
-    private static void WriteBimboBarcodeSchema(Utf8JsonWriter w)
+    private static void WriteChubiwinosPrimarySchema(Utf8JsonWriter w)
     {
         w.WriteStartObject("responseSchema");
         w.WriteString("type", "object");
         w.WriteStartObject("properties");
+
         w.WriteStartObject("rows");
         w.WriteString("type", "array");
         w.WriteStartObject("items");
         w.WriteString("type", "object");
         w.WriteStartObject("properties");
-        WriteField(w, "rowId", "string");
-        WriteField(w, "barcode", "string");
+        foreach (string name in new[]
+                 {
+                     "itemNumber", "description", "barcode", "quantity", "price", "amount",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
         w.WriteEndObject();
         w.WriteStartArray("propertyOrdering");
-        w.WriteStringValue("rowId");
-        w.WriteStringValue("barcode");
+        foreach (string name in new[]
+                 {
+                     "itemNumber", "description", "barcode", "quantity", "price", "amount",
+                     "isCredit",
+                 })
+            w.WriteStringValue(name);
         w.WriteEndArray();
         w.WriteStartArray("required");
-        w.WriteStringValue("rowId");
+        w.WriteStringValue("isCredit");
         w.WriteEndArray();
         w.WriteEndObject();
         w.WriteEndObject();
+
+        w.WriteStartObject("sectionTotals");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[] { "section", "quantity", "amount" })
+            WriteField(w, name, "string");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[] { "section", "quantity", "amount" })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        foreach (string name in new[]
+                 {
+                     "sales", "credits", "netAmount", "salesTax", "totalDue", "totalPayment",
+                     "invoiceBalance",
+                 })
+            WriteField(w, name, "string");
+
+        w.WriteStartObject("vendorMarkers");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "string");
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("rows");
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
+
+    private static void WriteRedBullPrimarySchema(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[]
+                 {
+                     "itemNumber", "description", "barcode", "cases", "units", "price",
+                     "deposit", "discount", "sugar", "amount",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[]
+                 {
+                     "itemNumber", "description", "barcode", "cases", "units", "price",
+                     "deposit", "discount", "sugar", "amount", "isCredit",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        w.WriteStringValue("isCredit");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteStartObject("pageSummaries");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[]
+                 {
+                     "page", "unitsDelivered", "unitsPickedUp", "invoice", "roa",
+                 })
+            WriteField(w, name, "string");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[]
+                 {
+                     "page", "unitsDelivered", "unitsPickedUp", "invoice", "roa",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("rows");
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
+
+    private static void WriteBlueBellPrimarySchema(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[]
+                 {
+                     "page", "productNumber", "description", "upc", "quantity", "price",
+                     "extended", "packSize",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[]
+                 {
+                     "page", "productNumber", "description", "upc", "quantity", "price",
+                     "extended", "packSize", "isCredit",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        w.WriteStringValue("isCredit");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteStartObject("pageSummaries");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in new[]
+                 {
+                     "page", "totalQuantity", "totalAmount", "unitsReturned", "barsReturned",
+                     "balanceDue",
+                 })
+            WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in new[]
+                 {
+                     "page", "isCredit", "totalQuantity", "totalAmount", "unitsReturned",
+                     "barsReturned", "balanceDue",
+                 })
+            w.WriteStringValue(name);
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
         w.WriteEndObject();
         w.WriteStartArray("required");
         w.WriteStringValue("rows");
@@ -1881,6 +2330,268 @@ public sealed class GeminiVisionReader
         };
     }
 
+    private static ChubiwinosVisionReading? ParseChubiwinosReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var read = new List<ChubiwinosVisionRow>();
+        foreach (var row in rows.EnumerateArray())
+        {
+            string item = Text(row, "itemNumber") ?? "";
+            string description = Text(row, "description") ?? "";
+            string? barcode = Text(row, "barcode");
+            string? quantity = Text(row, "quantity");
+            string? price = Text(row, "price");
+            string? amount = Text(row, "amount");
+            bool? credit = NullableFlag(row, "isCredit");
+
+            if (item.Length == 0 && description.Length == 0 && barcode is null
+                && quantity is null && price is null && amount is null)
+                continue;
+
+            read.Add(new ChubiwinosVisionRow
+            {
+                ItemNumber = item,
+                Description = description,
+                Barcode = barcode,
+                Quantity = quantity,
+                Price = price,
+                Amount = amount,
+                IsCredit = credit,
+            });
+        }
+
+        // Shape only. A footer, Totals count, valid check digit and matching arithmetic are all
+        // diagnostics in Core. They must never spend another request and turn a readable invoice
+        // into a refusal.
+        bool hasPostableRow = read.Any(row =>
+            ChubiwinosCode(row.Barcode) is not null
+            && Int(row.Quantity) is > 0
+            && (Money(row.Price) is > 0m || Money(row.Amount) is > 0m));
+        if (!hasPostableRow) return null;
+
+        var sectionTotals = new List<ChubiwinosVisionSectionTotal>();
+        if (root.TryGetProperty("sectionTotals", out var totals)
+            && totals.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var total in totals.EnumerateArray())
+            {
+                string section = Text(total, "section") ?? "";
+                string? quantity = Text(total, "quantity");
+                string? amount = Text(total, "amount");
+                if (section.Length == 0 && quantity is null && amount is null) continue;
+                sectionTotals.Add(new ChubiwinosVisionSectionTotal
+                {
+                    Section = section,
+                    Quantity = quantity,
+                    Amount = amount,
+                });
+            }
+        }
+
+        var markers = new List<string>();
+        if (root.TryGetProperty("vendorMarkers", out var markerValues)
+            && markerValues.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var marker in markerValues.EnumerateArray())
+                if (marker.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(marker.GetString()))
+                    markers.Add(marker.GetString()!.Trim());
+        }
+
+        return new ChubiwinosVisionReading
+        {
+            Status = ChubiwinosVisionStatus.Success,
+            Rows = read,
+            SectionTotals = sectionTotals,
+            Sales = Text(root, "sales"),
+            Credits = Text(root, "credits"),
+            NetAmount = Text(root, "netAmount"),
+            SalesTax = Text(root, "salesTax"),
+            TotalDue = Text(root, "totalDue"),
+            TotalPayment = Text(root, "totalPayment"),
+            InvoiceBalance = Text(root, "invoiceBalance"),
+            VendorMarkers = markers,
+        };
+    }
+
+    private static RedBullVisionReading? ParseRedBullReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var read = new List<RedBullVisionRow>();
+        foreach (var row in rows.EnumerateArray())
+        {
+            string item = Text(row, "itemNumber") ?? "";
+            string description = Text(row, "description") ?? "";
+            string? barcode = Text(row, "barcode");
+            string? cases = Text(row, "cases");
+            string? units = Text(row, "units");
+            string? price = Text(row, "price");
+            string? deposit = Text(row, "deposit");
+            string? discount = Text(row, "discount");
+            string? sugar = Text(row, "sugar");
+            string? amount = Text(row, "amount");
+            bool? credit = NullableFlag(row, "isCredit");
+
+            if (item.Length == 0 && description.Length == 0 && barcode is null
+                && cases is null && units is null && price is null && amount is null)
+                continue;
+
+            read.Add(new RedBullVisionRow
+            {
+                ItemNumber = item,
+                Description = description,
+                Barcode = barcode,
+                Cases = cases,
+                Units = units,
+                Price = price,
+                Deposit = deposit,
+                Discount = discount,
+                Sugar = sugar,
+                Amount = amount,
+                IsCredit = credit,
+            });
+        }
+
+        // Shape only: one row carrying exactly what Core can post. A missing footer or arithmetic
+        // disagreement is a warning on a written file, not a second request followed by a refusal.
+        bool hasPostableRow = read.Any(row =>
+            RedBullCode(row.Barcode) is not null
+            && Int(row.Units) is > 0
+            && Money(row.Amount) is > 0m);
+        if (!hasPostableRow) return null;
+
+        var summaries = new List<RedBullVisionPageSummary>();
+        if (root.TryGetProperty("pageSummaries", out var pageSummaries)
+            && pageSummaries.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var summary in pageSummaries.EnumerateArray())
+            {
+                string page = Text(summary, "page") ?? "";
+                string? unitsDelivered = Text(summary, "unitsDelivered");
+                string? unitsPickedUp = Text(summary, "unitsPickedUp");
+                string? invoice = Text(summary, "invoice");
+                string? roa = Text(summary, "roa");
+                if (page.Length == 0 && unitsDelivered is null && unitsPickedUp is null
+                    && invoice is null && roa is null)
+                    continue;
+                summaries.Add(new RedBullVisionPageSummary
+                {
+                    Page = page,
+                    UnitsDelivered = unitsDelivered,
+                    UnitsPickedUp = unitsPickedUp,
+                    Invoice = invoice,
+                    Roa = roa,
+                });
+            }
+        }
+
+        return new RedBullVisionReading
+        {
+            Status = RedBullVisionStatus.Success,
+            Rows = read,
+            PageSummaries = summaries,
+        };
+    }
+
+    private static BlueBellVisionReading? ParseBlueBellReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var read = new List<BlueBellVisionRow>();
+        foreach (var row in rows.EnumerateArray())
+        {
+            string page = Text(row, "page") ?? "";
+            string productNumber = Text(row, "productNumber") ?? "";
+            string description = Text(row, "description") ?? "";
+            string? upc = Text(row, "upc");
+            string? quantity = Text(row, "quantity");
+            string? price = Text(row, "price");
+            string? extended = Text(row, "extended");
+            string? packSize = Text(row, "packSize");
+            bool? credit = NullableFlag(row, "isCredit");
+
+            if (productNumber.Length == 0 && description.Length == 0 && upc is null
+                && quantity is null && price is null && extended is null)
+                continue;
+
+            read.Add(new BlueBellVisionRow
+            {
+                Page = page,
+                ProductNumber = productNumber,
+                Description = description,
+                Upc = upc,
+                Quantity = quantity,
+                Price = price,
+                Extended = extended,
+                PackSize = packSize,
+                IsCredit = credit,
+            });
+        }
+
+        // Shape only. Totals, returned counts, pack agreement and row arithmetic are deliberately
+        // absent from this gate; Core can post a row from its printed UPC, quantity, and either
+        // money figure. Anything else is a warning on the written file.
+        bool hasPostableRow = read.Any(row =>
+            BlueBellCode(row.Upc) is not null
+            && BlueBellQuantity(row.Quantity)
+            && (Money(row.Price) is > 0m || Money(row.Extended) is > 0m));
+        if (!hasPostableRow) return null;
+
+        var summaries = new List<BlueBellVisionPageSummary>();
+        if (root.TryGetProperty("pageSummaries", out var pageSummaries)
+            && pageSummaries.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var summary in pageSummaries.EnumerateArray())
+            {
+                string page = Text(summary, "page") ?? "";
+                bool? credit = NullableFlag(summary, "isCredit");
+                string? totalQuantity = Text(summary, "totalQuantity");
+                string? totalAmount = Text(summary, "totalAmount");
+                string? unitsReturned = Text(summary, "unitsReturned");
+                string? barsReturned = Text(summary, "barsReturned");
+                string? balanceDue = Text(summary, "balanceDue");
+                if (page.Length == 0 && credit is null && totalQuantity is null
+                    && totalAmount is null && unitsReturned is null && barsReturned is null
+                    && balanceDue is null)
+                    continue;
+                summaries.Add(new BlueBellVisionPageSummary
+                {
+                    Page = page,
+                    IsCredit = credit,
+                    TotalQuantity = totalQuantity,
+                    TotalAmount = totalAmount,
+                    UnitsReturned = unitsReturned,
+                    BarsReturned = barsReturned,
+                    BalanceDue = balanceDue,
+                });
+            }
+        }
+
+        return new BlueBellVisionReading
+        {
+            Status = BlueBellVisionStatus.Success,
+            Rows = read,
+            PageSummaries = summaries,
+        };
+    }
+
     private static BimboVisionReading? ParseBimboReply(Stream stream)
     {
         string? json = ReplyPayload(stream);
@@ -1919,19 +2630,20 @@ public sealed class GeminiVisionReader
             });
         }
 
-        if (read.Count == 0) return null;
-        int? ticketUnitNumber = Int(Text(root, "ticketUnits"));
-        decimal? ticketMoney = Money(Text(root, "ticketTotal"));
-        if (ticketUnitNumber is int printedUnits && read.All(r => Int(r.Units) is not null))
-        {
-            int rowUnits = read.Sum(r => (r.IsCredit == true ? -1 : 1) * Int(r.Units)!.Value);
-            if (rowUnits != printedUnits) return null;
-        }
-        if (ticketMoney is decimal printedTotal && read.All(r => Money(r.Amount) is not null))
-        {
-            decimal rowTotal = read.Sum(r => (r.IsCredit == true ? -1m : 1m) * Money(r.Amount)!.Value);
-            if (Math.Abs(rowTotal - printedTotal) > 0.01m * Math.Max(1, read.Count)) return null;
-        }
+        // This is the whole gate: one row carrying the three values Core can actually post.
+        // Arithmetic disagreements are useful notes on a written file, not reasons to spend another
+        // request and then refuse a readable delivery. Do not add count, band or row-math gates.
+        //
+        // TICKET TOTALS is deliberately **not** required. It used to be, which made this reader
+        // stricter than the parser it feeds: the parser has always been willing to invoice a ticket
+        // whose totals line was destroyed, paying it for the sum of its own rows and saying so, and
+        // that path could never run. A smudged summary line is not a reason to send a delivery of
+        // legible product rows back to the scanner.
+        bool hasPostableRow = read.Any(row =>
+            BimboBody(row.Barcode) is not null
+            && Int(row.Units) is > 0
+            && Money(row.Amount) is > 0m);
+        if (!hasPostableRow) return null;
 
         string? deliveryUnits = Text(root, "deliveryUnits");
         string? deliveryAmount = Text(root, "deliveryAmount");
@@ -1948,31 +2660,6 @@ public sealed class GeminiVisionReader
             TicketUnits = Text(root, "ticketUnits"),
             TicketTotal = Text(root, "ticketTotal"),
             CashDue = Text(root, "cashDue"),
-        };
-    }
-
-    private static BimboBarcodeVerification? ParseBimboBarcodeReply(
-        Stream stream, IReadOnlySet<string> expectedIds)
-    {
-        string? json = ReplyPayload(stream);
-        if (json is null) return null;
-        using var payload = JsonDocument.Parse(json);
-        if (!payload.RootElement.TryGetProperty("rows", out var rows)
-            || rows.ValueKind != JsonValueKind.Array) return null;
-
-        var read = new List<BimboBarcodeRow>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var row in rows.EnumerateArray())
-        {
-            string id = Text(row, "rowId") ?? "";
-            if (!expectedIds.Contains(id) || !seen.Add(id)) return null;
-            read.Add(new BimboBarcodeRow(id, Text(row, "barcode")));
-        }
-        if (seen.Count != expectedIds.Count) return null;
-        return new BimboBarcodeVerification
-        {
-            Status = BimboVisionStatus.Success,
-            Rows = read,
         };
     }
 
@@ -2010,6 +2697,78 @@ public sealed class GeminiVisionReader
     }
 
     private static string? ReplyPayload(Stream stream) => ReplyPayload(stream, out _);
+
+    /// <summary>The longest a named per-minute limit may hold one rung. Beyond this, move down.</summary>
+    private static readonly TimeSpan LongestThrottleWait = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Whether a 429 is the per-minute limit rather than the daily allowance, and how long Google
+    /// asked us to wait.
+    ///
+    /// Google returns both under the same status code and says which in the body: a `QuotaFailure`
+    /// detail carries a `quotaId` such as `GenerateRequestsPerMinutePerProjectPerModel-FreeTier` or
+    /// `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, and a `RetryInfo` detail may carry a
+    /// `retryDelay` like `"38s"`.
+    ///
+    /// **A 429 nobody can classify stays the daily one.** That is the conservative reading: getting
+    /// it wrong that way costs a worse model on one invoice, while getting it wrong the other way
+    /// puts the operator back in front of a window that says "Converting..." for minutes on a quota
+    /// that will not return today. A per-day violation always wins over a per-minute one when both
+    /// appear.
+    /// </summary>
+    private static bool IsAPerMinuteLimit(Stream body, out TimeSpan? retryAfter)
+    {
+        retryAfter = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("error", out var error)
+                || !error.TryGetProperty("details", out var details)
+                || details.ValueKind != JsonValueKind.Array) return false;
+
+            bool perMinute = false, perDay = false;
+            foreach (var detail in details.EnumerateArray())
+            {
+                if (detail.TryGetProperty("retryDelay", out var delay)
+                    && delay.ValueKind == JsonValueKind.String
+                    && ParseSeconds(delay.GetString()) is TimeSpan asked)
+                    retryAfter = asked;
+
+                if (!detail.TryGetProperty("violations", out var violations)
+                    || violations.ValueKind != JsonValueKind.Array) continue;
+
+                foreach (var violation in violations.EnumerateArray())
+                    foreach (string field in new[] { "quotaId", "quotaMetric" })
+                    {
+                        if (!violation.TryGetProperty(field, out var named)
+                            || named.ValueKind != JsonValueKind.String) continue;
+                        string text = named.GetString() ?? "";
+                        perMinute |= text.Contains("PerMinute", StringComparison.OrdinalIgnoreCase)
+                                     || text.Contains("per_minute", StringComparison.OrdinalIgnoreCase);
+                        perDay |= text.Contains("PerDay", StringComparison.OrdinalIgnoreCase)
+                                  || text.Contains("per_day", StringComparison.OrdinalIgnoreCase);
+                    }
+            }
+
+            if (perDay || !perMinute) { retryAfter = null; return false; }
+            if (retryAfter > LongestThrottleWait) retryAfter = LongestThrottleWait;
+            return true;
+        }
+        catch
+        {
+            retryAfter = null;
+            return false;
+        }
+    }
+
+    /// <summary>Google's `"38s"` / `"1.5s"` duration form.</summary>
+    private static TimeSpan? ParseSeconds(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || !text.EndsWith('s')) return null;
+        return double.TryParse(text[..^1], NumberStyles.Float, CultureInfo.InvariantCulture,
+            out double seconds) && seconds is >= 0 and < 3600
+            ? TimeSpan.FromSeconds(seconds) : null;
+    }
 
     /// <summary>True when Google says it stopped because it ran out of output room.</summary>
     private static bool RanOutOfRoom(Stream stream)
@@ -2123,6 +2882,76 @@ public sealed class GeminiVisionReader
         return int.TryParse(cleaned, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
             ? Math.Abs(value)
             : null;
+    }
+
+    /// <summary>
+    /// An eleven-digit UPC-A body or complete twelve- or thirteen-digit Chubiwinos code, with
+    /// printed hyphens removed. A printed check digit is deliberately not a gate: Core sends a
+    /// failed one as read and flags it. Core restores the omitted check digit on an eleven-digit
+    /// body before writing XML.
+    /// </summary>
+    private static string? ChubiwinosCode(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string trimmed = text.Trim();
+        if (trimmed.Any(c => !char.IsAsciiDigit(c) && c is not (' ' or '-'))) return null;
+        string digits = Upc.DigitsOnly(trimmed);
+        return digits.Length is 11 or 12 or 13 ? digits : null;
+    }
+
+    /// <summary>
+    /// The twelve Red Bull digits the model copied, or null for malformed text. The check digit is
+    /// deliberately not part of this gate: a failed one is postable and Core ships it flagged.
+    /// </summary>
+    private static string? RedBullCode(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string trimmed = text.Trim();
+        if (trimmed.Any(c => !char.IsAsciiDigit(c) && c is not (' ' or '-'))) return null;
+        string digits = Upc.DigitsOnly(trimmed);
+        return digits.Length == 12 ? digits : null;
+    }
+
+    /// <summary>The twelve padded characters Blue Bell physically prints, not a validated UPC.</summary>
+    private static string? BlueBellCode(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string trimmed = text.Trim();
+        return trimmed.Length == 12 && trimmed[0] == '0' && trimmed.All(char.IsAsciiDigit)
+            ? trimmed : null;
+    }
+
+    private static bool BlueBellQuantity(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        string cleaned = text.Trim();
+        if (cleaned.StartsWith('(') && cleaned.EndsWith(')')) cleaned = cleaned[1..^1].Trim();
+        else if (cleaned.StartsWith('+') || cleaned.StartsWith('-')) cleaned = cleaned[1..].Trim();
+        else if (cleaned.EndsWith('+') || cleaned.EndsWith('-')) cleaned = cleaned[..^1].Trim();
+        if (cleaned.Contains('+') || cleaned.Contains('-')) return false;
+        if (cleaned.Contains('/'))
+        {
+            string[] pieces = cleaned.Split('/');
+            return pieces.Length == 2
+                   && decimal.TryParse(pieces[0], NumberStyles.AllowDecimalPoint,
+                       CultureInfo.InvariantCulture, out decimal numerator)
+                   && decimal.TryParse(pieces[1], NumberStyles.AllowDecimalPoint,
+                       CultureInfo.InvariantCulture, out decimal denominator)
+                   && numerator > 0m && denominator == 12m;
+        }
+        return decimal.TryParse(cleaned, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture,
+                   out decimal quantity)
+               && quantity > 0m;
+    }
+
+    /// <summary>The exact ten-digit body Bimbo prints, or null for a padded or repaired value.</summary>
+    private static string? BimboBody(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string trimmed = text.Trim();
+        if (trimmed.Any(c => !char.IsAsciiDigit(c) && c is not (' ' or '-'))) return null;
+        string digits = Upc.DigitsOnly(trimmed);
+        return digits.Length == 10 ? digits : null;
     }
 
     /// <summary>The digits of a barcode, or null where the reply holds anything else.</summary>

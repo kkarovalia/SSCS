@@ -49,8 +49,8 @@ store's existing `07189905101` in department ICE CREAM. Restore the check digit 
 **A sixth, 2026-08-11: a second *reader* is not a second calculation.** `QTY x PRICE` checked against
 `TOTAL` is the same OCR pass twice, which is why it cannot see a glyph the scanner renders wrongly in
 both columns. A vision model reading the **picture** fails differently. It confirms the established
-Red Bull's parser; Bimbo and Dr Pepper are now picture-primary and use three independent picture
-passes for every UPC. See `GeminiVisionReader.cs`.
+Red Bull's parser; Blue Bell, Bimbo and Dr Pepper are now picture-primary. Each uses one vendor-specific
+complete-ticket reading before Core writes XML. See `GeminiVisionReader.cs`.
 
 **A fifth, learned the hard way on 2026-08-11: a checksum may confirm a figure, never supply one.**
 Red Bull ticket 2035939353 reached its own printed $394.84 exactly, through four wrong rows whose
@@ -58,10 +58,11 @@ errors cancelled to the cent, and reported it with complete confidence. A calcul
 misread returns a confident wrong answer, and `QTY × PRICE` is not a second opinion about `TOTAL` —
 it is the same scan damage wearing a different hat. So where two *different* readings of a figure
 agree it is taken; where they do not, or where there is only one, the operator is shown the printed
-row and asked. Dr Pepper no longer uses OCR agreement at all: Gemini owns its values and OCR only
-locates the exact highlight for a question raised by Gemini's own checks. **A barcode is the
-exception** — Red Bull's carries its own check digit, while Bimbo and Dr Pepper require agreement
-across three independent picture requests. That is verification rather than arithmetic.
+row and asked on the legacy paths. Dr Pepper and Bimbo no longer use OCR agreement on their AI
+paths: Gemini owns their values, arithmetic disagreements are warnings, and neither path opens a
+line question. Red Bull's full UPC carries its own check digit. Bimbo's printed ten-digit body does
+not; the store owner explicitly accepted that one wrong digit can ship silently and create a
+duplicate item, so no verification or suspicious-code net may be added back.
 
 
 ## Do / don't
@@ -218,39 +219,70 @@ across three independent picture requests. That is verification rather than arit
   without them, and the summary block is the only count they get. Read
   [analysis/vendors/DR_PEPPER.md](./analysis/vendors/DR_PEPPER.md) before touching its code token: a
   period and a letter each need a second, deliberately stricter pattern.
-- `BlueBellPdfParser.cs` — Blue Bell PDF → one or more `BlueBellSection`s (a ticket can carry a
-  Sales *and* a Returns invoice); `ToGtin` holds the check-digit rule, `SeedRetail` the 40% margin,
-  `PackFor` the units rule — **a `DZ` line is a carton of twelve, so its QTY is not units**
-  (verified in live SSCS: QTY 2 @ $6.48 is held as **24 @ $0.54**). A box is a case, not a unit.
-- `ChubiwinosPdfParser.cs` — Chubiwinos S&G PDF → `ChubiwinosTicket`. Its scans damage the **money
-  columns**, so a row that does not multiply out is settled by which reading makes the invoice's own
-  total (`Resolve`), and the printed `Totals: <units>` count is a **hard gate** on the quantities —
-  a misread QTY balances to the penny and still books the wrong stock. The grand total is a
-  **majority vote** of the three places it is printed. `ChubiwinosCatalog.cs` holds item number →
-  barcode and is consulted **only** for a code that already failed its check digit; a product it has
-  never seen goes to the operator. **Not yet round-tripped through live SSCS** — see
+- `BlueBellVisionReader.cs` and `BlueBellVisionParser.cs` — one complete-ticket picture request,
+  then XML. The twelve printed UPC characters are a padded body, so Core restores the real check
+  digit through `BlueBellPdfParser.ToGtin`; `DZ` pack size comes from the pictured description and
+  the catalogue is warning-only. Fractional `n/12` returns become `n` bars. Arithmetic, TOTAL,
+  quantity and pack disagreements warn and still write; no postable row is the sole refusal.
+  `BlueBellPdfParser.cs` remains the explicitly approved once-per-batch legacy OCR fallback.
+- `ChubiwinosVisionReader.cs` and `ChubiwinosVisionParser.cs` — one complete-ticket picture request,
+  then XML. The model returns the barcode digits physically printed: an 11-digit UPC-A body or a
+  whole 12-digit UPC-A / 13-digit EAN-13. Core removes printed hyphens and restores the exact check
+  digit on an 11-digit body (`85088300206` → `850883002062`); a printed failed check digit ships
+  unchanged and flagged. DUMP rows are negative units and retail is seeded at 50%. QTY × PRICE,
+  section `Totals:` counts and money,
+  the three grand-total copies, tax and vendor markers are warning-only. A barcode, QTY and either
+  PRICE or TOTAL make a row postable; no postable row is the sole parser refusal. Invoice number and
+  date are absent from the schema and typed into empty boxes, with no product-row question.
+  `ChubiwinosPdfParser.cs` and `ChubiwinosCatalog.cs` remain unchanged behind explicit
+  once-per-batch legacy fallback approval. **Not yet round-tripped through live SSCS** — see
   [analysis/vendors/CHUBIWINOS.md](./analysis/vendors/CHUBIWINOS.md) §9.
 - `BimboVisionParser.cs` — Bimbo Bakeries delivery ticket → `BimboTicket`, with
   `GeminiVisionReader.ReadBimbo` as the normal source. **Round-tripped through live SSCS 2026-07-28**,
   which booked DELIVERIES and RETURNS as **one** $335.07 paidout; returns are negative lines on that
   invoice. QTY is already individual units (`SS2P` is one sellable two-pack) and PRICE is already unit
-  cost. The first picture request copies every row plus the delivery, return, ticket and cash totals,
-  checks each row twice, and reconciles those independent totals before returning. Core parses the
-  returned strings strictly, redoes every row/band/ticket check, and boxes only a disputed UPC, QTY,
-  PRICE or AMOUNT for the operator. OCR text supplies **coordinates only** for that box; none of its
-  product values may enter the invoice.
+  cost. One complete-ticket picture request copies every row plus the delivery, return, ticket and
+  cash totals. Its prompt explicitly rechecks row arithmetic, band totals and ticket totals against
+  the picture before answering. Core turns those values directly into XML; disagreements become
+  warnings and never open a line prompt.
 
   Bimbo prints a ten-digit UPC body without the leading zero or check digit
-  (`74323-09183` → `074323091830`), so it cannot validate itself. A second focused picture request is
-  given row locators but **not the first UPC**. The code is accepted only when the two reads agree and
-  the known Bimbo manufacturer prefix is present; otherwise the exact row is asked. There is no
-  hardcoded product catalogue: new Bimbo items require no source change or rebuild. If AI is
-  unavailable before reading, the app offers the legacy `BimboPdfParser` once for the whole queue
-  batch. If AI reaches the page but still cannot return a structurally consistent invoice after its
-  retry, the page must be rescanned; OCR figures are never mixed into a partial AI invoice. **Do not
-  use SUGG RETAIL** — retail is seeded at 45%.
+  (`74323-09183` → `074323091830`), so it cannot validate itself. There is deliberately no second
+  read, prefix warning or hardcoded product catalogue. A wrong ten-digit reading can therefore ship
+  silently and create a duplicate item in SSCS; the store owner accepted that tradeoff on 2026-08-13
+  because line questions and arithmetic refusals were costing complete deliveries. A row with no
+  barcode, QTY or wholesale AMOUNT is dropped and named in a warning; the only AI-path refusal is no
+  postable row at all. `ParseBimboReply` is the matching gate on the AI side and requires **one
+  usable row, and nothing else** — in particular **not TICKET TOTALS**, which it did demand until
+  2026-08-13. That made the reader stricter than the parser it feeds: the parser has always been
+  willing to invoice a ticket whose totals line the scan destroyed, paying it for the sum of its own
+  rows and saying so, and that path could never run. Do not add fields back to it; a smudged summary
+  line is not a reason to refuse a page of legible product rows. If AI is unavailable before reading,
+  the app offers the unchanged legacy `BimboPdfParser` once for the whole queue batch. If AI reaches
+  the page and still cannot return one usable row after its retry, the page must be rescanned; OCR
+  figures are never mixed into a partial AI invoice. **Do not use SUGG RETAIL** — retail is seeded at
+  45%.
+
+  **A band total is compared as a magnitude, and gets a cent per line.** The ticket prints its
+  RETURNS band with a minus in front of every figure, and nothing tells the model whether to copy
+  that or hand back a bare magnitude the way the product rows are told to; both spellings mean the
+  same money. Treating the sign as meaningful, and allowing one flat cent for a whole band of
+  per-line-rounded figures, put a money warning on six of sixteen live tickets whose totals
+  reconciled exactly — which is how a money warning stops being read. Also: `PDF_UNREADABLE_LINE` on
+  this vendor means **a row was dropped and goods are missing from the file**, nothing else. A
+  derived price is `PDF_PRICE_DERIVED` and an unlabelled band is `PDF_SECTION_UNLABELLED`; they used
+  to share the first code, which made a benign division look like missing stock.
   See [analysis/vendors/BIMBO.md](./analysis/vendors/BIMBO.md).
-- `RedBullPdfParser.cs` — Red Bull delivery ticket → `RedBullTicket`. **Round-tripped through live
+- `RedBullVisionReader.cs` and `RedBullVisionParser.cs` — **one complete-ticket picture request,
+  then XML** (2026-08-14). Red Bull's primary reply gate requires only one truly postable row:
+  exactly twelve barcode digits, a nonzero whole UNITS value and a positive TOTAL. Footer totals,
+  `Units Delivered`, row arithmetic and the UPC check digit are not gates. Core sends every
+  postable printed value, warns on disagreements, derives unit cost only as `TOTAL / UNITS`, and
+  asks no product-row question. A failed-check-digit UPC ships unchanged and flagged. Invoice
+  number and date remain absent from the schema and are typed into empty boxes. Unavailable AI may
+  offer the unchanged legacy parser once per batch; unreadable AI requires a rescan and never mixes
+  in OCR values.
+- `RedBullPdfParser.cs` — the explicit legacy Red Bull fallback → `RedBullTicket`. **Round-tripped through live
   SSCS 2025-11-24**, which booked a two-page ticket (a $367.00 delivery invoice and a −$24.50 credit
   invoice with its own number) as **one** $342.50 paidout of ten lines — so the whole PDF is one
   payable, however many pages. `UNITS` is already individual units and is SSCS's Qty directly; unit
@@ -364,9 +396,10 @@ across three independent picture requests. That is verification rather than arit
   Blue Bell; `FromCost(cost, margin)` takes the vendor's own margin, which is how
   Chubiwinos gets the 50% that reproduces the Ea List 5.59 SSCS shows against a 2.79 cost
 - `ConversionService.cs` — read / convert / atomic write (**writes N files for N invoices**);
-  `ConversionCoordinator.cs` — queue; `IInvoiceDetailsPrompt` — asks the operator for the Blue Bell
-  and Chubiwinos invoice number, for **the date on every invoice**, and for a Chubiwinos barcode that
-  neither read nor is on record. **The date box is empty, exactly like the invoice number**
+  `ConversionCoordinator.cs` — queue; `IInvoiceDetailsPrompt` — asks for the invoice number and
+  **the date on every PDF invoice**. Chubiwinos' AI path asks nothing about a product row; its old
+  barcode prompt exists only inside the explicitly approved legacy OCR fallback. **The date box is
+  empty, exactly like the invoice number**
   (2026-08-12): same weakness — no check digit, printed once — and a wrong year is the one thing
   these scanners produce that looks entirely plausible, two of twenty-two samples booking themselves
   into 2016 and 2020 for 2026. It took three goes. Asking only when the scan failed missed the

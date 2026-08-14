@@ -1,8 +1,37 @@
 # Red Bull Distribution Company — PDF invoice profile
 
+### Picture-primary production path (2026-08-14)
+
+The normal path now sends all page pictures in one Red Bull-specific Gemini request and converts
+that reading directly. The model is the only row reader. It is told to use only the physical print,
+take the twelve digits below each description rather than the bars, keep QTY/cases separate from
+UNITS, and take TOTAL from the rightmost money column after DEP, DISC and SUGAR. Invoice number and
+date are not in the response contract and are still typed into empty boxes.
+
+`RedBullVisionParser` applies only the vendor rules established by the live round trip below:
+
+- `UNITS` goes to SSCS unchanged; a credit makes it negative.
+- Unit cost is `TOTAL / UNITS`, rounded to four decimals, on deliveries and credits.
+- The complete twelve-digit UPC-A goes out unchanged, even when its check digit fails.
+- Retail is seeded through the existing 45% `RetailSeed` rule.
+- All pages become one payable.
+
+Every disagreement is a warning on a written file: an unpostable row is dropped and named with its
+printed money, a bad check digit ships flagged, delivery row math and footer totals are compared,
+and the existing two-message `Units Delivered` warning remains. Routine returns stay green. The
+only business refusal is a reading with no row carrying a twelve-digit barcode, a nonzero whole
+unit count and a positive TOTAL. If AI is unavailable, the operator may approve the unchanged OCR
+path once for the queue batch; if AI reached the pages but found no postable row after its retry,
+the ticket is rescanned and OCR values are not mixed in.
+
+The live facts in §§2, 3, 4, 6, 7 and 8 are the evidence for these deterministic rules. The new AI
+reader itself was not run across the 18 fixtures and 14 external samples on 2026-08-14 because the
+account had no remaining model allowance; that batch audit remains to be performed by the owner.
+
 Sixth PDF vendor. **Round-tripped through live SSCS** on the 11/24/2025 ticket (Best Stop #14,
-$342.50) — every ID/PLU and quantity on the Line Items tab is reproduced. Parser:
-`converter/src/EdiToSscs.Core/RedBullPdfParser.cs`, catalogue in `RedBullCatalog.cs`.
+$342.50) — every ID/PLU and quantity on the Line Items tab is reproduced. Primary parser:
+`converter/src/EdiToSscs.Core/RedBullVisionParser.cs`; the approved fallback remains
+`RedBullPdfParser.cs`, with its catalogue in `RedBullCatalog.cs`.
 
 Read §4 before touching anything to do with money on this vendor. Red Bull is the first vendor here
 whose **printed total cannot gate the parse**, and the reason is not obvious.

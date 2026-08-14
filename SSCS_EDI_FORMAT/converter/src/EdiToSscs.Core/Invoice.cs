@@ -18,6 +18,23 @@ public static class PdfReasonCodes
     /// money no longer adds up) rather than the line to go and look at.
     /// </summary>
     public const string UnreadableLine = "PDF_UNREADABLE_LINE";
+    /// <summary>
+    /// A row printed no readable PRICE, so the unit cost came from its own QTY and wholesale
+    /// AMOUNT. Deliberately not <see cref="UnreadableLine"/>: the line ships complete and correct,
+    /// and lumping the two together made a benign division look like missing goods.
+    /// </summary>
+    public const string PriceDerived = "PDF_PRICE_DERIVED";
+    /// <summary>
+    /// Blue Bell's known product list disagrees with the pack size read from the printed
+    /// description. The picture reading still ships; the list is a warning-only cross-check.
+    /// </summary>
+    public const string PackSizeMismatch = "PDF_PACK_SIZE_MISMATCH";
+    /// <summary>
+    /// A row did not say which band it came from, so its printed sign — or the absence of one —
+    /// decided whether it was a delivery or a return. Also not <see cref="UnreadableLine"/>: every
+    /// figure on the line was read, only its direction was inferred.
+    /// </summary>
+    public const string SectionUnlabelled = "PDF_SECTION_UNLABELLED";
     /// <summary>The parsed quantities do not match the unit count the invoice prints for itself.</summary>
     public const string QtyMismatch = "PDF_QTY_MISMATCH";
     /// <summary>A barcode neither read nor known, so the operator had to be asked and was not.</summary>
@@ -34,6 +51,11 @@ public static class PdfReasonCodes
     public const string VendorRequired = "PDF_VENDOR_REQUIRED";
     public const string VendorNoParser = "PDF_VENDOR_NO_PARSER";
     public const string VendorMismatch = "VENDOR_MISMATCH";
+    /// <summary>
+    /// The picture reader found postable rows but none of Chubiwinos' visible vendor markers. This
+    /// is warning-only because the operator already selected the vendor and faint headers are common.
+    /// </summary>
+    public const string ChubiwinosMarkers = "PDF_CHUBIWINOS_MARKERS";
 }
 
 /// <summary>

@@ -14,6 +14,7 @@ public class RedBullPipelineTests
     /// <summary>Answers every prompt from a script, and records what it was asked.</summary>
     private sealed class ScriptedPrompt(string? invoiceNumber) : IInvoiceDetailsPrompt
     {
+        public bool ConfirmRedBullOcrFallback(string fileName) => true;
         public List<InvoiceDetailsRequest> Prompts { get; } = [];
         public List<LineFieldRequest> LineFields { get; } = [];
 

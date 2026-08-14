@@ -6,7 +6,7 @@ public enum BimboVisionStatus
     Success,
     /// <summary>No key, no network, exhausted quota, or the remote service did not answer.</summary>
     Unavailable,
-    /// <summary>The page was reached but its product rows or independent totals were not readable.</summary>
+    /// <summary>The page was reached but no postable row plus ticket total could be read.</summary>
     Unreadable,
 }
 
@@ -51,53 +51,11 @@ public sealed record BimboVisionReading
 }
 
 /// <summary>
-/// A row locator offered to the second barcode read. The primary UPC is deliberately absent so the
-/// second request cannot merely repeat it. RowId is generated locally and is the only value copied
-/// back from the response without interpretation.
-/// </summary>
-public sealed record BimboBarcodeTarget(
-    string RowId,
-    int Page,
-    int Position,
-    string ItemNumber,
-    string Description,
-    string Units,
-    string Amount,
-    int LineNumber = 0,
-    bool PageUpsideDown = false);
-
-public sealed record BimboBarcodeRow(string RowId, string? Barcode);
-
-public sealed record BimboBarcodeVerification
-{
-    public required BimboVisionStatus Status { get; init; }
-    public IReadOnlyList<BimboBarcodeRow> Rows { get; init; } = [];
-    public string Note { get; init; } = "";
-
-    public static BimboBarcodeVerification Unavailable(string note = "") =>
-        new() { Status = BimboVisionStatus.Unavailable, Note = note };
-
-    public static BimboBarcodeVerification Unreadable(string note = "") =>
-        new() { Status = BimboVisionStatus.Unreadable, Note = note };
-}
-
-/// <summary>
-/// Bimbo's vision-primary contract. It is separate from <see cref="IInvoiceVisionReader"/> so the
-/// shipped Dr Pepper and Red Bull prompts and response bodies cannot drift while this vendor moves
-/// from OCR-confirmation to picture-first conversion.
+/// Bimbo's whole AI contract: one request reads the ticket, then Core writes XML. It remains
+/// separate from <see cref="IInvoiceVisionReader"/> so Bimbo changes cannot drift the established
+/// Dr Pepper or Red Bull request bodies.
 /// </summary>
 public interface IBimboVisionReader
 {
     BimboVisionReading ReadBimbo(byte[] pdfBytes);
-
-    /// <summary>Reads only the UPC column, without being shown the primary UPC values.</summary>
-    BimboBarcodeVerification VerifyBimboBarcodes(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets);
-
-    /// <summary>
-    /// A third read made from isolated, enlarged UPC cells. The crop request is not shown the full
-    /// invoice, row descriptions, item numbers, quantities, amounts, or either previous UPC.
-    /// </summary>
-    BimboBarcodeVerification VerifyBimboBarcodeCrops(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets);
 }

@@ -498,6 +498,7 @@ public class RedBullSnipTests
     /// </summary>
     private sealed class AnswerAnything : IInvoiceDetailsPrompt
     {
+        public bool ConfirmRedBullOcrFallback(string fileName) => true;
         public List<LineFieldRequest> LineFields { get; } = [];
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>

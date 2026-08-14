@@ -54,6 +54,9 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     private readonly IInvoiceVisionReader? _visionReader;
     private bool? _bimboOcrFallbackForBatch;
     private bool? _drPepperOcrFallbackForBatch;
+    private bool? _redBullOcrFallbackForBatch;
+    private bool? _blueBellOcrFallbackForBatch;
+    private bool? _chubiwinosOcrFallbackForBatch;
 
     public ConversionService(
         ConversionLogger? logger = null,
@@ -91,6 +94,9 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     {
         _bimboOcrFallbackForBatch = null;
         _drPepperOcrFallbackForBatch = null;
+        _redBullOcrFallbackForBatch = null;
+        _blueBellOcrFallbackForBatch = null;
+        _chubiwinosOcrFallbackForBatch = null;
     }
 
     /// <summary>
@@ -328,6 +334,13 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
                 TextOr([], () => PdfTextExtractor.ExtractPages(inputBytes), vendor),
                 inputFileName, warnings, inputBytes);
 
+        // Blue Bell's AI path owns every value and needs no OCR geometry. The text layer is read
+        // only so the explicitly approved legacy parser remains available when AI is unavailable.
+        if (vendor == PdfVendor.BlueBell)
+            return ConvertBlueBell(
+                TextOr([], () => PdfTextExtractor.ExtractLines(inputBytes), vendor),
+                inputFileName, warnings, inputBytes);
+
         // Bimbo and Dr Pepper still run the text-layer pass, but their AI-primary paths receive only
         // highlight coordinates. No value from these records is allowed into an AI-owned invoice.
         if (vendor is PdfVendor.Bimbo or PdfVendor.DrPepper)
@@ -342,11 +355,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         IReadOnlyList<string> lines =
             TextOr([], () => PdfTextExtractor.ExtractLines(inputBytes), vendor);
 
-        if (vendor == PdfVendor.BlueBell)
-            return ConvertBlueBell(lines, inputFileName, warnings);
-
         if (vendor == PdfVendor.Chubiwinos)
-            return ConvertChubiwinos(lines, inputFileName, warnings);
+            return ConvertChubiwinos(lines, inputFileName, warnings, inputBytes);
 
         throw new EdiConversionException(PdfReasonCodes.VendorNoParser,
             "This PDF vendor is not supported.");
@@ -371,6 +381,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         }
         catch (EdiConversionException ex) when (ex.ReasonCode == PdfReasonCodes.NoText
                                                 && (vendor == PdfVendor.DrPepper
+                                                    || vendor == PdfVendor.BlueBell
+                                                    || vendor == PdfVendor.Chubiwinos
                                                     || _visionReader is not null
                                                     && vendor is PdfVendor.RedBull or PdfVendor.Bimbo))
         {
@@ -639,43 +651,140 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     /// a separate payable. The store's own books say otherwise.)
     /// </summary>
     private Converted ConvertBlueBell(
-        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings)
+        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings,
+        byte[] pdfBytes)
     {
-        var sections = BlueBellPdfParser.ParseAll(lines, warnings);
-        decimal total = sections.Sum(s => s.Total);
-        int lineCount = sections.Sum(s => s.Lines.Count);
+        BlueBellVisionTicket? ticket = null;
+        if (_visionReader is IBlueBellVisionReader blueBellVision)
+        {
+            BlueBellVisionReading reading;
+            try { reading = blueBellVision.ReadBlueBell(pdfBytes); }
+            catch { reading = BlueBellVisionReading.Unavailable(); }
+            if (reading.Note.Length > 0) _visionNote = $"Blue Bell primary: {reading.Note}";
+
+            if (reading.Status == BlueBellVisionStatus.Success)
+            {
+                ticket = BlueBellVisionParser.Parse(reading, warnings);
+            }
+            else if (reading.Status == BlueBellVisionStatus.Unreadable)
+            {
+                throw new EdiConversionException(PdfReasonCodes.NoLineItems,
+                    "AI reached this Blue Bell ticket but could not read a postable product row "
+                    + "after one fresh retry. Re-scan the complete ticket and try again. OCR "
+                    + "values were not substituted.");
+            }
+        }
+
+        if (ticket is null)
+        {
+            if (!UseBlueBellOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Blue Bell ticket used the legacy OCR parser "
+                + "after the operator approved that fallback for this batch."));
+
+            var sections = BlueBellPdfParser.ParseAll(lines, warnings);
+            decimal legacyTotal = sections.Sum(section => section.Total);
+            int legacyLineCount = sections.Sum(section => section.Lines.Count);
+
+            var legacyKeyed = AskInvoiceDetails(new InvoiceDetailsRequest(
+                inputFileName, "Blue Bell", legacyTotal, legacyLineCount, 1, 1, "Blue Bell"));
+
+            var legacyInvoice = BlueBellPdfParser.Merge(
+                sections, legacyKeyed.InvoiceNumber, legacyKeyed.Date);
+            var legacyDoc = new ConvertedDocument(
+                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
+                NaxmlBuilder.Build(legacyInvoice));
+            return new Converted([legacyDoc], "PDF/BlueBell legacy OCR", legacyInvoice.Lines.Count,
+                warnings, 0, null, Headline(legacyInvoice));
+        }
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Blue Bell",
-            total, lineCount, 1, 1, "Blue Bell"));
+            inputFileName, "Blue Bell", ticket.Total, ticket.Lines.Count, 1, 1, "Blue Bell"));
 
-        var invoice = BlueBellPdfParser.Merge(sections, keyed.InvoiceNumber, keyed.Date);
+        var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
         var doc = new ConvertedDocument(
             OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
-        return new Converted([doc], "PDF/BlueBell", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+        return new Converted([doc], "PDF/BlueBell AI", invoice.Lines.Count, warnings, 0, null,
+            Headline(invoice));
+    }
+
+    private bool UseBlueBellOcrFallback(string inputFileName)
+    {
+        if (_blueBellOcrFallbackForBatch is bool decided) return decided;
+        _blueBellOcrFallbackForBatch =
+            _invoiceDetailsPrompt?.ConfirmBlueBellOcrFallback(inputFileName) == true;
+        return _blueBellOcrFallbackForBatch.Value;
     }
 
     /// <summary>
-    /// A Chubiwinos invoice is one payable, so it produces one file — but two of its fields can need
-    /// a person. The invoice number is always typed (the scan mangled it on two of eight samples and
-    /// nothing can verify one), and a barcode is typed only when it failed its check digit and the
-    /// vendor's catalogue has never recorded one for that product.
+    /// Chubiwinos: one complete-ticket picture read, then one payable. The AI path asks only for the
+    /// invoice number and date; barcode failures ship exactly as printed and are warning-only. The
+    /// legacy OCR parser and catalogue remain isolated behind explicit once-per-batch approval.
     /// </summary>
     private Converted ConvertChubiwinos(
-        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings)
+        IReadOnlyList<string> lines, string inputFileName, List<ConversionWarning> warnings,
+        byte[] pdfBytes)
     {
-        var ticket = ChubiwinosPdfParser.Parse(lines, warnings);
+        ChubiwinosVisionTicket? ticket = null;
+        if (_visionReader is IChubiwinosVisionReader chubiwinosVision)
+        {
+            ChubiwinosVisionReading reading;
+            try { reading = chubiwinosVision.ReadChubiwinos(pdfBytes); }
+            catch { reading = ChubiwinosVisionReading.Unavailable(); }
+            if (reading.Note.Length > 0) _visionNote = $"Chubiwinos primary: {reading.Note}";
+
+            if (reading.Status == ChubiwinosVisionStatus.Success)
+            {
+                ticket = ChubiwinosVisionParser.Parse(reading, warnings);
+            }
+            else if (reading.Status == ChubiwinosVisionStatus.Unreadable)
+            {
+                throw new EdiConversionException(PdfReasonCodes.NoLineItems,
+                    "AI reached this Chubiwinos invoice but could not read a postable product row "
+                    + "after one fresh retry. Re-scan the complete invoice and try again. OCR "
+                    + "values were not substituted.");
+            }
+        }
+
+        if (ticket is null)
+        {
+            if (!UseChubiwinosOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Chubiwinos invoice used the legacy OCR "
+                + "parser after the operator approved that fallback for this batch."));
+
+            ChubiwinosTicket legacyTicket = ChubiwinosPdfParser.Parse(lines, warnings);
+            var legacyKeyed = AskInvoiceDetails(new InvoiceDetailsRequest(
+                inputFileName, "Chubiwinos", legacyTicket.Total, legacyTicket.Lines.Count, 1, 1,
+                "Chubiwinos"));
+            Invoice legacyInvoice = legacyTicket.ToInvoice(
+                legacyKeyed.InvoiceNumber, legacyKeyed.Date,
+                line => AskBarcode(inputFileName, legacyTicket, line, warnings));
+            var legacyDoc = new ConvertedDocument(
+                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
+                NaxmlBuilder.Build(legacyInvoice));
+            return new Converted([legacyDoc], "PDF/Chubiwinos legacy OCR",
+                legacyInvoice.Lines.Count, warnings, 0, null, Headline(legacyInvoice));
+        }
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Chubiwinos", ticket.Total, ticket.Lines.Count, 1, 1,
             "Chubiwinos"));
 
-        var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date,
-            line => AskBarcode(inputFileName, ticket, line, warnings));
+        var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
 
         var doc = new ConvertedDocument(
             OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
-        return new Converted([doc], "PDF/Chubiwinos", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+        return new Converted([doc], "PDF/Chubiwinos AI", invoice.Lines.Count,
+            warnings, 0, null, Headline(invoice));
+    }
+
+    private bool UseChubiwinosOcrFallback(string inputFileName)
+    {
+        if (_chubiwinosOcrFallbackForBatch is bool decided) return decided;
+        _chubiwinosOcrFallbackForBatch =
+            _invoiceDetailsPrompt?.ConfirmChubiwinosOcrFallback(inputFileName) == true;
+        return _chubiwinosOcrFallbackForBatch.Value;
     }
 
     /// <summary>
@@ -701,32 +810,7 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
 
             if (reading.Status == BimboVisionStatus.Success)
             {
-                var targets = reading.Rows.Select((r, i) =>
-                {
-                    var located = BimboVisionParser.Locate(r, positionedLines);
-                    return new BimboBarcodeTarget(
-                        $"p{Math.Max(1, r.Page)}-r{i + 1}", Math.Max(1, r.Page), i + 1,
-                        r.ItemNumber, r.Description, r.Units ?? "", r.Amount ?? "",
-                        located?.LineNumber ?? 0, r.PageUpsideDown);
-                }).ToList();
-
-                BimboBarcodeVerification verification;
-                try { verification = bimboVision.VerifyBimboBarcodes(pdfBytes, targets); }
-                catch { verification = BimboBarcodeVerification.Unavailable(); }
-                if (verification.Note.Length > 0)
-                    _visionNote = (_visionNote is null ? "" : _visionNote + "; ")
-                                  + $"Bimbo UPC verification: {verification.Note}";
-
-                BimboBarcodeVerification cropVerification;
-                try { cropVerification = bimboVision.VerifyBimboBarcodeCrops(pdfBytes, targets); }
-                catch { cropVerification = BimboBarcodeVerification.Unavailable(); }
-                if (cropVerification.Note.Length > 0)
-                    _visionNote = (_visionNote is null ? "" : _visionNote + "; ")
-                                  + $"Bimbo isolated UPC verification: {cropVerification.Note}";
-
-                ticket = BimboVisionParser.Parse(
-                    reading, verification, cropVerification, positionedLines, warnings,
-                    field => AskBimboField(inputFileName, field, pdfBytes));
+                ticket = BimboVisionParser.Parse(reading, warnings);
             }
             else if (reading.Status == BimboVisionStatus.Unavailable)
             {
@@ -741,9 +825,9 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             else
             {
                 throw new EdiConversionException(PdfReasonCodes.NoLineItems,
-                    "AI reached this Bimbo ticket but could not read all product rows and the "
-                    + "independent TICKET TOTALS checks after retrying. Re-scan the page so the "
-                    + "printing is clear, then try again. OCR values were not substituted.");
+                    "AI reached this Bimbo ticket but could not read a postable product row and "
+                    + "TICKET TOTALS after one fresh retry. Re-scan the complete ticket and try "
+                    + "again. OCR values were not substituted.");
             }
         }
         else if (_visionReader is not null)
@@ -895,17 +979,55 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     private Converted ConvertRedBull(
         IReadOnlyList<PdfPage> pages, string inputFileName, List<ConversionWarning> warnings, byte[] pdfBytes)
     {
-        // Two more readings of the same paper, both taken off the picture rather than out of the
-        // text layer, and both best-effort: empty simply leaves the parser with the readings it
-        // always had. The bars carry their own error correction and identify the product; the vision
-        // reading covers the money and the counts, which is where the questions actually are.
-        var ticket = RedBullPdfParser.Parse(
+        if (_visionReader is IRedBullVisionReader redBullVision)
+        {
+            RedBullVisionReading reading;
+            try { reading = redBullVision.ReadRedBull(pdfBytes); }
+            catch { reading = RedBullVisionReading.Unavailable(); }
+            if (reading.Note.Length > 0) _visionNote = $"Red Bull primary: {reading.Note}";
+
+            if (reading.Status == RedBullVisionStatus.Success)
+            {
+                RedBullVisionTicket ticket = RedBullVisionParser.Parse(reading, warnings);
+                var details = AskInvoiceDetails(new InvoiceDetailsRequest(
+                    inputFileName, "Red Bull", ticket.Total, ticket.Lines.Count, 1, 1,
+                    "Red Bull"));
+                Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
+                var primaryDoc = new ConvertedDocument(
+                    OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber),
+                    NaxmlBuilder.Build(invoice));
+                return new Converted([primaryDoc], "PDF/RedBull AI", invoice.Lines.Count,
+                    warnings, 0, null, Headline(invoice));
+            }
+
+            if (reading.Status == RedBullVisionStatus.Unreadable)
+                throw new EdiConversionException(PdfReasonCodes.NoLineItems,
+                    "AI reached this Red Bull ticket but could not read a postable product row "
+                    + "after one fresh retry. Re-scan the complete ticket and try again. OCR "
+                    + "values were not substituted.");
+
+            if (!UseRedBullOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Red Bull ticket used the legacy OCR parser "
+                + "after the operator approved that fallback for this batch."));
+        }
+        else if (_visionReader is null)
+        {
+            if (!UseRedBullOcrFallback(inputFileName)) throw new OperationCanceledException();
+            warnings.Add(new ConversionWarning(0, PdfReasonCodes.UnreadableLine,
+                "AI reading was unavailable, so this Red Bull ticket used the legacy OCR parser "
+                + "after the operator approved that fallback for this batch."));
+        }
+
+        // Explicitly approved legacy path. Its OCR parser, barcode decoder, generic picture reader,
+        // settlement ladder and row questions remain unchanged and isolated behind this branch.
+        var legacyTicket = RedBullPdfParser.Parse(
             pages, warnings,
             PdfBarcodeReader.TryReadAll(pdfBytes),
             ReadWithVision(pdfBytes, VisionVendor.RedBull));
 
         var keyed = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, "Red Bull", ticket.Total, ticket.Lines.Count, 1, 1,
+            inputFileName, "Red Bull", legacyTicket.Total, legacyTicket.Lines.Count, 1, 1,
             "Red Bull"));
 
         // Answers are remembered so a second pass can re-use them: the operator is never asked the
@@ -914,18 +1036,29 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         string Ask(RedBullLine line, LineField field)
         {
             if (answered.TryGetValue((line.Position, field), out string? already)) return already;
-            string typed = AskLineField(inputFileName, ticket, line, field, warnings, pdfBytes);
+            string typed = AskLineField(inputFileName, legacyTicket, line, field, warnings, pdfBytes);
             answered[(line.Position, field)] = typed;
             return typed;
         }
 
-        var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date, Ask);
-        invoice = SettleAgainstThePrintedTotal(ticket, invoice, keyed, Ask, answered, warnings);
-        CheckRedBullUnits(ticket, invoice, warnings);
+        var legacyInvoice = legacyTicket.ToInvoice(keyed.InvoiceNumber, keyed.Date, Ask);
+        legacyInvoice = SettleAgainstThePrintedTotal(
+            legacyTicket, legacyInvoice, keyed, Ask, answered, warnings);
+        CheckRedBullUnits(legacyTicket, legacyInvoice, warnings);
 
         var doc = new ConvertedDocument(
-            OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
-        return new Converted([doc], "PDF/RedBull", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
+            OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
+            NaxmlBuilder.Build(legacyInvoice));
+        return new Converted([doc], "PDF/RedBull legacy OCR", legacyInvoice.Lines.Count,
+            warnings, 0, null, Headline(legacyInvoice));
+    }
+
+    private bool UseRedBullOcrFallback(string inputFileName)
+    {
+        if (_redBullOcrFallbackForBatch is bool decided) return decided;
+        _redBullOcrFallbackForBatch =
+            _invoiceDetailsPrompt?.ConfirmRedBullOcrFallback(inputFileName) == true;
+        return _redBullOcrFallbackForBatch.Value;
     }
 
     /// <summary>

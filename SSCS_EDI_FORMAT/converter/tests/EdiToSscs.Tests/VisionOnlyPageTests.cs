@@ -21,6 +21,7 @@ public class VisionOnlyPageTests
     private sealed class ScriptedPrompt(string invoiceNumber) : IInvoiceDetailsPrompt
     {
         public bool ConfirmDrPepperOcrFallback(string fileName) => true;
+        public bool ConfirmRedBullOcrFallback(string fileName) => true;
         public List<LineFieldRequest> LineFields { get; } = [];
         public Dictionary<string, string> Paper { get; } = new(StringComparer.Ordinal);
 

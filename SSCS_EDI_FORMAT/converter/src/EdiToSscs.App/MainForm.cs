@@ -5,7 +5,8 @@ using EdiToSscs.Core;
 namespace EdiToSscs.App;
 
 public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt, IInvoiceVisionReader,
-    IBimboVisionReader, IDrPepperVisionReader
+    IBimboVisionReader, IDrPepperVisionReader, IRedBullVisionReader, IBlueBellVisionReader,
+    IChubiwinosVisionReader
 {
     // Option A — navy primary, light surfaces, red used sparingly for brand accent.
     private static readonly Color ThemeBg = Color.FromArgb(248, 249, 252);
@@ -244,6 +245,78 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 + "Dr Pepper batch? It is less reliable and will run only if you approve it here. "
                 + "This question is shown once for the current batch.",
                 "Dr Pepper AI reading unavailable", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
+    }
+
+    public bool ConfirmRedBullOcrFallback(string fileName)
+    {
+        if (IsDisposed || !IsHandleCreated) return false;
+        if (InvokeRequired)
+        {
+            try { return (bool)Invoke(() => ConfirmRedBullOcrFallback(fileName)); }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        try
+        {
+            return MessageBox.Show(this,
+                $"AI reading is unavailable for {fileName}.\n\nUse the legacy OCR parser for this "
+                + "Red Bull batch? It is less reliable and may ask about product rows. This "
+                + "question is shown only once for the current batch.",
+                "Red Bull AI reading unavailable", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
+    }
+
+    public bool ConfirmBlueBellOcrFallback(string fileName)
+    {
+        if (IsDisposed || !IsHandleCreated) return false;
+        if (InvokeRequired)
+        {
+            try { return (bool)Invoke(() => ConfirmBlueBellOcrFallback(fileName)); }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        try
+        {
+            return MessageBox.Show(this,
+                $"AI reading is unavailable for {fileName}.\n\nUse the legacy OCR parser for this "
+                + "Blue Bell batch? It is less reliable on the ticket's watermark and will run "
+                + "only if you approve it here. This question is shown once for the current batch.",
+                "Blue Bell AI reading unavailable", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+        finally
+        {
+            RepaintConversionQueues();
+        }
+    }
+
+    public bool ConfirmChubiwinosOcrFallback(string fileName)
+    {
+        if (IsDisposed || !IsHandleCreated) return false;
+        if (InvokeRequired)
+        {
+            try { return (bool)Invoke(() => ConfirmChubiwinosOcrFallback(fileName)); }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        try
+        {
+            return MessageBox.Show(this,
+                $"AI reading is unavailable for {fileName}.\n\nUse the legacy OCR parser for this "
+                + "Chubiwinos batch? It is less reliable on the money columns and may ask for a "
+                + "barcode. This question is shown only once for the current batch.",
+                "Chubiwinos AI reading unavailable", MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
         }
         finally
@@ -541,8 +614,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         // saves into the list and clears that field, so asking it whether a key exists answered "no"
         // for a store that had just added one — and then told them to go and get a free Google key.
         _visionValueLabel.Text = s.IsActive
-            ? "On. Bimbo and Dr Pepper are read from page pictures; each UPC is read three "
-              + "independent times.\nOCR is used only to place exact question highlights."
+            ? "On. Blue Bell, Bimbo, Chubiwinos, Dr Pepper and Red Bull are read once from the complete ticket pictures.\n"
+              + "Their AI paths ask only for the invoice number and date."
             : s.AllProtectedKeys.Count == 0
                 ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
                   + "Open AI Reading Settings to switch it on with a free Google key."
@@ -581,34 +654,6 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         }
     }
 
-    public BimboBarcodeVerification VerifyBimboBarcodes(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
-    {
-        try
-        {
-            return CreateVisionReader()?.VerifyBimboBarcodes(pdfBytes, targets)
-                   ?? BimboBarcodeVerification.Unavailable("AI reading is switched off or has no usable key.");
-        }
-        catch
-        {
-            return BimboBarcodeVerification.Unavailable();
-        }
-    }
-
-    public BimboBarcodeVerification VerifyBimboBarcodeCrops(
-        byte[] pdfBytes, IReadOnlyList<BimboBarcodeTarget> targets)
-    {
-        try
-        {
-            return CreateVisionReader()?.VerifyBimboBarcodeCrops(pdfBytes, targets)
-                   ?? BimboBarcodeVerification.Unavailable("AI reading is switched off or has no usable key.");
-        }
-        catch
-        {
-            return BimboBarcodeVerification.Unavailable();
-        }
-    }
-
     public DrPepperVisionReading ReadDrPepper(byte[] pdfBytes)
     {
         try
@@ -623,9 +668,64 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         }
     }
 
-    // Dr Pepper's two extra barcode passes were removed on 2026-08-13. It prints a whole UPC-A,
-    // which checks itself for free; Bimbo above still has all three because its codes carry no
-    // check digit at all.
+    public RedBullVisionReading ReadRedBull(byte[] pdfBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadRedBull(pdfBytes)
+                   ?? RedBullVisionReading.Unavailable(
+                       "AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return RedBullVisionReading.Unavailable();
+        }
+    }
+
+    public BlueBellVisionReading ReadBlueBell(byte[] pdfBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadBlueBell(pdfBytes)
+                   ?? BlueBellVisionReading.Unavailable(
+                       "AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return BlueBellVisionReading.Unavailable();
+        }
+    }
+
+    public ChubiwinosVisionReading ReadChubiwinos(byte[] pdfBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadChubiwinos(pdfBytes)
+                   ?? ChubiwinosVisionReading.Unavailable(
+                       "AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return ChubiwinosVisionReading.Unavailable();
+        }
+    }
+
+    /// <summary>
+    /// The reader in use, and the settings it was built from.
+    ///
+    /// It is kept because <see cref="GeminiVisionReader"/> remembers which key and model last
+    /// answered and starts the next invoice there. Building a new one per file threw that away, so
+    /// every invoice walked back up to the best model, collected a 429 on each dead rung and paid
+    /// for the walk in requests: on 2026-08-14 one Red Bull ticket spent seven requests to convert,
+    /// six of them on rungs the file before it had already found empty. Against a free allowance
+    /// counted in tens of requests a day, that is most of the allowance.
+    ///
+    /// Rebuilt whenever the saved keys or models change, so switching a refused key mid-queue still
+    /// takes effect on the next file — which is exactly what the store did on the run that found
+    /// this.
+    /// </summary>
+    private GeminiVisionReader? _visionReaderInUse;
+    private string _visionReaderBuiltFrom = "";
 
     private GeminiVisionReader? CreateVisionReader()
     {
@@ -647,7 +747,20 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return keys.Count == 0 ? null : new GeminiVisionReader(keys, models);
+        if (keys.Count == 0) return null;
+
+        // The keys themselves never leave this method; the fingerprint is their count and order
+        // plus the models, which is enough to notice a change without holding a decrypted key.
+        string builtFrom = $"{keys.Count}|{string.Join(",", keys.Select(k => k.GetHashCode()))}"
+                           + $"|{string.Join(",", models)}";
+        lock (_visionLock)
+        {
+            if (_visionReaderInUse is not null && _visionReaderBuiltFrom == builtFrom)
+                return _visionReaderInUse;
+            _visionReaderBuiltFrom = builtFrom;
+            _visionReaderInUse = new GeminiVisionReader(keys, models);
+            return _visionReaderInUse;
+        }
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -1021,7 +1134,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             {
                 PdfVendor.BlueBell => "  (Blue Bell delivery tickets - you will be asked for each invoice number)",
                 PdfVendor.Chubiwinos => "  (Chubiwinos S&G invoices - you will be asked for the invoice number)",
-                PdfVendor.Bimbo => "  (Bimbo delivery tickets - you will be asked for the invoice number)",
+                PdfVendor.Bimbo => "  (Bimbo delivery tickets - you will be asked for invoice number and date)",
                 PdfVendor.RedBull => "  (Red Bull delivery tickets - all pages are one invoice)",
                 _ => "  (Dr Pepper searchable PDF invoices)",
             };

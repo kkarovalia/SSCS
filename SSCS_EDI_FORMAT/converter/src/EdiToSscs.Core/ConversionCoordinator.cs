@@ -289,6 +289,24 @@ public interface IInvoiceDetailsPrompt
     /// reader swap in headless callers.
     /// </summary>
     bool ConfirmDrPepperOcrFallback(string fileName) => false;
+
+    /// <summary>
+    /// AI is Red Bull's normal reader. The unchanged legacy OCR parser may run only after this
+    /// explicit once-per-batch approval when AI is unavailable.
+    /// </summary>
+    bool ConfirmRedBullOcrFallback(string fileName) => false;
+
+    /// <summary>
+    /// AI is Blue Bell's normal reader. The unchanged legacy OCR parser may run only after this
+    /// explicit once-per-batch approval when AI is unavailable.
+    /// </summary>
+    bool ConfirmBlueBellOcrFallback(string fileName) => false;
+
+    /// <summary>
+    /// AI is Chubiwinos' normal reader. The unchanged legacy OCR parser and barcode catalogue may
+    /// run only after explicit once-per-batch approval when AI is unavailable.
+    /// </summary>
+    bool ConfirmChubiwinosOcrFallback(string fileName) => false;
 }
 
 /// <summary>

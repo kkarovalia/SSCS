@@ -125,6 +125,34 @@ public class DrPepperGeminiRecordedTests
 
     private static HttpResponseMessage Unavailable(HttpStatusCode status) => new(status);
 
+    /// <summary>
+    /// A 429 shaped the way Google actually sends one, naming which quota ran out.
+    ///
+    /// Both limits arrive under the same status code and want opposite handling, so the body is the
+    /// only thing that separates them. `retryDelay` is what Google says about when the window
+    /// reopens.
+    /// </summary>
+    private static HttpResponseMessage Throttled(string quotaId, string? retryDelay = null)
+    {
+        var details = new List<object>
+        {
+            new
+            {
+                type = "type.googleapis.com/google.rpc.QuotaFailure",
+                violations = new[] { new { quotaId } },
+            },
+        };
+        if (retryDelay is not null)
+            details.Add(new { type = "type.googleapis.com/google.rpc.RetryInfo", retryDelay });
+
+        string body = JsonSerializer.Serialize(new { error = new { code = 429, details } })
+            .Replace("\"type\":", "\"@type\":", StringComparison.Ordinal);
+        return new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+    }
+
     private static HttpResponseMessage Answered(string payload)
     {
         string envelope = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":"
@@ -405,6 +433,81 @@ public class DrPepperGeminiRecordedTests
     }
 
     /// <summary>
+    /// A per-minute 429 is waited out on the rung it happened on, exactly like a busy model.
+    ///
+    /// This is the fault that pushed nine invoices in a row off gemini-3.7-flash on 2026-08-14
+    /// while the store's dashboard showed 6 of 20 requests used for the whole day. Nothing was
+    /// exhausted: a refused key and a throttled key both answer instantly, so the ladder emptied
+    /// five or six requests into one second and tripped the five-per-minute limit itself. Treating
+    /// that as "gone until tomorrow" spent the invoice on a worse model, which is where bad
+    /// barcodes come from.
+    /// </summary>
+    [Fact]
+    public void AKeyThatSentTooManyRequestsThisMinuteIsAskedAgainOnTheSameModel()
+    {
+        string recorded = File.ReadAllText(Recorded, Encoding.UTF8);
+        var handler = new ProgrammableStub((number, _, _) => number <= 2
+            ? Throttled("GenerateRequestsPerMinutePerProjectPerModel-FreeTier")
+            : Answered(recorded));
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff, NoBusyWaits);
+
+        DrPepperVisionReading reading = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+
+        Assert.Equal(DrPepperVisionStatus.Success, reading.Status);
+        // Asked the *same* rung again rather than dropping a model over a limit that clears itself.
+        Assert.Equal(
+            ["key-1/gemini-3.7-flash", "key-1/gemini-3.7-flash", "key-1/gemini-3.7-flash"],
+            handler.Tried);
+    }
+
+    /// <summary>
+    /// The per-day allowance keeps its old handling: one sweep, no sleeping. It does not come back
+    /// before tomorrow, and waiting on it is what used to leave an invoice at "Converting..." for
+    /// minutes. Built with the real waits so a sleep here would fail loudly.
+    /// </summary>
+    [Fact]
+    public void AnExhaustedDailyAllowanceIsStillNeverWaitedOn()
+    {
+        var handler = new ProgrammableStub((_, _, _) =>
+            Throttled("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "38s"));
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        _ = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+        clock.Stop();
+
+        Assert.Equal(6, handler.Tried.Count);
+        Assert.Equal(handler.Tried.Distinct(), handler.Tried);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"slept for {clock.Elapsed}");
+    }
+
+    /// <summary>
+    /// A 429 that does not say which quota it is counts as the daily one. Guessing the other way
+    /// puts the operator in front of a window that says "Converting..." for minutes on an allowance
+    /// that will not return today; guessing this way costs one invoice a worse model.
+    /// </summary>
+    [Fact]
+    public void AnUnexplained429IsTreatedAsTheDailyAllowance()
+    {
+        var handler = new ProgrammableStub((_, _, _) =>
+            Unavailable(HttpStatusCode.TooManyRequests));
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        _ = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+        clock.Stop();
+
+        Assert.Equal(6, handler.Tried.Count);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"slept for {clock.Elapsed}");
+    }
+
+    /// <summary>
     /// A busy model is asked again instead of refusing a readable invoice.
     ///
     /// 503 is Google's own server, not the store's allowance, and it clears on its own — so unlike
@@ -539,7 +642,8 @@ public class DrPepperGeminiRecordedTests
 
         string note = reader.ReadDrPepper(File.ReadAllBytes(Scan)).Note;
 
-        Assert.Contains("1 out of free allowance (HTTP 429)", note, StringComparison.Ordinal);
+        // A bare 429 says nothing about which quota it was, so it reads as the daily allowance.
+        Assert.Contains("1 out of free allowance (HTTP 429 per-day)", note, StringComparison.Ordinal);
         // One in the opening sweep, then once per retry round - it stayed busy every time.
         Assert.Contains($"{1 + NoBusyWaits.Length} model busy (HTTP 5xx)", note, StringComparison.Ordinal);
         Assert.Contains("1 refused (other HTTP error)", note, StringComparison.Ordinal);

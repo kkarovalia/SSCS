@@ -37,8 +37,8 @@ document:
 | **from 07-27** | 1323 px wide ≈ **300 dpi** | clean | picture-primary path reads it cleanly |
 
 Two of the thirteen samples have **no text layer whatsoever** — the scanner's OCR was switched off.
-That no longer affects the product data: the picture is the normal source. Positioned OCR is used
-only to locate a row for a boxed operator question, and a question can still be shown without it.
+That no longer affects the product data: the picture is the normal source, and the one-request AI
+path does not consult OCR or open a product-row question.
 
 At 300 dpi the damage largely disappears. Everything below about tolerating damage is written for the
 200 dpi backlog; it stays in because those tickets still get converted.
@@ -118,12 +118,12 @@ does not depend on this band parser at all.
 | Column | Meaning | Used? |
 |---|---|---|
 | **UPC** | UPC-A **body**, leading zero and check digit both removed | yes — §3 |
-| **ITEM No** | Bimbo's own six-digit product number | yes — row locator for the independent UPC read |
+| **ITEM No** | Bimbo's own six-digit product number | context only; not written to NAXML |
 | **QTY** | **individual sellable units** — never cases | yes |
 | **SUGG RETAIL** | Bimbo's suggested shelf price | **no** — §5 |
 | **RETAIL AMOUNT** | QTY × SUGG RETAIL | only as a second reading of QTY |
-| **PRICE** | **cost of one unit**, 4 decimals | yes → `UnitCost` |
-| **AMOUNT** | QTY × PRICE | only as a check; the extended is recomputed |
+| **PRICE** | **cost of one unit**, 4 decimals | yes → `UnitCost`; derived from QTY/AMOUNT only if unreadable |
+| **AMOUNT** | QTY × PRICE | required for a postable AI row and used as a check |
 
 **There is no case arithmetic anywhere on this vendor.** `SS2P` means a single-serve two-pack, which
 is one thing the store sells — not two. Verified against live SSCS on all 26 delivery lines of the
@@ -146,27 +146,19 @@ SSCS drops it →  07432309183       ← the id this store already holds the ite
 The check digit is arithmetic on the other eleven, so putting it back is exact. Confirmed against all
 26 delivery ids on the SSCS Line Items tab.
 
-### Two independent reads, no product catalogue
+### One read, with the barcode risk accepted explicitly
 
-**No code on the page validates itself.** Here a single mis-read digit is completely silent: the
-money still reconciles, the unit counts still agree, and SSCS quietly opens a brand-new item under an
-id belonging to nothing. A hardcoded 54-product item-number table was tried and removed on
-2026-08-13. It made every new Bimbo product a source change and rebuild, and a stale mapping could
-replace a correctly read code with the wrong product.
+**No code on the page validates itself.** A single mis-read digit is completely silent: the money
+still reconciles, the unit counts still agree, and SSCS quietly opens a brand-new item under an id
+belonging to nothing. The store owner was told this explicitly and on 2026-08-13 chose one complete
+ticket read with no barcode follow-up, no suspicious-prefix warning and no product catalogue. A code
+can be corrected in SSCS in seconds; the former questions and refusals were costing whole deliveries.
 
-The production rule is now:
-
-1. The primary picture request reads the ten printed digits.
-2. A separate focused request reads the UPC column again. It receives the page and row locators —
-   row id, position, item number, description, QTY and amount — but never receives the first UPC.
-3. Core accepts the UPC only when both reads independently agree on all ten digits. There is no
-   product or manufacturer-prefix allow-list; a new product family needs no code change.
-4. Any disagreement, missing digit, or malformed code shows that exact row to the operator. The
-   operator may type the ten printed digits or the complete valid 12-digit UPC-A.
-
-The four silent OCR errors formerly repaired from the source table remain useful regression evidence,
-but they are now caught by disagreement with the focused picture read rather than by product data in
-the executable. New products require no release.
+The production rule is therefore simple: the one Bimbo request reads exactly the ten printed digits,
+Core prepends the known leading zero and computes the UPC-A check digit required by NAXML. A missing
+or malformed ten-digit body makes that row unpostable, so the row is dropped and named with its money
+in a warning. A wrong but well-shaped ten-digit reading ships silently by deliberate decision. Do not
+add verification, a manufacturer-prefix net or a catalogue back.
 
 ---
 
@@ -179,9 +171,10 @@ does on import. That turns the printed AMOUNT from a figure to copy into one mor
 which matters, because the printed one is sometimes wrong (`23.26` for 23.28 on ticket
 84294890013154, where the row had merged into `23.06-1.9400`).
 
-### Three checksums
+### Three non-blocking checks
 
-This vendor is unusually generous, and it is what makes the 200 dpi backlog usable at all:
+This vendor is unusually generous. The model works these checks while it can still look at the
+picture, and Core repeats them only to attach warnings to the written file:
 
 1. **per row** — `QTY × PRICE = AMOUNT`, and independently `QTY × SUGG RETAIL = RETAIL AMOUNT`;
 2. **per band** — the printed unit count and the printed wholesale amount;
@@ -191,7 +184,7 @@ This vendor is unusually generous, and it is what makes the 200 dpi backlog usab
 samples. It is a cross-check, never the answer — a non-zero prior balance would book last week's
 money onto this week's invoice.
 
-### Settling a quantity
+### Legacy OCR fallback: settling a quantity
 
 Three readings, in order of how well each defends itself:
 
@@ -426,61 +419,47 @@ stay byte-for-byte unchanged.
 
 ### Primary request
 
-`ReadBimbo` sends the page picture with a Bimbo-only schema. It asks for every product row in order,
-the DELIVERY and RETURNS band totals, TICKET TOTALS and CASH DUE. The prompt names the eight columns,
-warns about the two adjacent AMOUNT columns, says QTY is individual units, preserves four PRICE
-decimals, and makes `isCredit` own the sign. It explicitly ignores invoice number and date; its schema
-has no field for either.
+`ReadBimbo` sends every page picture together in one Bimbo-only request. It asks for every product row
+in order, the DELIVERY and RETURNS band totals, TICKET TOTALS and CASH DUE. The prompt names the eight
+columns, warns about the two adjacent AMOUNT columns, says QTY is individual units, preserves four
+PRICE decimals, and makes `isCredit` own the sign. It explicitly ignores invoice number and date; its
+schema has no field for either.
 
 The model is told to inspect each row twice, check `QTY × PRICE = wholesale AMOUNT`, sum each band,
-and compare the ticket total with CASH DUE. Those instructions help it catch a transcription error,
-but the response is still untrusted. `BimboVisionParser` parses numeric strings strictly and repeats
-the row, band, ticket-unit and ticket-money checks before building `InvoiceLine`s. It never cleans up
-malformed strings such as `-8-` into a plausible number.
+and compare the signed band result with `TICKET TOTALS`. `CASH DUE` is copied independently because
+it can include `PRIOR BALANCE`; the prompt forbids changing an invoice value to make the two match.
+The final prompt block says each failed check is a reason to look at the picture again, never a source
+for a replacement value. `BimboVisionParser` repeats the
+row, band, ticket-unit and ticket-money arithmetic only to produce warnings. It never cleans up a
+malformed string such as `-8-` into a plausible number.
 
-### Two independent UPC requests
+### No follow-up request and no line questions
 
-Every row gets two follow-up picture reads because the printed ten-digit body has no check digit.
-The second pass receives a locally generated row id and non-UPC locators only; the first UPC is
-absent, which prevents the verifier from merely echoing it. The third pass receives an enlarged crop
-of the UPC cell alone. It cannot see the full invoice, description, item number, quantity, amount or
-either earlier UPC. All three readings must match on all ten digits. A two-to-one result, blank, or
-unavailable crop asks the operator on that exact highlighted row. There is no product or
-manufacturer-prefix catalogue and therefore no product addition workflow.
+The barcode-only full-page request and isolated UPC-crop request were deleted, along with their
+response types, request schemas and WinForms adapters. Nothing in the Bimbo AI path can open a UPC,
+QTY, PRICE or AMOUNT dialog. The parser normalises a usable printed UPC body into the complete UPC-A,
+keeps QTY as individual units, uses PRICE as unit cost, and seeds retail at 45%. A missing PRICE can
+be calculated from the row's QTY and wholesale AMOUNT and is warned about.
 
-With more than one configured model/key combination the verifier starts on the next combination.
-With only one, it is still a fresh, narrowly-scoped request. Normal volume is roughly two requests
-for the one daily Bimbo invoice per store. Bulk testing can consume quota faster, so failed or
-inconsistent replies use the existing model/key fallback and bounded retry ladder.
-
-### Parser and questions
-
-The parser's job is intentionally narrow: validate the model's fields, normalise the printed UPC body
-into the complete UPC-A, produce the ordinary `BimboTicket`, and ask when independent evidence does
-not settle a value. A local disagreement asks AMOUNT first (it is not written to XML), then PRICE and
-QTY if necessary. A ticket-wide count disagreement asks affected quantities; a money disagreement
-asks prices when none of the printed totals supports the rows. UPC disagreement asks only that UPC.
-
-Questions can therefore cover **UPC, QTY, PRICE or wholesale AMOUNT**. They show the real printed row
-with the relevant column boxed. Positioned OCR is allowed only inside the locator used by
-`PdfRowSnipper`; no OCR barcode, quantity, price, amount, description, sign, band or total is copied
-back into the AI invoice.
-
-The ticket is a fixed form, so each of those four fields also has a measured horizontal column band
-as a fallback: UPC 2.5-17.0%, QTY 53.5-60.0%, wholesale PRICE 77.5-86.5%, and wholesale AMOUNT
-88.5-98.5% of page width. The exact token or printed heading wins when it can be located; the band is
-used only when the hidden OCR text damaged the requested value. The vertical position still comes
-from the exact product row. This prevents the former whole-row yellow wash from directing an
-operator to seven values when the dialog asks for one, without trusting OCR as invoice data.
+A row with no usable ten-digit UPC body, positive QTY or positive wholesale AMOUNT cannot be posted.
+It is dropped, named with its printed money in a warning, and the rest of the ticket converts. Row,
+band and ticket arithmetic disagreements are also warnings on the written file. The only business
+refusal in `BimboVisionParser` is a reading with no postable row at all.
 
 ### Failure and fallback
 
-A structurally invalid successful response gets one immediate fresh read. If the API is unavailable
-before it reads the page (no key, network, quota or service response), the operator may approve the
-legacy PDF text parser once for the entire queue batch. If the API reached the page but still could
-not produce all rows and independent totals, the ticket is not mixed with OCR: the app asks for a
-clearer rescan. That distinction prevents a half-AI, half-OCR invoice whose internal agreement says
-nothing about either source.
+The response gate requires exactly what a file needs and nothing else: **at least one postable row**.
+Unit-count or money disagreement never makes the reply incomplete, and neither does a missing
+`TICKET TOTALS`. That last one used to be part of the gate, which quietly made the reader stricter
+than the parser it feeds — `BimboVisionParser` has always been willing to invoice a ticket whose
+totals line the scan destroyed, paying it for the sum of its own rows and warning that it did, and
+that code could never run. A smudged summary line is not a reason to send a delivery of legible
+product rows back to the scanner. If the minimal shape is absent, the shared ladder makes its one
+bounded fresh retry. If the API is
+unavailable before it reads the page (no key, network, quota or service response), the operator may
+approve the unchanged legacy PDF text parser once for the entire queue batch. If the API reached the
+page but cannot meet the minimal gate, the ticket is not mixed with OCR: the app asks for a clearer
+rescan.
 
 ---
 
@@ -497,9 +476,9 @@ nothing about either source.
 - **A number touching a letter is description text, not a column.** Bimbo's product names are full of
   them (`SS2P`, `MB GLZ CIN RL SS 4Z`, `FRST DON SS6P3.25`), and letting them through both truncates
   the description and offers a false reading of the QTY column.
-- **In the picture-primary path, require `isCredit` on every row.** The prompt derives it from the
-  DELIVERY/RETURNS band and Core refuses a missing direction; a dropped minus cannot silently turn a
-  return into a delivery.
+- **The prompt must still return `isCredit` on every row.** If a malformed response omits it, Core
+  uses the printed sign where one survived, otherwise treats the row as a delivery, and adds a
+  warning instead of refusing the ticket.
 - **The banners are letter-spaced** (`**DEL I VER IES**`, `` `"BFTUIINS•" ``) and unreliable. The
   closing `DELIVERY TOTAL` / `RETURNS TOTAL` rows survived every sample and are what the bands are
   split on.

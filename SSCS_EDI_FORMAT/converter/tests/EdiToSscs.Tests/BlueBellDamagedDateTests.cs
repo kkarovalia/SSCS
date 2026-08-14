@@ -64,6 +64,9 @@ public class BlueBellDamagedDateTests
             Seen.Add(request);
             return new InvoiceDetails(number, date);
         }
+
+        // These date proofs exercise the explicitly approved legacy OCR path.
+        public bool ConfirmBlueBellOcrFallback(string fileName) => true;
     }
 
     private static QueuedFile BlueBell(string path) =>

@@ -23,6 +23,7 @@ public class RedBullBarcodeBarsTests
 
     private sealed class AnswerNothing : IInvoiceDetailsPrompt
     {
+        public bool ConfirmRedBullOcrFallback(string fileName) => true;
         public List<LineFieldRequest> LineFields { get; } = [];
 
         public InvoiceDetails? AskInvoiceDetails(InvoiceDetailsRequest request) =>

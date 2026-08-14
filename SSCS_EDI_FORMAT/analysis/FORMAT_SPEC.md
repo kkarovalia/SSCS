@@ -201,7 +201,7 @@ vendor-suggested figure is the safer default even when approximate:
 
 There is no longer a $99.99 cap; the old 4-digit field forced one, XML does not.
 
-### Scanned PDF headers and Bimbo picture-primary input
+### Scanned PDF headers and picture-primary input
 
 For every scanned PDF vendor, the invoice number and date that reach NAXML are typed by the
 operator into empty boxes. Neither field has an invoice checksum; a plausible OCR error can pass
@@ -210,21 +210,86 @@ prompt, `InvoiceDetailsRequest`, intentionally contains neither an invoice-numbe
 value. Parsed dates may still separate sections or support parser checks, but cannot pre-fill the UI
 or override the keyed date.
 
-Bimbo's normal product source is the page picture, not the PDF OCR text layer. The first
-vendor-specific model request returns each row's item number, description, printed ten-digit UPC
-body, QTY, PRICE, wholesale AMOUNT, delivery/return direction, band totals, TICKET TOTALS and CASH
-DUE. Core parses those as untrusted strings and repeats `QTY × PRICE`, band, ticket-unit and
-ticket-money checks. A second focused full-page request re-reads only the UPC column and is never
-shown the first result. A third request receives one enlarged UPC cell per row and no description,
-item number, quantity, amount or earlier UPC. Only unanimous agreement among all three reads accepts
-the UPC; two-to-one disagreement asks the operator on the precisely highlighted row. The complete
-value written to NAXML is `0 + body + computed check digit` (for example `74323-09183` →
-`074323091830`). There is no product or manufacturer-prefix table in source.
+Blue Bell's normal source is one Gemini request containing every page picture. Each row keeps
+`upc`, `quantity`, `price`, `extended` and `packSize` as strings, so a printed `-11/12` return is
+not rounded or normalised before Core sees it. A postable row needs the twelve printed padded UPC
+characters, a quantity, and either PRICE or EXTENDED; TOTAL, unit counts, page counts and arithmetic
+are not reply gates. Core restores the real UPC-A through `BlueBellPdfParser.ToGtin`, expands a
+model-read pack 12, books `n/12` as `n` bars, and seeds retail at 40%. The catalogue is a
+warning-only pack cross-check and never repairs an AI value.
 
-OCR supplies only page/line coordinates for Bimbo's boxed correction dialog. If AI is unavailable
-before reading, the operator may approve the legacy text parser once per queue batch. A model reply
-that remains structurally inconsistent after retry is a rescan, never a mixture of AI and OCR
-figures.
+Missing rows and disagreements in row math, section TOTAL, printed quantity or known pack size are
+warnings on a written file. An unreadable TOTAL uses the signed line sum and warns. The sole
+business refusal is no postable row. Sales and Returns remain one payable and all page images are
+read together; handwriting and PICK LIST pages are excluded by the vendor prompt. Unavailable AI
+may use the unchanged legacy OCR parser only after explicit once-per-batch approval, while an AI
+read that reached the page and still found nothing postable requires a rescan.
+
+Chubiwinos' normal source is likewise one Gemini request containing every page picture. Its
+vendor-specific row contract contains `itemNumber`, `description`, the printed `barcode`, `quantity`
+(QTY), `price` (PRICE), `amount` (rightmost TOTAL) and SALES/DUMP direction. Every numeric field is
+text. The schema offers no case, pack or retail field because none exists on the paper. A postable
+row needs an 11-digit UPC-A body or a full 12- or 13-digit printed barcode, a positive whole QTY,
+and either PRICE or TOTAL; footer
+totals, section counts, row arithmetic, vendor markers and the barcode check digit are not reply
+gates.
+
+Core removes printed hyphens. A whole UPC-A or EAN-13 is sent unchanged; when the vendor prints an
+11-digit UPC-A body, Core appends its one mathematically determined check digit before XML
+(`85088300206` → `850883002062`). It never pads or truncates a full code, consults
+`ChubiwinosCatalog`, or asks for a barcode on the AI path. A printed failed check digit is sent as
+read and warned about. DUMP rows become negative units at positive
+cost on the same payable. PRICE is already unit cost; when PRICE alone is unreadable, TOTAL / QTY is
+used to four decimals and warned. Retail is seeded through
+`RetailSeed.FromCost(cost, ChubiwinosPdfParser.RetailMargin)` at 50%.
+
+Each section's printed `Totals:` quantity and money plus SALES, CREDITS, NET AMOUNT, SALES TAX,
+TOTAL DUE, TOTAL PAYMENT and INVOICE BALANCE are checks only. Disagreements warn and never repair a
+row or refuse the file. The NAXML invoice total is always the signed sum of the lines being written.
+The sole parser refusal is no postable row. A model read that reached the pictures but still has no
+postable row after its retry requires a rescan; unavailable AI may use the unchanged legacy OCR
+parser and catalogue only after explicit once-per-batch approval.
+
+Bimbo's normal product source is one Gemini request containing every page picture, not the PDF OCR
+text layer. The vendor-specific response returns each row's item number, description, printed
+ten-digit UPC body, QTY, PRICE, wholesale AMOUNT, delivery/return direction, band totals, TICKET
+TOTALS and CASH DUE. Core parses those strings and writes the invoice without opening a line-field
+dialog. `QTY × PRICE`, band, ticket-unit and ticket-money disagreements are
+`ConversionWarning`s on a file that still gets written. A row with no usable ten-digit UPC body,
+QTY or wholesale AMOUNT is dropped and named with its printed money in a warning; only a reading
+with no postable row at all is refused. The complete value written to NAXML is
+`0 + body + computed check digit` (for example `74323-09183` → `074323091830`). There is no product
+or manufacturer-prefix table in source and no second barcode read.
+
+Because the printed Bimbo body has no check digit, this intentionally leaves a wrong ten-digit AI
+reading undetectable; it can create a duplicate item in SSCS. That tradeoff was explicitly accepted
+by the store owner on 2026-08-13 to avoid questions and whole-ticket refusals. Do not add barcode
+verification, suspicious-prefix warnings or a catalogue back. If AI is unavailable before reading,
+the operator may approve the unchanged legacy text parser once per queue batch. A successful API
+reply is accepted when it contains at least one postable row plus TICKET TOTALS; if it cannot do that
+after the bounded retry it is a rescan, never a mixture of AI and OCR figures.
+
+Red Bull uses its own picture-primary contract as of 2026-08-14. Every page picture in one PDF is
+sent in one request, and the reply carries the physical product rows in order. The response keeps
+`QTY` (`cases`) and `UNITS` as separate text fields, keeps every money field as text, and requires
+the delivery/credit direction while retaining a deterministic sign fallback. A postable row is
+exactly a twelve-digit barcode, a nonzero whole `UNITS` value and a positive rightmost `TOTAL`.
+The reply gate requires one such row and nothing else: neither footer totals nor `Units Delivered`
+can buy a retry or refuse a readable ticket.
+
+Core sends `UNITS` directly as Qty and calculates unit cost as `TOTAL / UNITS`, rounded to four
+decimals. Credit rows become negative quantities at positive costs. A failed UPC-A check digit is
+sent unchanged and warned about; the AI path never consults `RedBullCatalog`, the printed bars or a
+single-digit repair. Missing rows, row-math disagreements, total disagreements and unit-count
+disagreements are warnings on a written file. The sole business refusal is a reading with no
+postable row. Invoice number and date remain absent from the schema and are typed into empty boxes.
+
+If AI is unavailable, the operator may approve the unchanged legacy Red Bull OCR parser once for
+the whole queue batch. If the API reached the page but still returned no postable row after its
+bounded retry, the file asks for a rescan and never mixes OCR values into the partial AI reading.
+The 2025-11-24 live SSCS result still establishes Red Bull's barcode, unit, cost, credit and
+one-payable rules; the new AI path itself had not been batch-audited against the sample PDFs when
+this contract was recorded on 2026-08-14.
 
 Dr Pepper uses the same value boundary with a vendor-specific schema. Gemini's primary request sees
 the complete invoice and returns physical rows, package subtotals, TOTAL SALE, sales/credit summary
