@@ -25,6 +25,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
     private ConvertTab _ediTab = null!;
     private ConvertTab _pdfTab = null!;
+    private ConvertTab _modisoftTab = null!;
 
     private string? _currentFolder;
     private bool _firstShownHandled;
@@ -36,6 +37,12 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
     private EmailSettings _email = new();
     private readonly object _emailLock = new();
     private readonly SmtpEmailSender _emailSender;
+
+    /// <summary>
+    /// Sends PDF to Modisoft EDI files to the Modisoft address. Its own sender, from the same
+    /// settings, so nothing a tab does can reach the other system's address.
+    /// </summary>
+    private readonly SmtpEmailSender _modisoftEmailSender;
 
     /// <summary>
     /// The AI reader's configuration as last saved, guarded for the same reason as the email
@@ -59,6 +66,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
         // Reads the live settings on every send, so a change in Settings takes effect immediately.
         _emailSender = new SmtpEmailSender(() => { lock (_emailLock) return _email.Clone(); });
+        _modisoftEmailSender = new SmtpEmailSender(
+            () => { lock (_emailLock) return _email.Clone(); }, target: OutputTarget.Modisoft);
 
         BuildLayout();
         UpdateFolderLabel();
@@ -88,7 +97,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
     private void OnFormClosingConfirm(object? sender, FormClosingEventArgs e)
     {
-        if (!_ediTab.IsBusy && !_pdfTab.IsBusy) return;
+        if (!_ediTab.IsBusy && !_pdfTab.IsBusy && !_modisoftTab.IsBusy) return;
         var answer = MessageBox.Show(
             this,
             "Files are still being converted. If you close now, unfinished conversions will stop.\n\nClose anyway?",
@@ -329,7 +338,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
     {
         QueueRepaintPolicy.AfterPrompt(
             () => _ediTab?.ForceRepaint(),
-            () => _pdfTab?.ForceRepaint());
+            () => _pdfTab?.ForceRepaint(),
+            () => _modisoftTab?.ForceRepaint());
     }
 
     public void SaveFolder(string folder)
@@ -376,21 +386,31 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         var settingsPage = new TabPage("Settings") { BackColor = ThemeBg, Padding = new Padding(16), UseVisualStyleBackColor = false };
         var ediPage = new TabPage("EDI to SSCS XML") { BackColor = ThemeBg, Padding = new Padding(10), UseVisualStyleBackColor = false };
         var pdfPage = new TabPage("PDF to SSCS XML") { BackColor = ThemeBg, Padding = new Padding(10), UseVisualStyleBackColor = false };
+        var modisoftPage = new TabPage("PDF to Modisoft EDI") { BackColor = ThemeBg, Padding = new Padding(10), UseVisualStyleBackColor = false };
 
         // PDF sits ahead of EDI and opens first: the PDF vendors are the everyday job, and the tab
-        // that is already in front is the one nobody converts on the wrong tab by accident.
+        // that is already in front is the one nobody converts on the wrong tab by accident. The
+        // Modisoft tab sits beside it because it takes the same PDFs; only the file it writes and
+        // the address it sends to differ.
         tabs.TabPages.Add(settingsPage);
         tabs.TabPages.Add(pdfPage);
+        tabs.TabPages.Add(modisoftPage);
         tabs.TabPages.Add(ediPage);
 
-        _ediTab = new ConvertTab(this, ConversionKind.Edi,
+        _ediTab = new ConvertTab(this, ConversionKind.Edi, OutputTarget.Sscs,
             "Click or drag and drop EDI files here",
             "Accepted: .txt, .edi, .edi13  —  the data file a vendor emails you");
-        _pdfTab = new ConvertTab(this, ConversionKind.Pdf,
+        _pdfTab = new ConvertTab(this, ConversionKind.Pdf, OutputTarget.Sscs,
             "Click or drag and drop PDF invoices here",
             "Accepted: .pdf (searchable)  —  choose the vendor above before dropping");
+        // No vendor dropdown here (2026-10-15): Modisoft takes only the lines from the file and the
+        // vendor is picked on the purchase in Modisoft, so any vendor's invoice goes straight in.
+        _modisoftTab = new ConvertTab(this, ConversionKind.Pdf, OutputTarget.Modisoft,
+            "Click or drag and drop any invoice here",
+            "Accepted: .pdf, or a photo (.jpg, .png)  —  any vendor, no need to pick one. Makes a Modisoft EDI file.");
         _ediTab.Build(ediPage);
         _pdfTab.Build(pdfPage);
+        _modisoftTab.Build(modisoftPage);
 
         tabs.SelectedTab = pdfPage;
         shell.Controls.Add(tabs, 0, 1);
@@ -495,7 +515,11 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                    "twice cannot double-book a delivery.\n\n" +
                    "• EDI to SSCS XML — converts the data files vendors email you (.txt, .edi, .edi13).\n" +
                    "• PDF to SSCS XML — converts Dr Pepper, Blue Bell, Chubiwinos, Bimbo and Red Bull PDF\n" +
-                   "  invoices. Pick the vendor first.\n\n" +
+                   "  invoices. Pick the vendor first.\n" +
+                   "• PDF to Modisoft EDI — any vendor's invoice (a PDF or a photo), read by AI and made into\n" +
+                   "  an EDI file for Modisoft, emailed to the Modisoft address. No vendor to pick. In\n" +
+                   "  Modisoft, create the purchase and pick the vendor, press Import Invoice, choose EDI and\n" +
+                   "  then Xpress Wholesale (for every vendor), and upload the file.\n\n" +
                    "A Blue Bell ticket that also has a Returns section produces two files, one per\n" +
                    "invoice number, and each goes out as its own email.\n\n" +
                    "Use View XML to read what a file converted to.",
@@ -556,9 +580,23 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         EmailSettings s;
         lock (_emailLock) s = _email;
 
-        _emailValueLabel.Text = s.IsComplete
-            ? $"Send Email sends to: {s.ToAddress}\nSent from {s.FromAddress}. Files are saved to the output folder as well."
-            : "Email is not set up yet, so Send Email has nothing to send to.\nOpen Email Settings to set the store's address and the sending mailbox.";
+        if (!s.IsCompleteFor(OutputTarget.Sscs) && !s.IsCompleteFor(OutputTarget.Modisoft))
+        {
+            _emailValueLabel.Text = "Email is not set up yet, so Send Email has nothing to send to.\n"
+                + "Open Email Settings to set the store's address and the sending mailbox.";
+            return;
+        }
+
+        // Both addresses are always named, set or not, so a store that only uses one back office
+        // can see at a glance that the other tab has nowhere to send.
+        _emailValueLabel.Text =
+            (string.IsNullOrWhiteSpace(s.ToAddress)
+                ? "SSCS files: no address set."
+                : $"SSCS files go to: {s.ToAddress}") + "\n"
+            + (string.IsNullOrWhiteSpace(s.ModisoftToAddress)
+                ? "Modisoft files: no address set."
+                : $"Modisoft files go to: {s.ModisoftToAddress}") + "\n"
+            + $"Sent from {s.FromAddress}. Files are saved to the output folder as well.";
     }
 
     /// <summary>
@@ -615,10 +653,10 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         // for a store that had just added one — and then told them to go and get a free Google key.
         _visionValueLabel.Text = s.IsActive
             ? "On. Blue Bell, Bimbo, Chubiwinos, Dr Pepper and Red Bull are read once from the complete ticket pictures.\n"
-              + "Their AI paths ask only for the invoice number and date."
+              + "Their AI paths ask only for the invoice number and date. The Modisoft tab reads any vendor's invoice."
             : s.AllProtectedKeys.Count == 0
-                ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan.\n"
-                  + "Open AI Reading Settings to switch it on with a free Google key."
+                ? "Off. Invoices are read from the PDF only, which means more questions on a bad scan,\n"
+                  + "and the Modisoft tab cannot read anything. Open AI Reading Settings to switch it on with a free Google key."
                 : "Off. A key is saved but not being used - open AI Reading Settings to switch it back on.";
     }
 
@@ -710,6 +748,19 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         }
     }
 
+    public AnyInvoiceVisionReading ReadAnyInvoice(byte[] fileBytes)
+    {
+        try
+        {
+            return CreateVisionReader()?.ReadAnyInvoice(fileBytes)
+                   ?? AnyInvoiceVisionReading.Off("AI reading is switched off or has no usable key.");
+        }
+        catch
+        {
+            return AnyInvoiceVisionReading.Unavailable();
+        }
+    }
+
     /// <summary>
     /// The reader in use, and the settings it was built from.
     ///
@@ -758,9 +809,76 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             if (_visionReaderInUse is not null && _visionReaderBuiltFrom == builtFrom)
                 return _visionReaderInUse;
             _visionReaderBuiltFrom = builtFrom;
-            _visionReaderInUse = new GeminiVisionReader(keys, models);
+            // The app keeps asking while Google is busy; the reader's own default is to give up.
+            _visionReaderInUse = new GeminiVisionReader(
+                keys, models, patience: GeminiVisionReader.BusyPatience) { Progress = ForwardAiProgress };
             return _visionReaderInUse;
         }
+    }
+
+    /// <summary>
+    /// One AI read at a time, across every tab, and where its progress lines go while it runs.
+    ///
+    /// The reader is shared - see <see cref="_visionReaderInUse"/> - so it has one place to say what
+    /// it is waiting on, and that has to be the row of the file being read. Until 2026-10-05 it
+    /// said nothing at all: the window was never wired to it, so a read that sat for five minutes
+    /// showed "Converting..." the whole time. Taking turns is also what the free allowance wants,
+    /// at five requests a minute per model.
+    /// </summary>
+    private readonly object _aiReadGate = new();
+    private Action<string>? _aiProgress;
+
+    private void ForwardAiProgress(string message) => Volatile.Read(ref _aiProgress)?.Invoke(message);
+
+    private T ReadWithProgress<T>(Action<string>? progress, Func<T> read)
+    {
+        if (!Monitor.TryEnter(_aiReadGate))
+        {
+            progress?.Invoke("Waiting for the invoice on the other tab to finish its AI reading.");
+            Monitor.Enter(_aiReadGate);
+        }
+        try
+        {
+            Volatile.Write(ref _aiProgress, progress);
+            return read();
+        }
+        finally
+        {
+            Volatile.Write(ref _aiProgress, null);
+            Monitor.Exit(_aiReadGate);
+        }
+    }
+
+    /// <summary>
+    /// One tab's view of the AI reader: the same reads, with progress going to that tab's queue.
+    /// Each tab's <see cref="ConversionService"/> sets <see cref="Progress"/> to its own queue.
+    /// </summary>
+    private sealed class TabVisionReader(MainForm owner)
+        : IInvoiceVisionReader, IBimboVisionReader, IDrPepperVisionReader, IRedBullVisionReader,
+          IBlueBellVisionReader, IChubiwinosVisionReader, IAnyInvoiceVisionReader, IVisionProgressReporter
+    {
+        public Action<string>? Progress { get; set; }
+
+        public AnyInvoiceVisionReading ReadAnyInvoice(byte[] fileBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadAnyInvoice(fileBytes));
+
+        public VisionReading TryRead(byte[] pdfBytes, VisionVendor vendor) =>
+            owner.ReadWithProgress(Progress, () => owner.TryRead(pdfBytes, vendor));
+
+        public BimboVisionReading ReadBimbo(byte[] pdfBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadBimbo(pdfBytes));
+
+        public DrPepperVisionReading ReadDrPepper(byte[] pdfBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadDrPepper(pdfBytes));
+
+        public RedBullVisionReading ReadRedBull(byte[] pdfBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadRedBull(pdfBytes));
+
+        public BlueBellVisionReading ReadBlueBell(byte[] pdfBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadBlueBell(pdfBytes));
+
+        public ChubiwinosVisionReading ReadChubiwinos(byte[] pdfBytes) =>
+            owner.ReadWithProgress(Progress, () => owner.ReadChubiwinos(pdfBytes));
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -887,13 +1005,15 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
     /// <summary>
     /// One convert section (EDI or PDF): a click/drag drop area, a per-file status list and summary.
-    /// The PDF section also shows a (Dr Pepper) vendor dropdown; the EDI section needs no vendor. Each
-    /// tab owns an independent conversion queue; both share the window's destination folder.
+    /// The PDF sections also show a vendor dropdown; the EDI section needs no vendor. Each tab owns
+    /// an independent conversion queue and its own email sender; all share the destination folder.
     /// </summary>
     private sealed class ConvertTab
     {
         private readonly MainForm _owner;
         private readonly ConversionKind _kind;
+        private readonly OutputTarget _target;
+        private readonly SmtpEmailSender _sender;
         private readonly string[] _extensions;
         private readonly string _dropPrimaryText;
         private readonly string _dropSecondaryText;
@@ -907,16 +1027,22 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         private Button _sendEmailButton = null!;
         private bool _sending;
 
-        public ConvertTab(MainForm owner, ConversionKind kind, string dropPrimary, string dropSecondary)
+        public ConvertTab(
+            MainForm owner, ConversionKind kind, OutputTarget target, string dropPrimary, string dropSecondary)
         {
             _owner = owner;
             _kind = kind;
-            _extensions = kind == ConversionKind.Pdf ? [".pdf"] : [".txt", ".edi", ".edi13"];
+            _target = target;
+            _sender = target == OutputTarget.Modisoft ? owner._modisoftEmailSender : owner._emailSender;
+            _extensions = kind != ConversionKind.Pdf ? [".txt", ".edi", ".edi13"]
+                : PicksVendor ? [".pdf"]
+                : [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
             _dropPrimaryText = dropPrimary;
             _dropSecondaryText = dropSecondary;
 
             var service = new ConversionService(
-                owner._logger, Application.ProductVersion, owner, visionReader: owner);
+                owner._logger, Application.ProductVersion, owner,
+                visionReader: new TabVisionReader(owner));
             _coordinator = new ConversionCoordinator(service, owner);
             _coordinator.FileChanged += OnFileChanged;
             _coordinator.BatchCompleted += summary => _owner.RunOnUi(() =>
@@ -927,6 +1053,15 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         }
 
         public bool IsBusy => _coordinator.IsBusy;
+
+        /// <summary>
+        /// Only PDF to SSCS XML picks a vendor: SSCS needs to know who sent it, and each vendor
+        /// there has its own parser. The Modisoft tab reads any vendor's invoice the same way.
+        /// </summary>
+        private bool PicksVendor => _kind == ConversionKind.Pdf && _target == OutputTarget.Sscs;
+
+        /// <summary>What the viewer button says: SSCS files are XML, Modisoft files are EDI text.</summary>
+        private string ViewAction => _target == OutputTarget.Modisoft ? "View File" : "View XML";
 
         /// <summary>
         /// Forces the native list view to repaint after a modal prompt closes. Its backing model can
@@ -941,7 +1076,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             // bottom (both docked), so a short window — e.g. at 125–150% display scaling — never clips
             // them. Only the drop area and file list in the middle compress. Docked controls are laid
             // out in reverse add order, so the Fill panel is added FIRST and the docked edges after it.
-            var vendorRow = _kind == ConversionKind.Pdf ? BuildVendorRow() : null;
+            var vendorRow = PicksVendor ? BuildVendorRow() : null;
 
             // --- Middle: drop area + file list (fills remaining space, compresses when short) ---
             // The drop area gets a fixed height rather than a share of what is left. As a percentage
@@ -1028,12 +1163,12 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 // What the buttons actually do. It read "click one to view its XML", and a single
                 // click does nothing — the viewer is on double-click, because opening a modal window
                 // every time an arrow key moves the highlight would be unusable.
-                Text = "Converted files - double-click one, or pick it and press View XML",
+                Text = $"Converted files - double-click one, or pick it and press {ViewAction}",
                 AutoSize = true, ForeColor = ThemeMuted,
                 Anchor = AnchorStyles.Left, Margin = new Padding(2, 8, 0, 0),
             }, 0, 0);
 
-            var viewXmlButton = MakePrimaryButton("View XML");
+            var viewXmlButton = MakePrimaryButton(ViewAction);
             viewXmlButton.Margin = new Padding(8, 0, 2, 2);
             viewXmlButton.Anchor = AnchorStyles.Right;
             viewXmlButton.Click += (_, _) => ViewSelectedXml();
@@ -1145,7 +1280,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             return row;
         }
 
-        private PdfVendor SelectedVendor => _vendorCombo?.SelectedIndex switch
+        private PdfVendor SelectedVendor => !PicksVendor ? PdfVendor.Any : _vendorCombo?.SelectedIndex switch
         {
             1 => PdfVendor.BlueBell,
             2 => PdfVendor.Chubiwinos,
@@ -1175,9 +1310,11 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
         private void OnChooseFiles(object? sender, EventArgs e)
         {
-            string filter = _kind == ConversionKind.Pdf
-                ? "PDF invoices (*.pdf)|*.pdf"
-                : "EDI files (*.txt;*.edi;*.edi13)|*.txt;*.edi;*.edi13";
+            string filter = _kind != ConversionKind.Pdf
+                ? "EDI files (*.txt;*.edi;*.edi13)|*.txt;*.edi;*.edi13"
+                : PicksVendor
+                    ? "PDF invoices (*.pdf)|*.pdf"
+                    : "Invoices (*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.heic;*.heif)|*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.heic;*.heif";
             using var dialog = new OpenFileDialog { Multiselect = true, Filter = filter, Title = "Choose files to convert", CheckFileExists = true };
             if (dialog.ShowDialog(_owner) == DialogResult.OK)
                 EnqueuePaths(dialog.FileNames);
@@ -1198,7 +1335,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             }
             if (allowed.Count == 0) return;
 
-            foreach (var file in _coordinator.Enqueue(allowed, _kind, SelectedVendor))
+            foreach (var file in _coordinator.Enqueue(allowed, _kind, SelectedVendor, _target))
                 EnsureRow(file);
         }
 
@@ -1227,10 +1364,11 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         {
             if (_sending) return;
 
-            if (!_owner._emailSender.IsConfigured)
+            if (!_sender.IsConfigured)
             {
-                MessageBox.Show(_owner,
-                    "Email is not set up yet. Open the Settings tab, press Email Settings, and fill in the store's address and the sending mailbox.",
+                MessageBox.Show(_owner, _target == OutputTarget.Modisoft
+                        ? "There is no address for Modisoft files yet. Open the Settings tab, press Email Settings, and fill in the Modisoft address and the sending mailbox."
+                        : "Email is not set up yet. Open the Settings tab, press Email Settings, and fill in the store's address and the sending mailbox.",
                     _owner.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -1243,7 +1381,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 return;
             }
 
-            string to = _owner._emailSender.ToAddress ?? "the store";
+            string to = _sender.ToAddress ?? "the store";
             _sending = true;
             _sendEmailButton.Enabled = false;
             _sendEmailButton.Text = "Sending...";
@@ -1318,7 +1456,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
 
             foreach (var (file, doc) in pending)
             {
-                var result = _owner._emailSender.Send(doc, file.FileName);
+                var result = _sender.Send(doc, file.FileName);
                 if (result.Sent)
                 {
                     file.MarkEmailed(doc.FileName);
@@ -1330,7 +1468,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
                 }
             }
 
-            string to = _owner._emailSender.ToAddress ?? "the store";
+            string to = _sender.ToAddress ?? "the store";
             string summary = failures.Count == 0
                 ? $"Sent {sent} invoice{(sent == 1 ? "" : "s")} to {to}."
                 : $"Sent {sent} of {pending.Count} to {to}. {failures.Count} could not be sent - see the message for why.";
@@ -1345,8 +1483,8 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
             if (emailed == 0) return;
 
             string note = emailed == file.Documents.Count
-                ? $"Emailed to {_owner._emailSender.ToAddress}"
-                : $"Emailed {emailed} of {file.Documents.Count} to {_owner._emailSender.ToAddress}";
+                ? $"Emailed to {_sender.ToAddress}"
+                : $"Emailed {emailed} of {file.Documents.Count} to {_sender.ToAddress}";
             item.SubItems[2].Text = note;
             item.ToolTipText = note + "\n" + file.Detail;
             RepaintFileList();
@@ -1390,7 +1528,7 @@ public sealed class MainForm : Form, IDestinationProvider, IInvoiceDetailsPrompt
         /// </summary>
         private void ViewSelectedXml()
         {
-            var file = SelectedConvertedFile("View XML");
+            var file = SelectedConvertedFile(ViewAction);
             if (file is null) return;
 
             using var viewer = new XmlViewerDialog(file.Documents, file.FileName, file.OutputPath);

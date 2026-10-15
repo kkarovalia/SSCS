@@ -10,13 +10,54 @@ standalone, needs no other reading.
 ## What this is
 
 Production **.NET 8 WinForms** app that turns vendor invoices into **NAXML-BusDoc 1.5** files for
-SSCS. Two input paths, one output format:
+SSCS, and, for Modisoft stores, PDF invoices into plain GHRA EDI files. Three convert tabs:
 
 - **EDI to SSCS XML** — the fixed-width `.txt`/`.edi`/`.edi13` files vendors email (four layouts:
   standard EDI, EDI13, Ruby Red EDI13, STRP/Alp).
 - **PDF to SSCS XML** — vendor PDF invoices (**Dr Pepper**, **Blue Bell**, **Chubiwinos S&G**,
   **Bimbo Bakeries**, **Red Bull**), read with **PdfPig**. The tab
   has a vendor dropdown; each vendor has its own parser.
+- **PDF to Modisoft EDI** (2026-10-05) — **any vendor's invoice since 2026-10-15, with no vendor
+  dropdown** (the user: Modisoft only needs the lines, the vendor is picked on the purchase). A PDF
+  (scan or real text) or a photo goes to Gemini in one generic request
+  (`GeminiVisionReader.ReadAnyInvoice`, `AnyInvoicePrompt`), and `AnyInvoiceParser` turns the
+  reading into lines; `PdfVendor.Any` routes it. The five tuned vendor readers now serve only PDF to
+  SSCS XML, which keeps its dropdown. Until 2026-10-15 this tab used those same five readers, and the
+  notes below on verifying them describe that time. `ModisoftEdiBuilder` writes a GHRA-style file with a **13-character
+  barcode field** (78-byte records since 2026-10-09: UPC-A + a blank, EAN-13 whole) and it is
+  emailed to the separate **Modisoft address**. Somebody imports it into a purchase they create in
+  Modisoft: **Import Invoice → EDI → "Xpress Wholesale", for every vendor** (Texas Wholesale with
+  12 characters until 2026-10-09; it merged EAN-13s on 11 digits). Modisoft parses an EDI file with
+  whichever vendor layout is picked in that dropdown, not the vendor on the purchase; GHRA's own
+  11-character layout came in ×10 under Texas Wholesale. Rules and the verified imports are in
+  [analysis/FORMAT_SPEC.md](./analysis/FORMAT_SPEC.md) Part 3. **Modisoft's Qty is the file's case
+  count**, so a line goes in the vendor's billing unit (`InvoiceLine.Cases`). The new Best Stop 16
+  store is the one that uses it. **Status:** Dr Pepper verified end to end (2026-10-06, $1,468.73 to
+  the cent, credits included). **Bimbo, Blue Bell, Chubiwinos and Red Bull are next.** The
+  checklist, the test invoices and what each should look like are in Part 3, "Verifying the other
+  four vendors". Their four test files were made on 2026-10-06 and sit beside the PDFs in
+  `Downloads\Modisoft test invoices`. The import results are awaited.
+- **Any other invoice → Modisoft, by hand** (2026-10-06; since 2026-10-15 only when the tab
+  cannot do it — Gemini down, or no whole barcodes printed): follow
+  [analysis/INVOICE_TO_MODISOFT.md](./analysis/INVOICE_TO_MODISOFT.md). Read every line and prove
+  the totals. **Look up every UPC** to get units per case, because the pack text misleads. Then
+  fill a table and run `converter/tools/ModisoftFile`, which checks the sums and writes through
+  `ModisoftEdiBuilder`. The worked examples are Silver Eagle 424753 and Faust 204409
+  (`tools/ModisoftFile/examples/`). Faust prints no barcodes, so they came from the store's own
+  Modisoft purchase export.
+- **13-digit barcodes (EAN-13) in Modisoft** (2026-10-09, Yumi 29008246): Texas Wholesale matches
+  only the **first 11 digits**, so two EAN-13s that share them land on one item. LLB Grape went on
+  Strawberry and Lychee on Melon; the money was right but the stock was wrong. Check every
+  invoice's EAN-13s for that before writing. **Xpress Wholesale** reads a 13-character barcode
+  field (78-byte records) and kept them apart. Sending 13 digits under Texas Wholesale shifts
+  everything (Qty 40000). Procedure: INVOICE_TO_MODISOFT.md, "Barcodes with 13 digits". Evidence:
+  FORMAT_SPEC.md Part 3. The whole Yumi invoice, and Dr Pepper with credits, came in exact under
+  Xpress, so **the converter and ModisoftFile now write that layout for every invoice**. Left over:
+  a store item saved with a shortened EAN-13 is not found, and becomes a duplicate until its scan
+  code is set to the real 13 digits.
+- **A converter vendor while Gemini is down:** read the pictures by hand into the vendor's
+  `XxxVisionReading` and run `converter/tools/HandReading`. It drives the real `ConversionService`
+  with that reading, so the file is exactly what the app would write.
 
 Output is a portable single-file `win-x64` EXE under `converter/publish/`.
 
@@ -360,14 +401,27 @@ duplicate item, so no verification or suspicious-code net may be added back.
   only four-decimal figure, and it fails safe besides, since a retail amount fails
   `QTY x PRICE = AMOUNT` and sends the row to a person rather than to the register.
   **What a read cost goes to the log** (`VisionReading.Note` → `LogEntry.visionRead`): pages,
-  requests, rows, how many came back throttled, how many ran out the 90-second clock, and seconds
-  spent asleep on the free allowance. The second reader runs *before* the first prompt opens, so its
-  time is time the operator spends watching a window that has not appeared yet — and "the AI took two
-  minutes" has four causes that need telling apart and cannot be told apart from outside: a long
-  reply, a request that hit the timeout **and was then retried** (a timeout is counted as throttled,
-  so one slow page can cost 90s twice over), a genuine 429 costing a 20- or 50-second sleep, or a
-  slow line. A read that comes back empty still writes its note, because two minutes and nothing is a
-  different fault from two minutes and forty rows.
+  requests, rows, and each failure as itself — per-day 429, per-minute 429, busy (5xx or a reply
+  Google cut off), refused, unreachable, went quiet, incomplete — plus seconds spent waiting. A read
+  that comes back empty still writes its note, because two minutes and nothing is a different fault
+  from two minutes and forty rows.
+- **Invoice reads stream, and only silence ends one** (2026-10-05). `TryOnce` calls
+  `streamGenerateContent?alt=sse` with `thinkingConfig.includeThoughts`, so a working read sends
+  something every second or two; the thought parts are dropped (`IsThought`) and the answer is put
+  back into the one-shot envelope for the unchanged parsers. There is still **no deadline** — a read
+  that keeps talking runs as long as it takes — but two minutes of nothing (`Silence`) is a dead
+  request, a stream that closes without a `finishReason` was cut off by Google (a busy model), and an
+  error event after the 200 is that status's fault. Before this, two Dr Pepper conversions sat at
+  "Converting..." for over five minutes each while 3.5–3.8 Flash were all answering "high demand".
+  **A busy model is busy for every key**: it gets one more go five seconds later on the same key, and
+  then the other keys are not asked about it, because every busy reply counted against the day's 20
+  on the store's dashboard. Progress reaches the row's Details column through each tab's
+  `TabVisionReader`, and AI reads take turns across tabs.
+  **Since 2026-10-06 the app keeps asking a busy Google for up to `BusyPatience` (15 min).** Rounds
+  are paced 30s, 1m, 2m, then 3m, and a later round asks each model once. Only a busy round is
+  waited on; a used-up allowance is not. MainForm opts in with `patience:`, and the constructor
+  default of 0 keeps the suite fast. Keys are **not** rotated to get past busy: it is per model,
+  and Google treats multi-account limit dodging as circumvention.
 - **A page the text layer cannot read is no longer a lost file.** Dr Pepper sends the complete page
   pictures to its dedicated Gemini-primary reader even when no OCR text exists. OCR is optional
   geometry for exact operator highlights only; it never contributes a row or figure. The primary
@@ -420,9 +474,39 @@ duplicate item, so no verification or suspicious-code net may be added back.
   overrides it for a known item, so asking would be a prompt that changes nothing. **The invoice-number
   box is never pre-filled from a scan, for any vendor** — `InvoiceDetailsRequest` deliberately has no
   suggestion field, so it cannot be
-- `OutputNaming.cs` — `SSCS_*.xml` filenames; `BuildInvoiceOutputFileName` names by invoice number
+- `OutputNaming.cs` — `SSCS_*.xml` filenames; `BuildInvoiceOutputFileName` names by invoice number;
+  `BuildModisoftFileName` gives `MODISOFT_<VENDOR>_<invoice>.txt`
+- `ModisoftEdiBuilder.cs` — the Modisoft file. `Write` is the GHRA layout and nothing else, pinned
+  byte for byte against the imported GHRA 687105 (`Fixtures/Modisoft/`). `Lines` decides each
+  record's cases, pack and case cost. A line goes in cases only when `InvoiceLine.Cases` is set
+  and divides its items evenly, and in single items otherwise, so Modisoft's own units-per-case
+  always gets a true count. `ConversionService.Document` picks this or `NaxmlBuilder` from
+  `QueuedFile.Target`. Every PDF vendor's output, legacy fallbacks included, goes through it.
+- `AnyInvoiceParser.cs`, `AnyInvoiceVisionReader.cs`, `InvoicePictures.cs` — the Modisoft tab's
+  only reader (2026-10-15). `InvoicePictures.Prepare` sends a scanned PDF's page pictures (a photo's
+  JPEG as it is), any other PDF whole as `application/pdf` (Silver Eagle's emailed report has no
+  picture at all), and a photo as it is, shrinking JPEG/PNG to fit Google's 20 MB request.
+  `AnyInvoicePrompt` makes the model copy barcode digits exactly as printed — never pad or add a
+  check digit, because an unknown vendor may print a body (Bimbo, Chubiwinos) or a padded body (Blue
+  Bell). `AnyInvoiceParser.Barcode` completes a code only where it is exact or proven, by digit
+  count, and keys Blue Bell's and Bimbo's known forms off the vendor name read. `Count` keeps the
+  paper's billing unit: a line billed by the item goes in by the item (never regrouped into boxes);
+  a case line takes the line's printed UNITS over anything, a printed pack next, and a pack from the
+  description last (named in a `PDF_UNITS_NOT_PRINTED` note, because pack text misled on Silver
+  Eagle and Faust). A printed total matching either the net or the deliveries alone reconciles
+  (Blue Bell prints a sales TOTAL and its returns apart). **Live reads 2026-10-15:** Chubiwinos
+  6V9389 and Blue Bell 033100786112 came out identical to their hand-made Modisoft files on every
+  Qty, Units and Case Cost, totals exact; the first Blue Bell read took BX CNT for units per case,
+  which is why the prompt now says a box count is not a pack and DZ is 12.
+  Lines carry the printed amount exactly (unit cost not rounded to four places), retail 0, and a
+  line with no usable barcode is left out and named with its money. Tax, deposits and fees are
+  named (`PDF_OTHER_CHARGES`), not written. No line questions, no refusals but "no line Modisoft
+  could match"; AI off, Google unavailable and unreadable each say what to do. Invoice number and
+  date are still typed. `AnyInvoiceTests` pins it, including the request's picture types.
 - `EmailSender.cs` — SMTP send of the converted XML to the store, which is what actually routes an
-  invoice (fact 3). **One invoice per message.** Conversion always saves to the output folder;
+  invoice (fact 3). One `SmtpEmailSender` per target: the Modisoft tab's sender reads
+  `EmailSettings.ModisoftToAddress`, so neither tab can reach the other system's address. A store
+  may set either address or both. **One invoice per message.** Conversion always saves to the output folder;
   sending is the separate **Send Email** button, which sends every converted invoice on the tab with
   no row selection. `QueuedFile.MarkEmailed`/`WasEmailed` stops a second press double-sending — a
   duplicate books the delivery twice in SSCS and nothing downstream catches it.
@@ -430,7 +514,9 @@ duplicate item, so no verification or suspicious-code net may be added back.
   email settings. Both fail closed and neither is ever shown back. Needs a **Gmail App Password**
   (so 2FA on the sending mailbox). A credential-free Gmail-compose-link version was built and
   removed on 2026-07-27 — a web link cannot attach a file. Don't re-propose it.
-- `converter/src/EdiToSscs.App/MainForm.cs` — UI only (Settings + PDF tab + EDI tab, in that order);
+- `converter/src/EdiToSscs.App/MainForm.cs` — UI only (Settings, PDF to SSCS XML, PDF to Modisoft
+  EDI, EDI to SSCS XML, in that order; only PDF to SSCS XML has a vendor dropdown — the Modisoft
+  tab takes any vendor and also accepts .jpg/.png/.webp/.heic photos);
   `XmlViewerDialog` reads the in-memory documents, so it still shows the XML if the saved file moved
 - `Assets/app.ico` — the shell icon (`ApplicationIcon` in the csproj) and, via `AppIcon.cs`, the
   window icon. It holds **different artwork per size**: lettered PDF→XML chips at 96px and above,

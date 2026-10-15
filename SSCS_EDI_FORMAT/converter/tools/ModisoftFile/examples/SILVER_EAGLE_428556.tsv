@@ -1,0 +1,47 @@
+upc	description	cases	units_per_case	case_cost	line_amount	note
+684746402542	CT BLUE HAWAII 24/16OZ	1	24	35.00	35.00	item 00532; pack UPC and PPC 24 printed on the invoice
+684746400494	CT BAHAMA MAMA 12/24OZ CAN	1	12	27.81	27.81	item 00638; pack UPC and PPC 12 printed on the invoice
+684746400500	CT MARGARITAS 12/24OZ CAN	1	12	27.81	27.81	item 00640; pack UPC and PPC 12 printed on the invoice
+850677006511	HOOP TEA OG 12/25OZ CANS	1	12	28.61	28.61	item 00673; pack UPC and PPC 12 printed on the invoice
+000099700997	Monday out of sequence new store del	0	2	0.00	0.00	item 00997; a printed note ("Monday out of sequence new store delivery"), not a product
+000099700997	ivery	0	2	0.00	0.00	item 00997; a printed note ("Monday out of sequence new store delivery"), not a product
+018200255335	BUD LT MANG-O 12/25OZ CANS	1	12	29.45	29.45	item 01509; pack UPC and PPC 12 printed on the invoice
+018200259081	BUD LT WATERME 12/25OZ CANS	1	12	29.45	29.45	item 01617; pack UPC and PPC 12 printed on the invoice
+018200250149	BUD LT LIME AR 12/25OZ CANS	1	12	29.45	29.45	item 02200; pack UPC and PPC 12 printed on the invoice
+018200255052	BUD LT STRAW 12/25OZ CANS	1	12	29.45	29.45	item 02250; pack UPC and PPC 12 printed on the invoice
+018200264412	ESTRELLA 6/4PK 16OZ CANS	0	6	31.85	0.00	item 02940; not delivered
+635985801986	W CLAW BLK CHE 12/19.2 CANS	1	12	29.91	29.91	item 09703; pack UPC and PPC 12 printed on the invoice
+635985802136	W CLAW MANGO 12/19.2OZ CANS	1	12	29.91	29.91	item 09709; pack UPC and PPC 12 printed on the invoice
+635985802051	W CLAW WATERME 12/19.2 CANS	1	12	29.91	29.91	item 09727; pack UPC and PPC 12 printed on the invoice
+815829010716	CAYJK MARG 12/24OZ	1	12	29.91	29.91	item 09743; pack UPC and PPC 12 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+635985802082	W CLAW SUR-CRA 12/19.2OZ CANS	1	12	29.91	29.91	item 09748; pack UPC and PPC 12 printed on the invoice
+635985801993	W CLAW BLACKBE 12/19.2 OZ CANS	1	12	29.91	29.91	item 09750; pack UPC and PPC 12 printed on the invoice
+810117130961	BLINDER LEM ST 12/24OZ	1	12	27.41	27.41	item 14915; pack UPC and PPC 12 printed on the invoice
+810117130947	BLINDER LEM OG 12/24OZ	1	12	27.41	27.41	item 14916; pack UPC and PPC 12 printed on the invoice
+635985000464	CJACKED TROPIC 12/19.2OZ CANS	1	12	29.91	29.91	item 15304; pack UPC and PPC 12 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+815829011829	CAYJK STRW MAR 12/24OZ	1	12	29.91	29.91	item 15336; pack UPC and PPC 12 printed on the invoice
+018200967153	MICH ULTRA 24/12 CANS	4	1	26.50	106.00	item 17018; pack UPC and PPC 1 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+018200965500	MICH ULTRA 30PK CAN	1	1	29.45	29.45	item 17030; pack UPC and PPC 1 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+018200250101	MICH ULTRA 15/25 CANS	2	15	36.70	73.40	item 17047; pack UPC and PPC 15 printed on the invoice
+849806000957	4 LOKO SOU APP 12/23.5OZ CAN	1	12	32.63	32.63	item 23303; pack UPC and PPC 12 printed on the invoice
+849806001169	4 LOKO GOLD 12/23.5OZ CAN	1	12	32.63	32.63	item 23913; pack UPC and PPC 12 printed on the invoice
+849806004726	4 LOKO USA 12/23.5OZ CAN	1	12	32.63	32.63	item 23920; pack UPC and PPC 12 printed on the invoice
+849806004948	4 LOKO GALACT 12/23.5OZ CAN	1	12	32.63	32.63	item 23922; pack UPC and PPC 12 printed on the invoice
+849806005839	4 LOKO CAMO 12/23.5OZ CAN	1	12	32.63	32.63	item 23925; pack UPC and PPC 12 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+849806006362	4 LOKO JACKPOT 12/23.5OZ CAN	1	12	32.63	32.63	item 23926; pack UPC and PPC 12 printed on the invoice
+613008763749	AZ HARD GREEN 12/22OZ CANS	1	12	20.00	20.00	item 24804; pack UPC and PPC 12 printed on the invoice
+613008763756	AZ HARD PEACH 12/22OZ CANS	1	12	20.00	20.00	item 24806; pack UPC and PPC 12 printed on the invoice
+613008769826	AZ HARD LEMONA 12/22OZ CANS	1	12	20.00	20.00	item 24811; pack UPC and PPC 12 printed on the invoice
+810028202641	KAR LAGER 4/6 LN	1	4	32.52	32.52	item 29300; pack UPC and PPC 4 printed on the invoice
+033544002384	COR SUNBREW 4/6 LNNR	0	4	36.50	0.00	item 51060; not delivered
+033544001882	MODELO ESP CHE 2/12 CAN	1	2	35.60	35.60	item 53065; pack UPC and PPC 2 printed on the invoice
+840262400275	LIP HARD LEMON 12/24 OZ CAN	1	12	27.41	27.41	item 59952; pack UPC and PPC 12 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+070310017548	LIP HARD CITRU 12/24 OZ CAN	1	12	27.41	27.41	item 59953; pack UPC and PPC 12 printed on the invoice; invoice prints the same code for case and pack, so check it matched an existing item
+840262400275	LIP HARD PEACH 12/24 OZ CAN	0	12	27.41	0.00	item 59954; not delivered
+850046522024	HDAD FRUT PNCH 12/24OZ	1	12	28.56	28.56	item 62108; pack UPC and PPC 12 printed on the invoice
+850046522215	HDAD GRAPE 12/24OZ	1	12	28.56	28.56	item 62109; pack UPC and PPC 12 printed on the invoice
+851133006731	BB GREEN APPLE 12/500ML	1	12	35.60	35.60	item 69083; pack UPC and PPC 12 printed on the invoice
+851133006502	BB VARIETY PAC 2/6 500ML	1	2	32.96	32.96	item 69085; pack UPC and PPC 2 printed on the invoice
+860010695876	BB RWB VP 2/6 500ML	1	2	32.96	32.96	item 69087; pack UPC and PPC 2 printed on the invoice
+850059195444	BB LEM VARIETY 2/6 PK	1	2	32.96	32.96	item 69095; pack UPC and PPC 2 printed on the invoice
+684746403518	CT GRAPE 12/24OZ CAN	1	12	27.81	27.81	item 80995; pack UPC and PPC 12 printed on the invoice

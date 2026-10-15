@@ -16,10 +16,11 @@ public sealed record EmailSendResult(bool Sent, string? ErrorMessage)
 }
 
 /// <summary>
-/// Delivers a converted invoice to the store's SSCS address.
+/// Delivers a converted invoice to the address its back office reads.
 ///
-/// Everything a store's routing depends on is here: SSCS decides which store a file belongs to by
-/// the address it arrived at, so this is the step that actually files an invoice.
+/// For SSCS everything a store's routing depends on is here: SSCS decides which store a file
+/// belongs to by the address it arrived at, so this is the step that actually files an invoice.
+/// A Modisoft file goes to the store's own mailbox instead, for somebody to import by hand.
 /// </summary>
 public interface IEmailDelivery
 {
@@ -51,13 +52,19 @@ public sealed class SmtpEmailSender : IEmailDelivery
 {
     private readonly Func<EmailSettings> _settings;
     private readonly TimeSpan _timeout;
+    private readonly OutputTarget _target;
 
-    public SmtpEmailSender(Func<EmailSettings> settingsProvider, TimeSpan? timeout = null)
+    /// <param name="target">Which saved address this sender delivers to. There is one sender per
+    /// convert tab, so the SSCS tab can never send to the Modisoft address or the other way round.</param>
+    public SmtpEmailSender(
+        Func<EmailSettings> settingsProvider, TimeSpan? timeout = null,
+        OutputTarget target = OutputTarget.Sscs)
     {
         _settings = settingsProvider ?? throw new ArgumentNullException(nameof(settingsProvider));
         // Long enough for a slow shop connection, short enough that a dead network does not look
         // like a hung application.
         _timeout = timeout ?? TimeSpan.FromSeconds(45);
+        _target = target;
     }
 
     private EmailSettings Current
@@ -69,17 +76,19 @@ public sealed class SmtpEmailSender : IEmailDelivery
         }
     }
 
-    public bool IsConfigured => Current.IsComplete;
+    public bool IsConfigured => Current.IsCompleteFor(_target);
 
-    public string? ToAddress => Current.ToAddress;
+    public string? ToAddress => Current.AddressFor(_target);
 
     public EmailSendResult Send(ConvertedDocument document, string sourceFileName)
     {
         ArgumentNullException.ThrowIfNull(document);
 
         var settings = Current;
-        if (!settings.IsComplete)
-            return EmailSendResult.Failed("Email is not set up yet. Open Settings and fill in the email details.");
+        if (!settings.IsCompleteFor(_target))
+            return EmailSendResult.Failed(_target == OutputTarget.Modisoft
+                ? "There is no address to send Modisoft files to yet. Open Settings and fill in the email details."
+                : "Email is not set up yet. Open Settings and fill in the email details.");
 
         string? password = SecretProtector.Unprotect(settings.ProtectedPassword);
         if (string.IsNullOrEmpty(password))
@@ -90,39 +99,47 @@ public sealed class SmtpEmailSender : IEmailDelivery
                 "The saved email password could not be read on this Windows account. Open Settings and enter the app password again.");
         }
 
-        return SendCore(settings, password, document, sourceFileName, isTest: false, timeout: _timeout);
+        return SendCore(settings, password, settings.AddressFor(_target)!, document, sourceFileName,
+            isTest: false, _target, timeout: _timeout);
     }
 
     /// <summary>
     /// Sends a one-off message proving the settings work, used by the Send Test Email button. Takes
-    /// the password directly so it can be tested before it is saved.
+    /// the password directly so it can be tested before it is saved. <paramref name="toAddress"/>
+    /// picks which saved address to test; it defaults to the SSCS one.
     /// </summary>
-    public static EmailSendResult SendTest(EmailSettings settings, string password, TimeSpan? timeout = null)
+    public static EmailSendResult SendTest(
+        EmailSettings settings, string password, TimeSpan? timeout = null, string? toAddress = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var doc = new ConvertedDocument("SSCS_test.xml",
             System.Text.Encoding.ASCII.GetBytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Test>EDI to SSCS Converter test message.</Test>\r\n"));
-        return SendCore(settings, password, doc, "test", isTest: true, timeout: timeout);
+        return SendCore(settings, password, toAddress ?? settings.ToAddress ?? "", doc, "test",
+            isTest: true, OutputTarget.Sscs, timeout: timeout);
     }
 
     private static EmailSendResult SendCore(
-        EmailSettings settings, string password, ConvertedDocument document,
-        string sourceFileName, bool isTest, TimeSpan? timeout)
+        EmailSettings settings, string password, string toAddress, ConvertedDocument document,
+        string sourceFileName, bool isTest, OutputTarget target, TimeSpan? timeout)
     {
         MemoryStream? stream = null;
         try
         {
+            bool modisoft = target == OutputTarget.Modisoft;
             using var message = new MailMessage
             {
                 From = new MailAddress(settings.FromAddress!),
-                Subject = isTest ? "EDI to SSCS Converter - test message" : $"SSCS invoice {document.FileName}",
-                Body = BuildBody(document, sourceFileName, isTest),
+                Subject = isTest ? "EDI to SSCS Converter - test message"
+                    : modisoft ? $"Modisoft EDI invoice {document.FileName}"
+                    : $"SSCS invoice {document.FileName}",
+                Body = BuildBody(document, sourceFileName, isTest, target),
                 IsBodyHtml = false,
             };
-            message.To.Add(settings.ToAddress!);
+            message.To.Add(toAddress);
 
             stream = new MemoryStream(document.Bytes, writable: false);
-            message.Attachments.Add(new Attachment(stream, document.FileName, MediaTypeNames.Text.Xml));
+            message.Attachments.Add(new Attachment(stream, document.FileName,
+                modisoft ? MediaTypeNames.Text.Plain : MediaTypeNames.Text.Xml));
 
             using var client = new SmtpClient(settings.SmtpHost, settings.SmtpPort)
             {
@@ -148,12 +165,22 @@ public sealed class SmtpEmailSender : IEmailDelivery
         }
     }
 
-    private static string BuildBody(ConvertedDocument document, string sourceFileName, bool isTest)
+    private static string BuildBody(
+        ConvertedDocument document, string sourceFileName, bool isTest, OutputTarget target)
     {
         if (isTest)
         {
             return "This is a test message from the EDI to SSCS Converter.\r\n\r\n"
                  + "If you are reading this, the converter can send converted invoices to this address.\r\n";
+        }
+
+        if (target == OutputTarget.Modisoft)
+        {
+            return $"Converted from: {sourceFileName}\r\n\r\n"
+                 + $"Attached Modisoft EDI file:\r\n  - {document.FileName}\r\n\r\n"
+                 + "To add it in Modisoft: create the purchase and choose the vendor, press Import Invoice,\r\n"
+                 + "choose EDI and then Xpress Wholesale (the same for every vendor), and upload this file.\r\n\r\n"
+                 + "Sent automatically by the EDI to SSCS Converter.\r\n";
         }
 
         return $"Converted from: {sourceFileName}\r\n\r\n"

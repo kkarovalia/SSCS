@@ -20,6 +20,7 @@ internal sealed class EmailSettingsDialog : Form
     private readonly bool _hadPassword;
 
     private readonly TextBox _to;
+    private readonly TextBox _modisoftTo;
     private readonly TextBox _from;
     private readonly TextBox _password;
     private readonly TextBox _host;
@@ -46,7 +47,7 @@ internal sealed class EmailSettingsDialog : Form
         ShowInTaskbar = false;
         Font = new Font("Segoe UI", 10f);
         MinimumSize = new Size(600, 380);
-        Size = new Size(620, 780);
+        Size = new Size(620, 860);
 
         // The fields scroll and the buttons are pinned to the bottom, so Save stays reachable on a
         // short screen or at 150% display scaling. Docked controls lay out in reverse add order, so
@@ -73,7 +74,14 @@ internal sealed class EmailSettingsDialog : Form
         layout.Controls.Add(FieldLabel("Send to (the store's SSCS address)"));
         _to = Field(current.ToAddress);
         layout.Controls.Add(_to);
-        layout.Controls.Add(Hint("This is what decides which store the invoice lands in."));
+        layout.Controls.Add(Hint("This is what decides which store the invoice lands in. "
+            + "Leave it empty if this store does not use SSCS."));
+
+        layout.Controls.Add(FieldLabel("Send Modisoft files to (the store's own email)"));
+        _modisoftTo = Field(current.ModisoftToAddress);
+        layout.Controls.Add(_modisoftTo);
+        layout.Controls.Add(Hint("PDF to Modisoft EDI sends its files here. Download the attachment and "
+            + "import it into a purchase in Modisoft. Leave it empty if this store does not use Modisoft."));
 
         layout.Controls.Add(FieldLabel("Send from (the mailbox this PC signs in as)"));
         _from = Field(current.FromAddress);
@@ -201,13 +209,24 @@ internal sealed class EmailSettingsDialog : Form
             return;
         }
 
-        EmailSendResult result;
+        // One test per address filled in, so a store using both back offices proves both.
+        var addresses = new[] { draft!.ToAddress, draft.ModisoftToAddress }
+            .Where(address => !string.IsNullOrWhiteSpace(address))
+            .Select(address => address!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        EmailSendResult result = EmailSendResult.Ok();
         var previous = Cursor;
         Cursor = Cursors.WaitCursor;
         Enabled = false;
         try
         {
-            result = SmtpEmailSender.SendTest(draft!, password);
+            foreach (string address in addresses)
+            {
+                result = SmtpEmailSender.SendTest(draft, password, toAddress: address);
+                if (!result.Sent) break;
+            }
         }
         finally
         {
@@ -218,7 +237,7 @@ internal sealed class EmailSettingsDialog : Form
         if (result.Sent)
         {
             MessageBox.Show(this,
-                $"A test message was sent to {draft!.ToAddress}.\n\nCheck that it arrived before relying on this.",
+                $"A test message was sent to {string.Join(" and ", addresses)}.\n\nCheck that it arrived before relying on this.",
                 Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         else
@@ -234,11 +253,17 @@ internal sealed class EmailSettingsDialog : Form
     private EmailSettings? Compose(out string? problem)
     {
         string to = _to.Text.Trim();
+        string modisoftTo = _modisoftTo.Text.Trim();
         string from = _from.Text.Trim();
         string host = _host.Text.Trim();
 
-        if (to.Length == 0) { problem = "Enter the address converted files should be sent to."; return null; }
-        if (!IsValidAddress(to)) { problem = $"\"{to}\" is not a valid email address."; return null; }
+        if (to.Length == 0 && modisoftTo.Length == 0)
+        {
+            problem = "Enter where converted files should be sent: the SSCS address, the Modisoft address, or both.";
+            return null;
+        }
+        if (to.Length > 0 && !IsValidAddress(to)) { problem = $"\"{to}\" is not a valid email address."; return null; }
+        if (modisoftTo.Length > 0 && !IsValidAddress(modisoftTo)) { problem = $"\"{modisoftTo}\" is not a valid email address."; return null; }
         if (from.Length == 0) { problem = "Enter the mailbox this PC should send from."; return null; }
         if (!IsValidAddress(from)) { problem = $"\"{from}\" is not a valid email address."; return null; }
         if (host.Length == 0) { problem = "Enter the mail server, for example smtp.gmail.com."; return null; }
@@ -246,7 +271,8 @@ internal sealed class EmailSettingsDialog : Form
         problem = null;
         return new EmailSettings
         {
-            ToAddress = to,
+            ToAddress = to.Length > 0 ? to : null,
+            ModisoftToAddress = modisoftTo.Length > 0 ? modisoftTo : null,
             FromAddress = from,
             SmtpHost = host,
             SmtpPort = (int)_port.Value,

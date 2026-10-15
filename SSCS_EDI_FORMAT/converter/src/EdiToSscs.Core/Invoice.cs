@@ -56,6 +56,18 @@ public static class PdfReasonCodes
     /// is warning-only because the operator already selected the vendor and faint headers are common.
     /// </summary>
     public const string ChubiwinosMarkers = "PDF_CHUBIWINOS_MARKERS";
+    /// <summary>
+    /// An unknown vendor printed a barcode without its first and last digits, and a 0 and the check
+    /// digit were put on. Exact for the check digit; the 0 is the usual number system, not a given.
+    /// </summary>
+    public const string BarcodeCompleted = "PDF_BARCODE_COMPLETED";
+    /// <summary>
+    /// The paper does not print how many items a case holds, so the count came from the line's
+    /// description. Modisoft costs one item by that count, so somebody checks Units there.
+    /// </summary>
+    public const string UnitsNotPrinted = "PDF_UNITS_NOT_PRINTED";
+    /// <summary>Tax, deposits or fees are part of the invoice total but are not product lines.</summary>
+    public const string OtherCharges = "PDF_OTHER_CHARGES";
 }
 
 /// <summary>
@@ -120,6 +132,19 @@ public sealed class InvoiceLine
     /// approximate. Zero is written only when the source document genuinely gives us nothing.
     /// </summary>
     public required decimal RetailPrice { get; init; }
+
+    /// <summary>
+    /// How many of the vendor's own cases this line is, as printed, when the vendor bills by the
+    /// case: Dr Pepper's CASES, Red Bull's QTY, a Blue Bell dozen carton. Null when it bills the
+    /// single unit. Always positive; the sign lives on <see cref="Units"/>.
+    ///
+    /// SSCS never reads it. Only the Modisoft EDI file does, because Modisoft counts what arrived
+    /// in **cases** and divides the case cost by its own units-per-case to cost one item. Verified
+    /// 2026-10-05 against a 2021 GHRA import: Modisoft's Qty was the file's case count every time,
+    /// and its Units came from Modisoft's own item list, not from the file. See
+    /// <see cref="ModisoftEdiBuilder"/>.
+    /// </summary>
+    public int? Cases { get; init; }
 
     /// <summary>
     /// What SSCS will show as this line's Ex Cost. Verified 16/16 against live SSCS: it rounds

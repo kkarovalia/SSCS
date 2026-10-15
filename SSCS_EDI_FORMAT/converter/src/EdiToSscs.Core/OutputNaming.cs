@@ -50,6 +50,22 @@ public static partial class OutputNaming
         return trimmed.Length == 0 ? FallbackName : "SSCS_" + trimmed + ".xml";
     }
 
+    /// <summary>
+    /// Names a Modisoft EDI file after its vendor and invoice number, e.g.
+    /// <c>MODISOFT_DRPEPPER_4646106112.txt</c>. Modisoft ignores the name (confirmed by the user on
+    /// 2026-10-05); it is for the person downloading the attachment, who has to pick the right one
+    /// for the purchase they just created.
+    /// </summary>
+    public static string BuildModisoftFileName(Invoice invoice)
+    {
+        ArgumentNullException.ThrowIfNull(invoice);
+        string vendor = new string(invoice.SupplierName.Where(char.IsAsciiLetterOrDigit).ToArray())
+            .ToUpperInvariant();
+        string number = Sanitize(invoice.InvoiceNumber.Trim()).Trim();
+        return string.Join("_", new[] { "MODISOFT", vendor, number }.Where(part => part.Length > 0))
+               + ".txt";
+    }
+
     /// <summary>Replaces only characters Windows forbids in filenames; all other characters are preserved.</summary>
     public static string Sanitize(string name)
     {

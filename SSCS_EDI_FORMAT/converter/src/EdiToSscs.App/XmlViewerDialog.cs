@@ -4,8 +4,9 @@ using EdiToSscs.Core;
 namespace EdiToSscs.App;
 
 /// <summary>
-/// Shows the NAXML a file converted to, exactly as it was sent or saved — the bytes themselves,
-/// decoded rather than reformatted, so what is on screen is what SSCS receives.
+/// Shows what a file converted to, exactly as it was sent or saved: the NAXML for SSCS or the EDI
+/// text for Modisoft. These are the bytes themselves, decoded rather than reformatted, so what is
+/// on screen is what the back office receives.
 ///
 /// It reads from the documents held in memory rather than from the file, so it still shows what was
 /// converted even if the saved copy has since been moved or deleted. A ticket that produced two
@@ -27,7 +28,9 @@ internal sealed class XmlViewerDialog : Form
         if (documents.Count == 0) throw new ArgumentException("There is nothing to show.", nameof(documents));
         _documents = documents;
 
-        Text = $"Converted XML - {sourceFileName}";
+        Text = IsXml(documents[0])
+            ? $"Converted XML - {sourceFileName}"
+            : $"Converted EDI file - {sourceFileName}";
         AppIcon.ApplyTo(this);
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
@@ -119,6 +122,9 @@ internal sealed class XmlViewerDialog : Form
     private ConvertedDocument Selected =>
         _documents[_picker is null || _picker.SelectedIndex < 0 ? 0 : _picker.SelectedIndex];
 
+    private static bool IsXml(ConvertedDocument doc) =>
+        doc.FileName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase);
+
     private void ShowSelected()
     {
         var doc = Selected;
@@ -146,14 +152,17 @@ internal sealed class XmlViewerDialog : Form
     private void OnSaveCopy(object? sender, EventArgs e)
     {
         var doc = Selected;
+        bool xml = IsXml(doc);
         using var dialog = new SaveFileDialog
         {
-            Title = "Save a copy of this XML",
+            Title = xml ? "Save a copy of this XML" : "Save a copy of this EDI file",
             FileName = doc.FileName,
-            Filter = "SSCS XML files (*.xml)|*.xml|All files (*.*)|*.*",
+            Filter = xml
+                ? "SSCS XML files (*.xml)|*.xml|All files (*.*)|*.*"
+                : "Modisoft EDI files (*.txt)|*.txt|All files (*.*)|*.*",
             OverwritePrompt = true,
             AddExtension = true,
-            DefaultExt = "xml",
+            DefaultExt = xml ? "xml" : "txt",
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 

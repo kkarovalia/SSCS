@@ -3,7 +3,9 @@
 The converter reads a vendor's fixed-width EDI file (or a vendor PDF) and writes an
 **NAXML-BusDoc 1.5 invoice**, which is what SSCS ingests. It no longer produces the fixed-width
 "SSCS EDI" text file; that output was retired on 2026-07-25 and the reasoning is at the bottom of
-this document.
+this document. A vendor PDF can also be written as a **GHRA-style EDI file for Modisoft**, read by
+Modisoft's "Texas Wholesale" option (Part 3, added 2026-10-05). That is a different consumer with its own verified rules, not the retired output
+coming back.
 
 Everything below was verified against real files and, where it says so, against live SSCS.
 
@@ -454,6 +456,309 @@ file has one, and a warning that fires every time teaches people to ignore warni
 | `RUBYRED_SUFFIX_MISMATCH` | a Ruby Red row not ending `00000000  ` |
 | `UPCE_INVALID_CHECK_DIGIT` | a short barcode whose check digit does not compute |
 | `BLANK_LINE`, `BINARY_CONTENT`, `LONE_CARRIAGE_RETURN` | damaged file |
+
+---
+
+## Part 3 — the Modisoft output: plain GHRA EDI
+
+**PDF to Modisoft EDI** (added 2026-10-05) reads a vendor PDF exactly as PDF to SSCS XML does and
+writes a GHRA-style fixed-width file instead of NAXML (`ModisoftEdiBuilder`). The store chose the
+format: Modisoft already imported GHRA's own EDI files, and **the 13-digit EDI13 layout is ruled
+out** ("DO NOT DO EDI13"). The file is emailed to the store's own address, the **Modisoft address**
+in Email Settings, and somebody imports it by hand: **Import Invoice → EDI → "Xpress Wholesale"**,
+the same option for every vendor.
+
+**Since 2026-10-15 the tab reads any vendor's invoice and has no vendor dropdown.** Modisoft takes
+nothing from the file but its lines (point 1 of `ModisoftEdiBuilder`), so the vendor only ever
+mattered for picking a parser. One generic Gemini request (`GeminiVisionReader.ReadAnyInvoice`)
+reads a scan, a text PDF or a photo, and `AnyInvoiceParser` turns it into lines: barcodes completed
+only where exact (11-digit body + check digit; 10-digit body + 0 + check digit, named unless it is
+Bimbo; Blue Bell's padded body; UPC-E; a 0 + UPC-A cut back to the UPC-A), units per case taken from
+the paper where printed and named for checking where only the description gave it, lines with no
+barcode left out and named with their money, tax and fees named but not written. The five tuned
+vendor readers still serve PDF to SSCS XML. The procedure it automates is
+[INVOICE_TO_MODISOFT.md](./INVOICE_TO_MODISOFT.md).
+
+**Since 2026-10-09 the barcode field is 13 characters (78-byte records) and the option is Xpress
+Wholesale.** A UPC-A is written as 12 digits and a blank, and an EAN-13 whole. Texas Wholesale (12
+characters, below) matched barcodes on 11 digits and merged EAN-13s. Evidence: "Thirteen-digit
+barcodes and Xpress Wholesale" below. In the layout table, every byte after the barcode now sits one
+place further right than shown. The history below is otherwise written as it happened.
+
+### Modisoft reads an EDI file with the layout picked in its dropdown — verified 2026-10-05
+
+Modisoft's Import Invoice screen asks for a file type, and for EDI a vendor layout from a long list
+(Stewart Distribution, STMA - CSFC, Sunbelt Pepsi, SYSCO EDI, Texas Wholesale, …). **That choice,
+not the vendor on the purchase, decides how the file is parsed.** The store had **Texas Wholesale**
+selected, and wants one option for every vendor so employees cannot get it wrong.
+
+The first converter file imported at Best Stop 16 (Dr Pepper, $1,468.73) was written in GHRA's own
+76-byte layout, and Texas Wholesale read every figure **one character to the right**:
+
+```
+written                         Modisoft (Texas Wholesale)
+12PK AW ROOT BEER  1 x 2 @ 12.75  Qty 10  Units 20  Case Cost 127.50
+BIB 5G DRP         1 x 1 @ 115.95 Qty 11  Units 10  Case Cost 1,159.50   ("1" of the next field)
+3 credits         -1 x 1 @ 6.37   Qty -10 Units 10  Case Cost 63.70
+total                                $148,032.50 = 100 x 1,468.73 + one extra BIB case
+```
+
+A five-line test file settled what Texas Wholesale reads. GHRA's layout came in ×10 on every
+record, whether the item-number field was blank or `00000` and whether the description began with
+a digit or a letter. **Only the record carrying the whole 12-digit UPC-A, with every field after it
+one place right, came in exactly:** 1L DR PEPPER, Qty 4, Units 15, Case Cost 28.120, $112.48. It
+also showed that Texas Wholesale takes **Units from the file's pack** (2021's import took them from
+Modisoft's item list), and that it reads a minus inside the zeros (`00-10` came in as −10).
+
+The bad import also overwrote the Price Book's case cost for its items (12PK AW ROOT BEER showed an
+"Existing Case Cost" of $127.50 afterwards). Per-item cost was unharmed, because case cost and
+units were both ten times over. A purchase imported wrong should be deleted, and a correct import
+within 15 days of the purchase date writes the right case costs back.
+
+### What Modisoft did with GHRA's own file in 2021 — verified 2026-10-05
+
+Read back off a real Modisoft purchase (BEST STOP 3, PurchaseID 1145174): GHRA invoice 687105,
+imported in 2021 when that store kept its books in Modisoft. The file is pinned as
+`Fixtures/Modisoft/EDI_GHRA_687105.txt`. That import was parsed with GHRA's 11-character layout;
+the barcode and units findings below are about it, not about Texas Wholesale.
+
+- **The purchase is created by hand and the file fills its lines.** In Modisoft you create the
+  purchase, pick the vendor (payee), then import the file. The purchase showed `7/12/2021` and
+  `IN#687105` while the file says `071121` and `0000687105`, so the header is not what reaches the
+  books. The file name does not matter either.
+- **Qty = the record's number of cases; Case Cost = its case cost.** Every one of the 387 booked
+  lines matches. Units per case, description, department, retail and item code come from
+  **Modisoft's own item list**, not the file:
+
+  ```
+  file                                  Modisoft
+  12PK COKE      pack 12  20 @ 4.99     Qty 20  Units 1  Case Cost 4.990
+  ALUMINUM TRAY  pack  4   3 @ 1.09     Qty 3   Units 2  Case Cost 1.090
+  GARDETTOS      pack  1   1 @ 12.59    Qty 1   Units 7  Case Cost 12.590
+  OZARKA DIST.   each-list 3.39         Unit Retail $1.69
+  ```
+
+  Modisoft costs one item as case cost ÷ *its* units. So **a line must arrive in the vendor's own
+  billing unit**: cases where the paper bills cases, single items where it bills items. Otherwise
+  every per-item cost Modisoft works out is wrong.
+- **Money is cases × case cost, to the cent.** The 387 lines total $19,301.14, the file's own
+  header. The 78 records with 0 cases were skipped. (The purchase ends at $19,063.96 because of
+  three credits added by hand. A negative line *from a file* has not been seen going into Modisoft
+  yet. GHRA's own files carry plenty: `000-1` 34 times, `00-22` and so on.)
+- **The file's retail did not change Modisoft prices.**
+- **Barcodes matched in every form GHRA writes them:** an 11-digit UPC-A body found items stored
+  with 12 digits (`70921520210` → `709215202109`), an 8-digit UPC-E was expanded
+  (`01200591` → `01200500009`), an EAN-13 was found from its first 11 digits
+  (`75010563492` → DOVE `7501056349288`), and a line with no barcode was matched by GHRA's item
+  number (HARIBO GOLDBEARS, item 11871).
+
+### The layout written
+
+Header (33 bytes): `GHRA` padded to 7, invoice number (10), date `MMDDYY`, total (10, cents).
+Record (77 bytes) — GHRA's fields with a 12-character barcode, as Texas Wholesale reads them:
+
+| Bytes | Field |
+|---|---|
+| `[0]` | `B` |
+| `[1..13)` | barcode, first 12 characters (GHRA's own files: `[1..12)`, 11) |
+| `[13..37)` | description, 24 characters (printable ASCII) |
+| `[37]` | always blank — see below |
+| `[38..44)` | vendor item number, left-aligned (left blank) |
+| `[44..50)` | case cost, cents |
+| `[50..52)` | two spaces |
+| `[52..58)` | pack — units in one case |
+| `[58..63)` | number of cases, minus sign inside the zeros (`000-1`, `00-22`) |
+| `[63..68)` | each-list retail, cents |
+| `[68..71)` | last three digits of the pack, again |
+| `[71..77)` | the item number field, again |
+
+Then the charge record `CSERSERVICE CHARGE` (29 bytes). CRLF between records, none after the
+last. Apart from the barcode width, every one of GHRA's 7,454 records in `EDI/` follows this, and
+`TodaysLayoutIsGhrasWithATwelveCharacterBarcodeField` rebuilds 687105 with only that field widened.
+`TheRecordModisoftReadBackCorrectlyIsWrittenExactly` pins the 1L DR PEPPER record byte for byte.
+
+**Why `[37]` is blank (Silver Eagle 424753, 2026-10-06).** With a 25-character description, every
+long line came into Modisoft with the description's last letter in its **Item Code** column
+(`1`, `/`, `L`, `C`). In the same import, a brand-new item was named `5ST ARN PILSNER 4/6 CANS`, and
+`5` is the last digit of its barcode `785515981005`. So Texas Wholesale reads its description one
+byte earlier than we write it, and its item code from byte 37. The numbers sit exactly where we
+put them; two invoices and 215 lines say so. The description is cut to 24 characters with a blank
+after it, so the item code stays empty. A *new* item still gets the barcode's last digit at the
+front of its name, which the user fixes when they price it. Pinned by
+`ALongDescriptionLeavesTheItemCodeBlank`.
+
+**Any other invoice, by hand:** [INVOICE_TO_MODISOFT.md](./INVOICE_TO_MODISOFT.md) and the
+`converter/tools/ModisoftFile` tool, which writes through this same builder.
+
+### What goes into it
+
+- **Header vendor field is always `GHRA`.** It is the only header Modisoft has been seen to take,
+  and the vendor is picked on the purchase, not read from the file.
+- **Invoice number:** the digits of the typed number, the last ten when longer (Bimbo prints 14,
+  Blue Bell 12; Chubiwinos `6V9389` → `0000069389`). Modisoft does not read it.
+- **Total:** the sum of the records (cases × case cost), signed, as GHRA writes it.
+- **Cases:** a line the vendor billed by the case goes in as those cases at the case price:
+  `InvoiceLine.Cases` carries Dr Pepper's CASES, Red Bull's whole QTY and Blue Bell's DZ cartons,
+  and case cost is the line's amount ÷ cases. Anything else, including those vendors' credits with
+  no whole case (Dr Pepper CASES 0, Red Bull `0.25`, Blue Bell `11/12`), goes in one item per case.
+  Cases that do not divide the items evenly fall back to single items rather than invent a pack.
+- **Whole cents:** a price that runs to fractions of a cent per item is rounded. When the file then
+  adds up differently from the lines, the invoice gets a `MODISOFT_CENTS_ROUNDED` note naming the
+  gap. Across the 58 real Bimbo, Blue Bell and Chubiwinos invoices in `manual-tests/`, none would.
+- **Barcodes:** the first twelve characters. A UPC-A goes in whole, check digit and all, and an
+  EAN-13 loses only its check digit. GHRA's eleven used to **merge different products**: two
+  EAN-13s that differ only in their last two digits got one code, and **6 of the 16 Chubiwinos
+  samples** carry such a pair (CRUJITOS `7501011131040` / DORITOS NACHOS `7501011131064`, the two
+  Tostitos, the two Paketaxos, Papas Adobadas / Ruffles Queso). **Twelve does not keep them apart
+  in Modisoft after all** (Yumi 29008246, 2026-10-09): Texas Wholesale matched
+  `691130811788` (LLB Grape, `6911308117885`) to the store's Asian Strawberry `691130811781`, and
+  `691130811945` (Lychee) to Asian Melon `691130811941`. It goes by the first **11** digits, so
+  those Chubiwinos pairs merge too. `MODISOFT_SAME_CODE` compares 12 characters and does not catch
+  this yet. See "Thirteen-digit barcodes and Xpress Wholesale" below.
+- **Item number field is left blank.** Modisoft matched GHRA's lines by barcode even where its own
+  item code disagreed (DSD COKE: file 27226, Modisoft 27405), and an AI-misread item number would
+  be a way onto the wrong item that nothing could check. The 2026-10-05 test showed a blank one and
+  `00000` read the same.
+- **Retail:** the same seeded each-list as the SSCS file, capped at the field's $999.99. For Dr
+  Pepper that is the undiscounted WHSLE price per item, not a shelf price. Modisoft shows it as
+  "Suggested Unit Retail" and offers **Update Selected Items Retail from EDI**, which must not be
+  pressed for these files.
+
+**Round-tripped, 2026-10-06:** a whole Dr Pepper invoice under Texas Wholesale. That was
+`MODISOFT_DRPEPPER_423423_FIXED.txt`, the 07-24-26 ticket with 3 credits. All 50 lines came in as
+written:
+- 12PK at 1 × 2 @ $12.75;
+- 20oz at 3 × 24 @ $36.14;
+- 1L at 4 × 15 @ $28.12;
+- BIB at 1 × 1 @ $115.95;
+- the three credits at −1 × 1 @ $6.37 each.
+
+The 60 cases are the paper's 63 less 3 returns, and the cost is **$1,468.73**, the printed AMOUNT
+DUE to the cent. So a negative line from a file now has been seen going into Modisoft.
+
+The first file of each other vendor (Bimbo, Blue Bell, Chubiwinos, Red Bull) still has to be
+imported and compared against the paper (Qty, Case Cost, total), the way SSCS vendors were
+verified. Chubiwinos matters most, because its EAN-13s arrive as twelve digits. Delete the purchase
+if it is wrong; the store can.
+
+### Thirteen-digit barcodes and Xpress Wholesale — seen 2026-10-09
+
+Yumi Ice Cream 29008246 was hand-converted (`INVOICE_TO_MODISOFT.md`) and imported under Texas
+Wholesale. All 55 lines and $2,327.08 came in right, except that four LLB bars landed on two
+items. The barcodes on the paper and in the file were right; Modisoft matched them on 11 digits:
+
+| Paper | File (12) | Landed on |
+|---|---|---|
+| Grape `6911308117885` | `691130811788` | Asian Strawberry `691130811781` |
+| Strawberry `6911308117861` | `691130811786` | Asian Strawberry `691130811781` |
+| Lychee `6911308119452` | `691130811945` | Asian Melon `691130811941` |
+| Melon `6911308119469` | `691130811946` | Asian Melon `691130811941` |
+
+The store's LLB items are themselves saved as 12 digits: the first 11 plus a computed UPC check
+digit (Mango `694309042047` for `6943090420430`).
+
+Two follow-up imports of a 2-line file (Grape and Lychee, 1 case of 24 @ $96.72) with the barcode
+field widened to **13**, so every later byte sits one place right (78-byte records):
+
+- **Texas Wholesale:** read 12 characters and shifted every figure. It showed Qty **40000**,
+  Units 2, Case Cost $96.70, still on Strawberry and Melon. Never save that.
+- **Xpress Wholesale:** came in exactly. It showed scan codes `6911308117885` and `6911308119452`,
+  Qty 1, Units 24, Case Cost $96.72, and clean descriptions. Both were orange (new items), because
+  the store has no Grape or Lychee item. Seen on the Review & Save screen.
+
+So **Xpress Wholesale reads the 13-character layout**, and it is how a clashing EAN-13 gets its own
+item. The file is `converter/tools/ModisoftFile/examples/YUMI_29008246_13DIGIT.txt`.
+
+What is still open is whether Xpress can take **every** line, so one file per invoice works. Two
+things are unseen: what it does with a 12-digit UPC-A in the 13-character field, and whether a
+13-digit code finds an item saved with 12. The whole-invoice test files are
+`examples/MODISOFT_YUMI_29008246_XPRESS_A.txt` (UPC-A as `0` + 12 digits) and `_B.txt` (UPC-A + a
+trailing blank). Pass means every line except Grape and Lychee matches the item the Texas Wholesale
+import matched, and the total is $2,327.08. If one passes, the converter's `CodeWidth` and padding
+change to match and the store's option becomes Xpress Wholesale. Until then every file stays Texas
+Wholesale, and clashing EAN-13 lines go in a second, Xpress file (`INVOICE_TO_MODISOFT.md`).
+
+**Result (Review & Save, not saved):**
+
+- **A:** every line was a new item under its `0…` code. It failed.
+- **B:** all 49 UPC-A lines matched the store's items, with department, retail, Qty and case cost
+  right.
+- **Both:** all six LLB bars were new items, Mango and Peach included. Xpress matches 13 digits
+  exactly, and the store saved those items with the shortened 12. They need their real 13-digit
+  codes once, then B works for everything.
+
+**Credits, same day:** `examples/MODISOFT_DRPEPPER_423423_XPRESS_TEST.txt`, the round-tripped
+Dr Pepper file in layout B, came in under Xpress exactly as under Texas Wholesale:
+
+- all 50 lines matched the store's items;
+- the three credits came in as −1 @ $6.37;
+- 60 cases and $1,468.73.
+
+**So the converter switched** (`CodeWidth` 13, `RecordWidth` 78), and the help text and email now
+say Xpress Wholesale. `ModisoftFile` run on `YUMI_29008246.tsv` writes the imported B file byte for
+byte.
+
+The store's earlier ruling "DO NOT DO EDI13" was about the 2026-10-05 default layout. Xpress
+Wholesale was the user's own pick on 2026-10-09, to fix the clash.
+
+### Verifying the other four vendors — the checklist
+
+The test invoices, one per vendor and each with returns, are copies in the user's
+`Downloads\Modisoft test invoices` (originals untouched in the store's test folders):
+
+| File | Total |
+|---|---|
+| `Chubiwinos 6V9389 (dump, total 460.23).pdf` | 460.23 |
+| `Bimbo 84294890013239 (9 returns, total 335.07).pdf` | 335.07 |
+| `Blue Bell 033100786112 (returns, total 325.50).pdf` | 325.50 |
+| `Red Bull 2030211863 (credit page, total 342.50).pdf` | 342.50 |
+
+For each one, the user converts it on the **PDF to Modisoft EDI** tab, choosing the vendor and
+typing the invoice number and date. They then create a test purchase in Modisoft with that vendor
+as payee, press **Import Invoice → EDI → Texas Wholesale**, upload the file and paste the rows
+back. Compare every line's **Qty** and **Case Cost**, and the total, against the paper. Check that
+no line came in as an unknown item. The purchase is then deleted. What each vendor should look like:
+
+- **Chubiwinos.** Billed by the item, so every line is Qty = items, Units 1, Case Cost = the
+  item price. The dump and returns are negative Qty. Its barcodes are EAN-13s (`750…`) and the
+  file carries their **first 12 digits**. *The open question:* does Texas Wholesale find a
+  13-digit item from 12 digits? If those lines come in unmatched, look at how Modisoft stores
+  them before changing anything.
+- **Bimbo.** Billed by the item, like Chubiwinos. Bimbo prints a 10-digit body with **no check
+  digit**, so the code is `0` + body + a check digit the converter computes
+  (`BimboVisionParser`). It matched in SSCS. Whether Best Stop 16 stores Bimbo items the same way
+  is unseen. The 9 returns are negative Qty.
+- **Blue Bell.** **DZ cartons go in as cases of 12** at the carton price (`InvoiceLine.Cases` =
+  whole DZ quantity). Pints and singles go in one item at a time. A partial-carton return
+  (`-11/12`) goes in as −11 items at the per-bar price. The printed UPC is a padded body, and the
+  converter restores its check digit (`BlueBellPdfParser.ToGtin`), as SSCS needed.
+- **Red Bull.** **Whole QTY goes in as cases** at the case price. A fractional credit (`0.25`
+  case) goes in one can at a time. Its codes are ordinary UPC-As. Its printed total is not a
+  reliable checksum (see the Red Bull profile), so compare line by line, not just the total.
+
+**The four test files exist (2026-10-06).** Gemini was unavailable, so each invoice was read by
+hand and run through the real pipeline with `converter/tools/HandReading`. They sit beside the
+PDFs as `MODISOFT_<VENDOR>_<invoice>.txt`. What the converter wrote:
+
+| Vendor | Lines | File total | Shape |
+|---|---|---|---|
+| Blue Bell | 7 | 325.50 | half gallons and pints Units 1; the three DZ lines Qty 2, Units 12, at the carton price; the return is −1 pint |
+| Chubiwinos | 8 | 460.23 | all Units 1; EAN-13s cut to their first 12 digits; the dump is −1 |
+| Bimbo | 35 | 335.07 | all Units 1; `0` + the 10-digit body + a computed check digit; 9 returns negative |
+| Red Bull | 10 | **342.47** | deliveries in cases (Units 24 or 12); the 5 credit lines one can at a time at $2.23 |
+
+Red Bull comes out **$0.03 short of 342.50**, and the converter says so in a warning. The credit
+lines' money is not a whole number of cents per can: 2 cans for $4.45, 6 cans for $13.36. If the
+import is otherwise right, the fix to consider is booking a credit line as −1 "case" of N cans at
+the line's own money, through `InvoiceLine.Cases`. That keeps it exact.
+
+If a vendor's figures come in ten times over or shifted, the layout is being read wrong. Check the
+dropdown said Texas Wholesale before suspecting the file. The diagnostic that settled Dr Pepper was
+a five-line file, each line changing one thing; build one the same way.
+
+Every vendor's file carries a made-up each-list. For Dr Pepper it is the WHSLE price per item; for
+the others it is the seeded retail from cost plus a margin. Never press **Update Selected Items
+Retail from EDI**.
 
 ---
 

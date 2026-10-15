@@ -1,0 +1,174 @@
+upc	description	cases	units_per_case	case_cost	line_amount	note
+018200264412	ESTRELLA 6/4PK 16OZ CANS	0	1	31.85	0.00	item 02940; 6/4PK 16OZ CANS; not delivered
+018200203206	STELLA ARTOIS 24/16OZ 6/4	0	1	38.43	0.00	item 07847; 24/16OZ 6/4; not delivered
+033544002384	COR SUNBREW 4/6 LNNR	0	1	36.50	0.00	item 51060; 4/6 LNNR; not delivered
+080660957579	MOD ESP 2/12 LNNR	7	2	35.60	249.20	item 53032; 2/12 LNNR; 12-pack; looked up: Modelo Especial 12pk 12oz bottles
+080660957104	MOD ESP 24/12 SUITCASE	9	1	29.86	268.74	item 53016; 24/12 SUITCASE; 24-pack; looked up: Modelo Especial 24pk 12oz cans
+018200532184	BUD LIGHT 18 PK CAN	10	1	17.60	176.00	item 02015; 18 PK CAN; 18-pack; looked up: Bud Light 18pk 12oz cans
+033544950418	COR PREMIER 4/6 LNNR 24/12	1	4	36.50	36.50	item 51042; 4/6 LNNR 24/12; 6-pack; same package type as the looked-up lines
+018200970016	ESTRELLA 4/6 LNNR	1	4	29.15	29.15	item 02947; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+033544950906	MOD ESP 12/32OZ	3	12	38.58	115.74	item 53052; 12/32OZ; single 32oz; looked up: Modelo Especial 32oz bottle
+033544001844	COR NON ALCOHO 4/6 LNNR	1	4	36.50	36.50	item 51010; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+080660956053	COR EXTRA 4/6 LNNR	2	4	36.50	73.00	item 51028; 4/6 LNNR; 6-pack; looked up: Corona Extra 6pk 12oz bottles
+080660956152	COR EXTRA 2/12 LNNR	6	2	35.60	213.60	item 51032; 2/12 LNNR; 12-pack; same package type as the looked-up lines
+018200004261	BSCH LT 24/16 OZ CAN	3	4	21.41	64.23	item 21036; 24/16 OZ CAN; 6-pack 16oz; looked up: Busch Light 6pk 16oz cans
+815829011898	CAYJK STRW MAR 4/6 LNNR 11.2	1	4	35.03	35.03	item 15520; 4/6 LNNR 11.2; 6-pack; same package type as the looked-up lines
+033544950449	COR PREMIER 2/12 CAN 24/12	2	2	28.95	57.90	item 51043; 2/12 CAN 24/12; 12-pack; same package type as the looked-up lines
+850677006313	HOOP TEA OG 2/12PK CAN	2	2	23.00	46.00	item 00670; 2/12PK CAN; 12-pack; looked up: Hoop Tea Original 12pk 12oz cans
+018200003349	MICH ULTRA 4/6 CAN	2	4	32.52	65.04	item 17013; 4/6 CAN; 6-pack; same package type as the looked-up lines
+018200200823	MICH UL GOLD 4/6 LNNR 24/12	1	4	32.52	32.52	item 17146; 4/6 LNNR 24/12; 6-pack; same package type as the looked-up lines
+018200149917	BUD LT LIME 4/6 LNNR	1	4	32.57	32.57	item 02228; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200008580	KAR ZIEGENBOCK 4/6 LNNR	1	4	32.52	32.52	item 50028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200189937	BUD LT PLATINU 4/6 LNNR	1	4	32.57	32.57	item 01528; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200200397	BUDWEISER ZERO 4/6 LNNR	1	4	29.40	29.40	item 01116; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200129896	MICH INF LIME 4/6 LNNR 12OZ	1	4	34.65	34.65	item 10009; 4/6 LNNR 12OZ; 6-pack; same package type as the looked-up lines
+018200007842	ODOULS 4/6 LNNR	1	4	30.25	30.25	item 85028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200204456	MICH ULT ZERO 4/6 LN	1	4	32.52	32.52	item 17201; 4/6 LN; 6-pack; same package type as the looked-up lines
+018200970085	BUDWEISER 24/16 2/12 AL	1	2	30.41	30.41	item 06146; 24/16 2/12 AL; 12-pack; looked up: Budweiser 12pk 16oz aluminum bottles
+018200219795	BUDWEISER 3/8 TWIS 24/16	1	3	30.41	30.41	item 01074; 3/8 TWIS 24/16; 8-pack 16oz; looked up: Budweiser 8pk 16oz aluminum bottles
+786150000014	STELLA ARTOIS 4/6 LNNR 11.2	1	4	36.50	36.50	item 07828; 4/6 LNNR 11.2; 6-pack; same package type as the looked-up lines
+018200203138	STELLA 0.0 4/6 11.2OZ BTL	1	4	36.50	36.50	item 07848; 4/6 11.2OZ BTL; 6-pack; same package type as the looked-up lines
+018200007712	BUDWEISER 2/12 LNNR	1	2	26.14	26.14	item 01032; 2/12 LNNR; 12-pack; same package type as the looked-up lines
+018200059896	MICH ULTRA 4/6 LNNR	2	4	32.52	65.04	item 17028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200008337	BUD LIGHT 4/6 LNNR	1	4	29.40	29.40	item 02028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200008344	BUDWEISER 4/6 LNNR	1	4	29.40	29.40	item 01028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+018200007699	BUD LIGHT 2/12 LNNR	2	2	26.14	52.28	item 02032; 2/12 LNNR; 12-pack; looked up: Bud Light 12pk 12oz bottles
+018200059902	MICH ULTRA 2/12 LNNR	3	2	28.95	86.85	item 17032; 2/12 LNNR; 12-pack; same package type as the looked-up lines
+033544950425	COR PREMIER 2/12 LNNR 24/1	2	2	35.60	71.20	item 51044; 2/12 LNNR 24/1; 12-pack; same package type as the looked-up lines
+080660953014	PACIFICO 4/6 LNNR	1	4	36.50	36.50	item 55028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+080660956800	COR EXTRA 18/12 LNNR	4	1	25.99	103.96	item 51015; 18/12 LNNR; 18-pack; looked up: Corona Extra 18pk 12oz bottles
+018200970023	ESTRELLA 2/12 LNNR 24/1	1	2	27.45	27.45	item 02950; 2/12 LNNR 24/1; 12-pack; same package type as the looked-up lines
+080660953151	PACIFICO 2/12 LNNR	2	2	35.60	71.20	item 55032; 2/12 LNNR; 12-pack; same package type as the looked-up lines
+080660958811	VICTORIA 4/6 LNNR	1	4	36.50	36.50	item 20228; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+033544950258	VICTORIA 12/32 QTS	2	12	38.58	77.16	item 20229; 12/32 QTS; single 32oz; looked up: Victoria 32oz bottle
+080660953052	PACIFICO 12/32 OZ LNNR	2	12	38.58	77.16	item 55033; 12/32 OZ LNNR; single 32oz; looked up: Pacifico 32oz bottle
+080660956831	COR FAMILIAR 12/32 OZ	3	12	38.58	115.74	item 51038; 12/32 OZ; single 32oz; looked up: Corona Familiar 32oz bottle
+018200000638	BUSCH 24/16 OZ CAN	3	4	21.41	64.23	item 20036; 24/16 OZ CAN; 6-pack 16oz; looked up: Busch 6pk 16oz cans
+018200000188	BUDWEISER 24/16OZ 4/6 CA	2	4	30.44	60.88	item 01036; 24/16OZ 4/6 CA; 6-pack; looked up: Budweiser 6pk 16oz cans
+018200001154	BUD LIGHT 24/16OZ 4/6 CA	4	4	30.44	121.76	item 02036; 24/16OZ 4/6 CA; 6-pack; looked up: Bud Light 6pk 16oz cans
+684746800416	CT LONGICEDTEA 24/16 OZ CANS	1	24	35.00	35.00	item 00537; 24/16 OZ CANS; single 16oz can (Clubtails); same package type as the looked-up lines
+684746400210	CT MARGARITAS 24/16 OZ CANS	1	24	35.00	35.00	item 00539; 24/16 OZ CANS; single 16oz can (Clubtails); looked up: Clubtails Sunny Margarita 16oz can
+684746400067	CT BAHAMA MAMA 24/16 CAN	1	24	35.00	35.00	item 00536; 24/16 CAN; single 16oz can (Clubtails); looked up: Clubtails Bahama Mama 16oz can
+684746801864	CT SCREWDRIVE 24/16 OZ CANS	1	24	35.00	35.00	item 00538; 24/16 OZ CANS; single 16oz can (Clubtails); looked up: Clubtails Screwdriver 16oz can
+018200069918	MICH ULTRA 2/12 CAN	8	2	28.95	231.60	item 17014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+080660956954	COR EXTRA 2/12 CAN	2	2	35.60	71.20	item 51014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200008665	BUD LIGHT CHEL 6/4 16 OZ CAN	1	6	40.28	40.28	item 02547; 6/4 16 OZ CAN; 4-pack 16oz; same package type as the looked-up lines
+033544002100	MOD ESP 6/4/16OZ CAN	1	6	37.90	37.90	item 53011; 6/4/16OZ CAN; 4-pack 16oz; looked up: Modelo Especial 4pk 16oz cans
+018200202490	STELLA ARTOIS 2/12PK CANS	1	2	31.05	31.05	item 07827; 2/12PK CANS; 12-pack; same package type as the looked-up lines
+018200965500	MICH ULTRA 30PK CAN	3	1	28.85	86.55	item 17030; 30PK CAN; 30-pack; looked up: Michelob Ultra 30pk 12oz cans
+018200005732	BUSCH ICE 4/6 16 OZ CAN	1	4	21.41	21.41	item 23036; 4/6 16 OZ CAN; 6-pack; same package type as the looked-up lines
+018200001291	KING COBRA 16 OZ CAN	1	4	18.55	18.55	item 35036; 16 OZ CAN; 6-pack 16oz; looked up: King Cobra 6pk 16oz cans
+815829011539	CAYJK MARG VTY 2/12 CANS 12OZ	2	2	30.90	61.80	item 15326; 2/12 CANS 12OZ; 12-pack; same package type as the looked-up lines
+635985800262	W CLAW VTY #3 2/12 CAN 24/12	3	2	30.90	92.70	item 09716; 2/12 CAN 24/12; 12-pack; same package type as the looked-up lines
+635985800064	W CLAW VTY #2 2/12 CAN 24/12	3	2	30.90	92.70	item 09715; 2/12 CAN 24/12; 12-pack; same package type as the looked-up lines
+033544002513	MOD CHE LIMON 6/4/16OZ CAN BO	1	6	37.90	37.90	item 53066; 6/4/16OZ CAN BO; 4-pack 16oz; same package type as the looked-up lines
+018200001178	BUD LIGHT QUARTS	1	12	35.89	35.89	item 02038; QUARTS; single 32oz; looked up: Bud Light 32oz bottle
+635985548904	W CLAW VARIETY 2/12 CAN 24/12	3	2	30.90	92.70	item 09696; 2/12 CAN 24/12; 12-pack; looked up: White Claw Variety #1 12pk 12oz cans
+815829011119	CAYJK MARG 2/12 CANS 24/1	2	2	30.90	61.80	item 15333; 2/12 CANS 24/1; 12-pack; looked up: Cayman Jack Margarita 12pk 12oz cans
+815829010068	CAYJK MARG 4/6 LNNR	1	4	35.03	35.03	item 15328; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+080660956411	COR EXTRA 12/24 OZ LNNR	1	12	32.94	32.94	item 51037; 12/24 OZ LNNR; single 24oz; looked up: Corona Extra 24oz bottle
+018200002441	B ICE 5.5% 40 OZ NR	1	12	26.90	26.90	item 04040; 40 OZ NR; single 40oz; looked up: Bud Ice 40oz bottle
+018200001314	KING COBRA 40 OZ NR	1	12	26.90	26.90	item 35040; 40 OZ NR; single 40oz; looked up: King Cobra 40oz bottle
+018200002724	MICH ULTRA QUARTS	1	12	36.96	36.96	item 17038; QUARTS; single 32oz; same package type as the looked-up lines
+080660957777	MOD ESP 12/24OZ LNNR	1	12	32.94	32.94	item 53038; 12/24OZ LNNR; single 24oz; looked up: Modelo Especial 24oz bottle
+018200001581	MICH ULTRA 4/6 16OZ CAN	4	4	29.90	119.60	item 17011; 4/6 16OZ CAN; 6-pack; same package type as the looked-up lines
+018200002434	B ICE 5.5% 24/16 CAN	1	4	21.41	21.41	item 04036; 24/16 CAN; 6-pack 16oz; looked up: Bud Ice 6pk 16oz cans
+018200000089	BUDWEISER QUARTS	1	12	35.89	35.89	item 01038; QUARTS; single 32oz; same package type as the looked-up lines
+684746400074	CT SEX ON BEAC 24/16 OZ	1	24	35.00	35.00	item 00636; 24/16 OZ; single 16oz can (Clubtails); same package type as the looked-up lines
+018200202643	MICH ULTRA 2/12PK 16OZ CAN	2	2	30.10	60.20	item 17012; 2/12PK 16OZ CAN; 12-pack; same package type as the looked-up lines
+018200967214	MICH ULTRA 18 PK CAN	20	1	19.49	389.80	item 17015; 18 PK CAN; 18-pack; same package type as the looked-up lines
+018200000430	NAT LIGHT 24/16 OZ CAN	1	4	21.41	21.41	item 31036; 24/16 OZ CAN; 6-pack 16oz; looked up: Natural Light 6pk 16oz cans
+033544950272	MOD ESP 18/12 LNNR	6	1	25.99	155.94	item 53018; 18/12 LNNR; 18-pack; same package type as the looked-up lines
+033544002315	MOD CHE FRESA 12/24OZ CANS	1	12	32.94	32.94	item 53042; 12/24OZ CANS; single 24oz; looked up: Modelo Chelada Fresa Picante 24oz can
+033544000809	MOD CHE PINA 12/24OZ CANS	1	12	32.94	32.94	item 53053; 12/24OZ CANS; single 24oz; same package type as the looked-up lines
+033544950609	MOD CHE LIMON 12/24OZ CANS	2	12	32.94	65.88	item 54146; 12/24OZ CANS; single 24oz; looked up: Modelo Chelada Limon y Sal 24oz can
+080660957654	MOD ESP 4/6 LNNR	2	4	36.50	73.00	item 53028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+080660954080	COR EXTRA 7 OZ LOOSE PAR	4	1	21.58	86.32	item 51005; 7 OZ LOOSE PAR; 24-pack (Coronita party pack); looked up: Corona Coronita 24pk 7oz bottles
+033544000250	COR FAMILIAR 12/24OZ CAN	1	12	32.94	32.94	item 51008; 12/24OZ CAN; single 24oz; same package type as the looked-up lines
+080660957852	MODELO NEGRA 4/6 LNNR	1	4	36.50	36.50	item 54028; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+033544000267	MOD CHE MANGO 12/24OZ CANS	1	12	32.94	32.94	item 54147; 12/24OZ CANS; single 24oz; same package type as the looked-up lines
+080660957968	MODELO ESP CHE 12/24 OZ CANS	1	12	32.94	32.94	item 53039; 12/24 OZ CANS; single 24oz; same package type as the looked-up lines
+033544950517	COR FAMILIAR 4/6 LNNR 24/12	1	4	36.50	36.50	item 51002; 4/6 LNNR 24/12; 6-pack; same package type as the looked-up lines
+786150000144	STELLA ARTOIS 2/12 LNNR 11.2	1	2	35.60	35.60	item 07832; 2/12 LNNR 11.2; 12-pack; same package type as the looked-up lines
+018200965388	BUD LIGHT 15/16 ALUM TW	4	1	18.21	72.84	item 02063; 15/16 ALUM TW; 15-pack; looked up: Bud Light 15pk 16oz aluminum bottles
+018200200113	MICH ULTRA 3/8 TWIS 24/16	1	3	38.94	38.94	item 17006; 3/8 TWIS 24/16; 8-pack 16oz; same package type as the looked-up lines
+018200970092	BUD LIGHT 2/12 ALU	2	2	30.41	60.82	item 06147; 2/12 ALU; 12-pack; same package type as the looked-up lines
+018200200595	MICH ULTRA 2/12 ALUM 24/1	2	2	33.19	66.38	item 17019; 2/12 ALUM 24/1; 12-pack; same package type as the looked-up lines
+018200209987	BUD LIGHT 3/8 ALUM 24/16	1	3	30.41	30.41	item 02049; 3/8 ALUM 24/16; 8-pack 16oz; same package type as the looked-up lines
+018200966248	MICH ULTRA 18/12 LNNR	4	1	19.49	77.96	item 17016; 18/12 LNNR; 18-pack; same package type as the looked-up lines
+785515311000	ST ARN ART CAR 4/6 CAN 12OZ	1	4	33.18	33.18	item 39873; 4/6 CAN 12OZ; 6-pack; looked up: Saint Arnold Art Car 6pk 12oz cans
+033544950531	COR FAMILIAR 2/12 LNNR 24/1	2	2	35.60	71.20	item 51003; 2/12 LNNR 24/1; 12-pack; same package type as the looked-up lines
+080660958835	VICTORIA 2/12 LNN	1	2	35.60	35.60	item 20232; 2/12 LNN; 12-pack; same package type as the looked-up lines
+033544002094	MOD ESP 4/6 CAN BOX	2	4	34.56	69.12	item 53010; 4/6 CAN BOX; 6-pack; same package type as the looked-up lines
+018200612183	BUSCH 18 PK CAN	3	1	11.54	34.62	item 20015; 18 PK CAN; 18-pack; same package type as the looked-up lines
+018200864186	BSCH LT 18 PK CAN	3	1	11.54	34.62	item 21015; 18 PK CAN; 18-pack; same package type as the looked-up lines
+018200112188	BUDWEISER 18 PK CAN	4	1	17.60	70.40	item 01015; 18 PK CAN; 18-pack; same package type as the looked-up lines
+018200008016	BSCH LT 2/12 CAN	2	2	16.64	33.28	item 21014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200610479	BUSCH 2/12 CAN	2	2	16.64	33.28	item 20014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200110474	BUDWEISER 2/12 CAN	1	2	26.14	26.14	item 01014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200531682	BUD LIGHT SUITCASE	2	1	22.28	44.56	item 02016; SUITCASE; 24-pack; looked up: Bud Light 24pk 12oz cans
+033544950319	PACIFICO 2/12PK CANS	2	2	32.05	64.10	item 55030; 2/12PK CANS; 12-pack; same package type as the looked-up lines
+033544001301	MOD CHE LIMON 2/12 CAN	1	2	35.60	35.60	item 53054; 2/12 CAN; 12-pack; same package type as the looked-up lines
+033544001776	MOD CHE VARIET 2/12 CAN	1	2	35.60	35.60	item 53062; 2/12 CAN; 12-pack; same package type as the looked-up lines
+080660957111	MOD ESP 18/12 OZ CAN	18	1	23.24	418.32	item 53015; 18/12 OZ CAN; 18-pack; same package type as the looked-up lines
+080660957159	MOD ESP 2/12 CAN	10	2	32.05	320.50	item 53014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200530470	BUD LIGHT 2/12 CAN	4	2	26.14	104.56	item 02014; 2/12 CAN; 12-pack; same package type as the looked-up lines
+850066929001	BS MERICA JUGZ 6/1 LITER	0	1	41.94	0.00	item 10700; 6/1 LITER; not delivered
+850066929025	BS FRUIT JUGZ 6/1 LITER	0	1	41.94	0.00	item 10701; 6/1 LITER; not delivered
+815829011911	CAYJK PALOMA 4/6 LNNR 11.2	1	4	35.03	35.03	item 15521; 4/6 LNNR 11.2; 6-pack; same package type as the looked-up lines
+033544002599	VICKY MANGO 12/24 OZ CANS	1	12	32.94	32.94	item 53067; 12/24 OZ CANS; single 24oz; same package type as the looked-up lines
+860010695852	BB CHERRY LIME 12/500	1	12	35.60	35.60	item 69088; 12/500; single 500ml box; same package type as the looked-up lines
+850059195178	BB PARTY ORANG 12/500	1	12	35.60	35.60	item 69089; 12/500; single 500ml box; same package type as the looked-up lines
+850059195352	BB BLUEB LEM 12/500	1	12	35.60	35.60	item 69094; 12/500; single 500ml box; same package type as the looked-up lines
+796030114960	K-BIG WAVE 4/6 LNNR	1	4	33.18	33.18	item 04229; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+786150000571	STELLA ARTOIS 12/22.4 OZ	1	12	32.61	32.61	item 07803; 12/22.4 OZ; single 22.4oz bottle; looked up: Stella Artois 22.4oz bottle
+850028324714	BS LIME MARG C 24/200ML	0	1	50.40	0.00	item 10680; 24/200ML; not delivered
+850028324721	BS STRW MARG C 24/200ML	0	1	50.40	0.00	item 10681; 24/200ML; not delivered
+850028324745	BS PINA COLA C 24/200ML	0	1	50.40	0.00	item 10683; 24/200ML; not delivered
+815829011751	CAYJK MARG ZER 4/6 LNNR	1	4	35.03	35.03	item 15506; 4/6 LNNR; 6-pack; same package type as the looked-up lines
+033544002070	VICTORIA 12/24OZ CAN	1	12	32.94	32.94	item 20230; 12/24OZ CAN; single 24oz; same package type as the looked-up lines
+855417003720	KAR HOPADILLO 12/19.2OZ CANS	1	12	25.30	25.30	item 29132; 12/19.2OZ CANS; single 19.2oz can; looked up: Karbach Hopadillo 19.2oz can
+855417003782	KAR RODEO CLOW 12/19.2 OZ CAN	1	12	25.30	25.30	item 29135; 12/19.2 OZ CAN; single 19.2oz can; same package type as the looked-up lines
+033544950470	COR PREMIER 12/24 OZ CANS	1	12	27.95	27.95	item 51045; 12/24 OZ CANS; single 24oz; same package type as the looked-up lines
+033544950227	PACIFICO 12/24 OZ CAN	1	12	32.94	32.94	item 55029; 12/24 OZ CAN; single 24oz; same package type as the looked-up lines
+033544002148	PACIFICO PACI 6/4 16OZ CA	1	6	37.90	37.90	item 55036; PACI 6/4 16OZ CA; 4-pack 16oz; same package type as the looked-up lines
+851133006120	BB FRUIT PUNCH 12/500ML	1	12	35.60	35.60	item 69075; 12/500ML; single 500ml box; looked up: BeatBox Fruit Punch 500ml box
+851133006137	BB BLUE RAZZ 12/500ML	1	12	35.60	35.60	item 69076; 12/500ML; single 500ml box; same package type as the looked-up lines
+851133006519	BB JUICY MANGO 12/500ML	1	12	35.60	35.60	item 69077; 12/500ML; single 500ml box; same package type as the looked-up lines
+851133006151	BB PINK LEMON 12/500ML	1	12	35.60	35.60	item 69078; 12/500ML; single 500ml box; same package type as the looked-up lines
+851133006755	BB HARD TEA 12/500ML	1	12	35.60	35.60	item 69084; 12/500ML; single 500ml box; same package type as the looked-up lines
+018200201448	MICH UL GOLD 2/12 CANS 12OZ	1	2	31.55	31.55	item 17100; 2/12 CANS 12OZ; 12-pack; same package type as the looked-up lines
+018200169847	MICH INF LIME 2/12 CANS 12OZ	2	2	28.95	57.90	item 10008; 2/12 CANS 12OZ; 12-pack; same package type as the looked-up lines
+684746404447	CT BLACKCHERRY 24/16OZ	1	24	35.00	35.00	item 00531; 24/16OZ; single 16oz can (Clubtails); same package type as the looked-up lines
+785515967009	ST ARN JUICETR 12/19.2OZ CAN	1	12	25.30	25.30	item 39956; 12/19.2OZ CAN; single 19.2oz can; same package type as the looked-up lines
+083783375626	SIER COSMIC LT 15/19.2OZ CANS	1	15	36.05	36.05	item 42896; 15/19.2OZ CANS; single 19.2oz can; looked up: Sierra Nevada Cosmic Little Thing 19.2oz can
+785515981005	ST ARN PILSNER 4/6 CANS	1	4	33.18	33.18	item 39372; 4/6 CANS; 6-pack; same package type as the looked-up lines
+033544950067	VICTORIA 2/12 CAN	1	2	32.05	32.05	item 20231; 2/12 CAN; 12-pack; same package type as the looked-up lines
+850598008564	KAR CRAWFORD 4/6 CAN 12OZ	1	4	33.18	33.18	item 29184; 4/6 CAN 12OZ; 6-pack; same package type as the looked-up lines
+613008763831	AZ HARD VTY 2/12 CANS 12OZ	2	2	20.00	40.00	item 24800; 2/12 CANS 12OZ; 12-pack; same package type as the looked-up lines
+855417003010	KAR HOPADILLO 4/6 CANS	1	4	33.18	33.18	item 29138; 4/6 CANS; 6-pack; same package type as the looked-up lines
+018200200779	NAT LIGHT 2/15 PK 12 OZ	2	2	18.20	36.40	item 31017; 2/15 PK 12 OZ; 15-pack; looked up: Natural Light 15pk 12oz cans
+785515701009	ST ARN OKTOBER 4/6 CAN	1	4	31.96	31.96	item 65144; 4/6 CAN; 6-pack; same package type as the looked-up lines
+785515821004	ST ARN BANGER 4/6 CANS 12OZ	1	4	33.18	33.18	item 39885; 4/6 CANS 12OZ; 6-pack; same package type as the looked-up lines
+033544001738	PACIFICO 18/12 CANS	2	1	23.24	46.48	item 55037; 18/12 CANS; 18-pack; same package type as the looked-up lines
+785515901003	ST ARN LAWNMOW 4/6 CANS	1	4	33.18	33.18	item 35727; 4/6 CANS; 6-pack; same package type as the looked-up lines
+855417003508	KAR LOV STREET 4/6 CANS	1	4	33.18	33.18	item 30155; 4/6 CANS; 6-pack; same package type as the looked-up lines
+018200970030	ESTRELLA 2/12 CAN	1	2	27.45	27.45	item 02948; 2/12 CAN; 12-pack; same package type as the looked-up lines
+018200261244	STELLA ARTOIS 15/25 OZ CANS	1	15	39.95	39.95	item 07845; 15/25 OZ CANS; single 25oz can; same package type as the looked-up lines
+785515827006	ST ARN BANGER 12/19.2OZ CANS	1	12	25.30	25.30	item 39892; 12/19.2OZ CANS; single 19.2oz can; same package type as the looked-up lines
+796030250965	K-BIG WAVE 15/25OZ CAN	1	15	34.90	34.90	item 04232; 15/25OZ CAN; single 25oz can; same package type as the looked-up lines
+018200255083	BUD LIGHT CHEL 15/25 OZ CANS	1	15	34.90	34.90	item 02548; 15/25 OZ CANS; single 25oz can; same package type as the looked-up lines
+018200255106	BUD PICANTE 15/25 OZ CANS	1	15	34.90	34.90	item 01517; 15/25 OZ CANS; single 25oz can; same package type as the looked-up lines
+018200255274	BL X LIME CHEL 15/25 OZ CANS	1	15	34.90	34.90	item 01549; 15/25 OZ CANS; single 25oz can; same package type as the looked-up lines
+785515317002	ST ARN ART CAR 12/19.2OZ CANS	1	12	25.30	25.30	item 00835; 12/19.2OZ CANS; single 19.2oz can; same package type as the looked-up lines
+018200255090	BUDWEISER CHEL 15/25 OZ CANS	1	15	34.90	34.90	item 01548; 15/25 OZ CANS; single 25oz can; same package type as the looked-up lines
+018200007736	BUD LIGHT 7 OZ LNNR	1	4	16.59	16.59	item 02004; 7 OZ LNNR; 6-pack 7oz; looked up: Bud Light 6pk 7oz bottles
+018200284373	MICH ULTRA 4/6PK 7OZ LNNR	1	1	17.33	17.33	item 17004; 4/6PK 7OZ LNNR; 24-pack 7oz; looked up: Michelob Ultra 24pk 7oz bottles
+080660957210	MOD ESP 12/24OZ CAN	2	12	32.94	65.88	item 53037; 12/24OZ CAN; single 24oz; same package type as the looked-up lines
+018200250019	BUD LIGHT 15/25 CAN	2	15	32.27	64.54	item 02047; 15/25 CAN; single 25oz can; looked up: Bud Light 25oz can
+033544001875	MOD CHE SANDIA 12/24OZ CANS	1	12	32.94	32.94	item 53064; 12/24OZ CANS; single 24oz; same package type as the looked-up lines
+018200250002	BUDWEISER 15/25 CAN	1	15	32.27	32.27	item 01057; 15/25 CAN; single 25oz can; same package type as the looked-up lines
+033544002681	MOD CHE SUPMAN 12/24OZ CANS	1	12	32.94	32.94	item 53043; 12/24OZ CANS; single 24oz; same package type as the looked-up lines
+033544002339	MOD NEG CHELAD 12/24OZ CANS	1	12	32.94	32.94	item 54143; 12/24OZ CANS; single 24oz; same package type as the looked-up lines
+080660954011	COR EXTRA 7 OZ 6PK NITA	1	4	22.75	22.75	item 51004; 7 OZ 6PK NITA; 6-pack 7oz; looked up: Corona Coronita 6pk 7oz bottles
+080660956435	COR EXTRA 12/24 CAN	1	12	32.94	32.94	item 51001; 12/24 CAN; single 24oz; same package type as the looked-up lines

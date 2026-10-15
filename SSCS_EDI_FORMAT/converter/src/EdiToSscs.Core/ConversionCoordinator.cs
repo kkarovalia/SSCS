@@ -9,7 +9,24 @@ public enum FileStatus { Waiting, Converting, Converted, Warning, Failed, Cancel
 public enum ConversionKind { Edi, Pdf }
 
 /// <summary>Which vendor's PDF layout to parse. Each PDF vendor has its own parser.</summary>
-public enum PdfVendor { DrPepper, BlueBell, Chubiwinos, Bimbo, RedBull }
+public enum PdfVendor
+{
+    DrPepper, BlueBell, Chubiwinos, Bimbo, RedBull,
+
+    /// <summary>
+    /// Whoever sent it. The PDF to Modisoft EDI tab's only reader (2026-10-15): Modisoft takes
+    /// nothing from the file but its lines and the vendor is picked on the purchase, so that tab has
+    /// no vendor dropdown. It reads a PDF or a photo with one AI request. SSCS still needs the
+    /// vendor, so the PDF to SSCS XML tab keeps its five.
+    /// </summary>
+    Any,
+}
+
+/// <summary>
+/// Which back office the converted file is for. SSCS takes NAXML by email; Modisoft takes a plain
+/// GHRA-layout EDI text file that someone imports into a purchase they created by hand.
+/// </summary>
+public enum OutputTarget { Sscs, Modisoft }
 
 /// <summary>One file tracked by the conversion queue.</summary>
 public sealed class QueuedFile
@@ -20,6 +37,11 @@ public sealed class QueuedFile
     public ConversionKind Kind { get; init; } = ConversionKind.Edi;
     /// <summary>Which PDF parser to use. Ignored for EDI input.</summary>
     public PdfVendor Vendor { get; init; } = PdfVendor.DrPepper;
+    /// <summary>
+    /// Which file to write. Defaults to SSCS so existing callers/tests are unchanged. Only PDF input
+    /// can go to Modisoft; an EDI file already is the format Modisoft imports.
+    /// </summary>
+    public OutputTarget Target { get; init; } = OutputTarget.Sscs;
     public FileStatus Status { get; internal set; } = FileStatus.Waiting;
     public string Detail { get; internal set; } = "";
     public string? OutputPath => OutputPaths.Count > 0 ? OutputPaths[0] : null;
@@ -404,13 +426,14 @@ public sealed class ConversionCoordinator
     /// Returns the created queue items (including immediately-rejected ones).
     /// </summary>
     public IReadOnlyList<QueuedFile> Enqueue(
-        IEnumerable<string> paths, ConversionKind kind = ConversionKind.Edi, PdfVendor vendor = PdfVendor.DrPepper)
+        IEnumerable<string> paths, ConversionKind kind = ConversionKind.Edi, PdfVendor vendor = PdfVendor.DrPepper,
+        OutputTarget target = OutputTarget.Sscs)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var added = new List<QueuedFile>();
         foreach (string path in paths)
         {
-            var item = new QueuedFile { InputPath = path, Kind = kind, Vendor = vendor };
+            var item = new QueuedFile { InputPath = path, Kind = kind, Vendor = vendor, Target = target };
             added.Add(item);
             if (Directory.Exists(path))
             {

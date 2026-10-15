@@ -5,7 +5,19 @@ Instructions for coding agents working in this repository.
 ## Project
 
 Windows desktop utility that converts vendor invoices — **fixed-width EDI/EDI13 text files** and
-**vendor PDFs** — into **NAXML-BusDoc 1.5** invoice files for SSCS. Deliverable is a
+**vendor PDFs** — into **NAXML-BusDoc 1.5** invoice files for SSCS. Since 2026-10-05 a vendor PDF
+can also become a **GHRA-style EDI file for Modisoft**, with a 13-character barcode field (since
+2026-10-09; 12 before), imported with Modisoft's EDI option "Xpress Wholesale" for every vendor (the
+PDF to Modisoft EDI tab;
+`ModisoftEdiBuilder`, `analysis/FORMAT_SPEC.md` Part 3). **Since 2026-10-15 that tab has no vendor
+dropdown and takes any vendor's invoice** — a PDF or a photo — read by one generic Gemini request
+(`AnyInvoiceParser`, `GeminiVisionReader.ReadAnyInvoice`, `PdfVendor.Any`); Modisoft takes only the
+lines and the vendor is picked on the purchase. The PDF to SSCS XML tab keeps its five vendors and
+their tuned readers. When the tab cannot do an invoice (Gemini down, no barcodes printed), do it by
+hand with `analysis/INVOICE_TO_MODISOFT.md` and `converter/tools/ModisoftFile`. The old Texas Wholesale
+option matched barcodes on 11 digits and merged EAN-13s (Yumi, 2026-10-09). That is why the field
+is 13 and the option is Xpress Wholesale. For one of the five
+converter vendors while Gemini is unavailable, use `converter/tools/HandReading`. Deliverable is a
 **self-contained portable win-x64 EXE** (no install, no admin, no separate runtime, no internet,
 no console window).
 
@@ -100,6 +112,10 @@ file is what actually files an invoice.
 - **Send Email** on a convert tab sends every converted invoice on that tab, with **no row
   selection** and no confirmation — one click. It runs on a background thread (a dead network costs
   45s per message).
+- **Modisoft files go to a second address** (`EmailSettings.ModisoftToAddress`, the store's own
+  mailbox), sent from the same mailbox by their own `SmtpEmailSender`. Modisoft does not route by
+  address: somebody downloads the file and imports it into a purchase they create by hand. A store
+  may set the SSCS address, the Modisoft address or both.
 - `QueuedFile.MarkEmailed` / `WasEmailed` is what makes one-click safe: an invoice already sent is
   skipped, so pressing the button twice cannot double-send. **A duplicate invoice email books the
   delivery twice in SSCS, the money balances both times, and nothing downstream flags it** — this

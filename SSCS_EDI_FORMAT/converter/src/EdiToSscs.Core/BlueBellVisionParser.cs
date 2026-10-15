@@ -96,6 +96,11 @@ public static class BlueBellVisionParser
                 Units = credit ? -sellableUnits : sellableUnits,
                 UnitCost = unitCost,
                 RetailPrice = BlueBellPdfParser.SeedRetail(unitCost),
+                // A DZ row's QTY counts cartons, priced per carton - Modisoft's cases. A returned
+                // 11/12 of a carton is not a whole one and goes in bar by bar.
+                Cases = pack == 12 && invoiceQuantity == decimal.Truncate(invoiceQuantity)
+                        && invoiceQuantity is > 0m and <= int.MaxValue
+                    ? (int)invoiceQuantity : null,
             };
             posted.Add(new Posted(raw, line, invoiceQuantity, sellableUnits, credit));
             if (credit) creditLines++;

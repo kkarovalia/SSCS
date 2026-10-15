@@ -105,6 +105,21 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     /// </summary>
     private string? _visionNote;
 
+    /// <summary>Which back office the file being converted is for. Set per file, like the note above.</summary>
+    private OutputTarget _target;
+
+    /// <summary>
+    /// The finished file for one invoice, in the format its tab writes. Reading the invoice is the
+    /// same either way; only this last step differs. <paramref name="sscsName"/> is the name the
+    /// vendor's SSCS file has always had. A Modisoft file is named by vendor and invoice number, and
+    /// any note it raises about itself joins the invoice's own.
+    /// </summary>
+    private ConvertedDocument Document(Invoice invoice, string sscsName, List<ConversionWarning> warnings) =>
+        _target == OutputTarget.Modisoft
+            ? new ConvertedDocument(
+                OutputNaming.BuildModisoftFileName(invoice), ModisoftEdiBuilder.Build(invoice, warnings))
+            : new ConvertedDocument(sscsName, NaxmlBuilder.Build(invoice));
+
     /// <summary>
     /// A second reading of a scanned invoice, taken off the picture. Null reader, no key, no
     /// network, a bad reply — every one of them gives an empty reading and the parse carries on
@@ -142,6 +157,7 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         string inputPath = file.InputPath;
         string inputFileName = Path.GetFileName(inputPath);
         _visionNote = null;
+        _target = file.Target;
         var log = new LogEntry
         {
             AppVersion = _appVersion,
@@ -192,7 +208,9 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             return Fail(log, ex, $"Could not convert {inputFileName}.\n\nAn unexpected problem occurred. The original file was not changed.");
         }
 
-        log.DetectedFormat = converted.Format;
+        log.DetectedFormat = _target == OutputTarget.Modisoft && file.Kind == ConversionKind.Pdf
+            ? converted.Format + " to Modisoft EDI"
+            : converted.Format;
         log.RecordsProcessed = converted.RecordCount;
         log.UpcERecordsExpanded = converted.UpcExpanded;
         log.OutputBytes = converted.Documents.Sum(d => d.Bytes.LongLength);
@@ -321,6 +339,10 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
 
     private Converted ConvertPdf(byte[] inputBytes, string inputFileName, PdfVendor vendor)
     {
+        // Any vendor takes photos as well as PDFs, so it is sorted out before the PDF check.
+        if (vendor == PdfVendor.Any)
+            return ConvertAnyInvoice(inputBytes, inputFileName, new List<ConversionWarning>());
+
         if (!PdfTextExtractor.LooksLikePdf(inputBytes))
             throw new EdiConversionException(PdfReasonCodes.NotAPdf,
                 "This file does not look like a PDF. Please drop the vendor's PDF invoice.");
@@ -459,8 +481,7 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             Invoice legacy = DrPepperPdfParser.Parse(
                 lines, warnings, f => AskDrPepperField(inputFileName, f, pdfBytes),
                 keyed.Date, keyed.InvoiceNumber, legacyAmountDue);
-            var legacyDoc = new ConvertedDocument(
-                OutputNaming.BuildOutputFileName(inputFileName), NaxmlBuilder.Build(legacy));
+            var legacyDoc = Document(legacy, OutputNaming.BuildOutputFileName(inputFileName), warnings);
             return new Converted([legacyDoc], "PDF/DrPepper legacy OCR", legacy.Lines.Count,
                 warnings, 0, null, Headline(legacy));
         }
@@ -470,9 +491,65 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         var details = AskInvoiceDetails(new InvoiceDetailsRequest(
             inputFileName, "Dr Pepper", ticket.Total, ticket.Lines.Count, 1, 1, "Dr Pepper"));
         Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
-        var doc = new ConvertedDocument(
-            OutputNaming.BuildOutputFileName(inputFileName), NaxmlBuilder.Build(invoice));
+        var doc = Document(invoice, OutputNaming.BuildOutputFileName(inputFileName), warnings);
         return new Converted([doc], "PDF/DrPepper AI", invoice.Lines.Count,
+            warnings, 0, null, Headline(invoice));
+    }
+
+    /// <summary>
+    /// Any vendor's invoice, for Modisoft: one picture request, then the file.
+    ///
+    /// There is no OCR fallback, because there is no vendor parser to fall back to. So the three
+    /// ways it can stop each say what to do: AI is switched off (switch it on), Google could not be
+    /// reached or was busy for its whole patience (try again later), or Google answered and found
+    /// no product line (a clearer picture). The invoice number and date are typed, as on every
+    /// vendor, and the AI-read supplier name is shown in that box's title so the clerk knows which
+    /// paper it wants.
+    /// </summary>
+    private Converted ConvertAnyInvoice(byte[] inputBytes, string inputFileName, List<ConversionWarning> warnings)
+    {
+        if (!PdfTextExtractor.LooksLikePdf(inputBytes) && InvoicePictures.PictureType(inputBytes) is null)
+            throw new EdiConversionException(PdfReasonCodes.NotAPdf,
+                "This file is not a PDF or a photo. Drop the invoice as a PDF, or a JPG or PNG photo of it.");
+
+        AnyInvoiceVisionReading reading;
+        if (_visionReader is not IAnyInvoiceVisionReader ai)
+            reading = AnyInvoiceVisionReading.Off();
+        else
+        {
+            try
+            {
+                reading = ai.ReadAnyInvoice(inputBytes);
+            }
+            catch
+            {
+                reading = AnyInvoiceVisionReading.Unavailable();
+            }
+        }
+        if (reading.Note.Length > 0) _visionNote = $"Any invoice AI: {reading.Note}";
+
+        switch (reading.Status)
+        {
+            case AnyInvoiceVisionStatus.Off:
+                throw new EdiConversionException(PdfReasonCodes.VendorNoParser,
+                    "This tab reads invoices with Google's AI, and AI reading is switched off. Open the "
+                    + "Settings tab, press AI Reading Settings and switch it on.");
+            case AnyInvoiceVisionStatus.Unavailable:
+                throw new EdiConversionException(PdfReasonCodes.VendorNoParser,
+                    "Google's AI could not read this invoice right now. It may be busy, or today's free "
+                    + "allowance may be used up. Try this file again later.");
+            case AnyInvoiceVisionStatus.Unreadable:
+                throw new EdiConversionException(PdfReasonCodes.UnreadableLine,
+                    "Google's AI looked at this invoice but could not read any product lines on it. Scan "
+                    + "it again or take a clearer photo of the whole invoice, and try again.");
+        }
+
+        AnyInvoiceTicket ticket = AnyInvoiceParser.Parse(reading, warnings);
+        var details = AskInvoiceDetails(new InvoiceDetailsRequest(
+            inputFileName, ticket.VendorName, ticket.Total, ticket.Lines.Count, 1, 1, ticket.VendorName));
+        Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
+        var doc = Document(invoice, OutputNaming.BuildOutputFileName(inputFileName), warnings);
+        return new Converted([doc], "Any invoice AI", invoice.Lines.Count,
             warnings, 0, null, Headline(invoice));
     }
 
@@ -691,9 +768,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
 
             var legacyInvoice = BlueBellPdfParser.Merge(
                 sections, legacyKeyed.InvoiceNumber, legacyKeyed.Date);
-            var legacyDoc = new ConvertedDocument(
-                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
-                NaxmlBuilder.Build(legacyInvoice));
+            var legacyDoc = Document(legacyInvoice,
+                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber), warnings);
             return new Converted([legacyDoc], "PDF/BlueBell legacy OCR", legacyInvoice.Lines.Count,
                 warnings, 0, null, Headline(legacyInvoice));
         }
@@ -702,8 +778,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             inputFileName, "Blue Bell", ticket.Total, ticket.Lines.Count, 1, 1, "Blue Bell"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
-        var doc = new ConvertedDocument(
-            OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
+        var doc = Document(
+            invoice, OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), warnings);
         return new Converted([doc], "PDF/BlueBell AI", invoice.Lines.Count, warnings, 0, null,
             Headline(invoice));
     }
@@ -760,9 +836,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             Invoice legacyInvoice = legacyTicket.ToInvoice(
                 legacyKeyed.InvoiceNumber, legacyKeyed.Date,
                 line => AskBarcode(inputFileName, legacyTicket, line, warnings));
-            var legacyDoc = new ConvertedDocument(
-                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
-                NaxmlBuilder.Build(legacyInvoice));
+            var legacyDoc = Document(legacyInvoice,
+                OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber), warnings);
             return new Converted([legacyDoc], "PDF/Chubiwinos legacy OCR",
                 legacyInvoice.Lines.Count, warnings, 0, null, Headline(legacyInvoice));
         }
@@ -773,8 +848,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
 
-        var doc = new ConvertedDocument(
-            OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
+        var doc = Document(
+            invoice, OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), warnings);
         return new Converted([doc], "PDF/Chubiwinos AI", invoice.Lines.Count,
             warnings, 0, null, Headline(invoice));
     }
@@ -854,8 +929,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             inputFileName, "Bimbo", ticket.Total, ticket.Lines.Count, 1, 1, "Bimbo"));
 
         var invoice = ticket.ToInvoice(keyed.InvoiceNumber, keyed.Date);
-        var doc = new ConvertedDocument(
-            OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), NaxmlBuilder.Build(invoice));
+        var doc = Document(
+            invoice, OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), warnings);
         return new Converted([doc], "PDF/Bimbo", invoice.Lines.Count, warnings, 0, null, Headline(invoice));
     }
 
@@ -993,9 +1068,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
                     inputFileName, "Red Bull", ticket.Total, ticket.Lines.Count, 1, 1,
                     "Red Bull"));
                 Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
-                var primaryDoc = new ConvertedDocument(
-                    OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber),
-                    NaxmlBuilder.Build(invoice));
+                var primaryDoc = Document(invoice,
+                    OutputNaming.BuildInvoiceOutputFileName(invoice.InvoiceNumber), warnings);
                 return new Converted([primaryDoc], "PDF/RedBull AI", invoice.Lines.Count,
                     warnings, 0, null, Headline(invoice));
             }
@@ -1046,9 +1120,8 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
             legacyTicket, legacyInvoice, keyed, Ask, answered, warnings);
         CheckRedBullUnits(legacyTicket, legacyInvoice, warnings);
 
-        var doc = new ConvertedDocument(
-            OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber),
-            NaxmlBuilder.Build(legacyInvoice));
+        var doc = Document(legacyInvoice,
+            OutputNaming.BuildInvoiceOutputFileName(legacyInvoice.InvoiceNumber), warnings);
         return new Converted([doc], "PDF/RedBull legacy OCR", legacyInvoice.Lines.Count,
             warnings, 0, null, Headline(legacyInvoice));
     }

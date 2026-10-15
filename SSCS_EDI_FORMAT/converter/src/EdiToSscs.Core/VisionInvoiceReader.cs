@@ -283,10 +283,9 @@ public interface IInvoiceVisionReader
 /// — and a slow read is indistinguishable from a hung application, which is exactly the report that
 /// started this (2026-08-13, four minutes on one Dr Pepper ticket).
 ///
-/// Whatever is said here has to be **true of what the app can actually observe**. A synchronous
-/// HTTPS request either returns or it has not returned yet; nothing tells the caller whether the far
-/// end is working on it. So "the request is out and nothing has come back" is sayable and "Google is
-/// processing your invoice" is not.
+/// Whatever is said here has to be **true of what the app can actually observe**. Reads stream, so
+/// "Google is answering" is observable while its reply is arriving and may be said then; while
+/// nothing is arriving, "the request is out and nothing has come back" is all that is known.
 /// </summary>
 public interface IVisionProgressReporter
 {

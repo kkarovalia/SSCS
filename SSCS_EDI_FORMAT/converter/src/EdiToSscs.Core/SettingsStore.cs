@@ -109,6 +109,15 @@ public sealed class EmailSettings
     [JsonPropertyName("toAddress")]
     public string? ToAddress { get; set; }
 
+    /// <summary>
+    /// Where PDF to Modisoft EDI sends its files: the store's own email, chosen by the store
+    /// (2026-10-05). Unlike SSCS's address it files nothing by itself. Somebody downloads the
+    /// attachment and imports it into a purchase they create in Modisoft. A store can have either
+    /// address, or both.
+    /// </summary>
+    [JsonPropertyName("modisoftToAddress")]
+    public string? ModisoftToAddress { get; set; }
+
     /// <summary>The mailbox that sends, which for Gmail is also the SMTP username.</summary>
     [JsonPropertyName("fromAddress")]
     public string? FromAddress { get; set; }
@@ -134,17 +143,28 @@ public sealed class EmailSettings
     public const string DefaultSmtpHost = "smtp.gmail.com";
     public const int DefaultSmtpPort = 587;
 
-    /// <summary>True when every field a send needs is present.</summary>
-    public bool IsComplete =>
-        !string.IsNullOrWhiteSpace(ToAddress)
-        && !string.IsNullOrWhiteSpace(FromAddress)
+    /// <summary>True when every field an SSCS send needs is present.</summary>
+    public bool IsComplete => IsCompleteFor(OutputTarget.Sscs);
+
+    /// <summary>True when the mailbox this PC sends from is fully set up, whoever it sends to.</summary>
+    public bool HasSender =>
+        !string.IsNullOrWhiteSpace(FromAddress)
         && !string.IsNullOrWhiteSpace(SmtpHost)
         && SmtpPort is > 0 and <= 65535
         && !string.IsNullOrWhiteSpace(ProtectedPassword);
 
+    /// <summary>Where a file for <paramref name="target"/> is sent.</summary>
+    public string? AddressFor(OutputTarget target) =>
+        target == OutputTarget.Modisoft ? ModisoftToAddress : ToAddress;
+
+    /// <summary>True when a file for <paramref name="target"/> has somewhere to go and a way to get there.</summary>
+    public bool IsCompleteFor(OutputTarget target) =>
+        HasSender && !string.IsNullOrWhiteSpace(AddressFor(target));
+
     public EmailSettings Clone() => new()
     {
         ToAddress = ToAddress,
+        ModisoftToAddress = ModisoftToAddress,
         FromAddress = FromAddress,
         SmtpHost = SmtpHost,
         SmtpPort = SmtpPort,

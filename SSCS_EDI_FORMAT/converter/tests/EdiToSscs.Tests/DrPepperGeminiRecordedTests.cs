@@ -349,15 +349,16 @@ public class DrPepperGeminiRecordedTests
     }
 
     /// <summary>
-    /// A busy model is worth insisting on before dropping to a worse one.
+    /// A busy model is asked again on the same key, and then not on the other keys at all.
     ///
-    /// 503 is Google's server, not the store's allowance, and it clears on its own — so the rung
-    /// worth pressing is the best one the ladder has reached. Each key gets the top model three
-    /// times before the ladder moves down, because a blip that lasts seconds should not decide that
-    /// an invoice gets read by a weaker model.
+    /// The rung worth pressing is the best one the ladder has reached, because a blip that lasts
+    /// seconds should not decide that an invoice gets read by a weaker model. But "this model is
+    /// currently experiencing high demand" is about the model: the second key gets the same answer,
+    /// and every busy reply counts against the day's 20. On 2026-10-05 the dashboard showed
+    /// gemini-3.7-flash 6 used for two conversions it never answered, which is what this stopped.
     /// </summary>
     [Fact]
-    public void DrPepperPressesTheBestModelSeveralTimesBeforeDroppingFromBusy()
+    public void ABusyModelIsPressedOnOneKeyAndSkippedOnTheOthers()
     {
         string recorded = File.ReadAllText(Recorded, Encoding.UTF8);
         var handler = new FallbackStub(HttpStatusCode.ServiceUnavailable, recorded);
@@ -371,10 +372,25 @@ public class DrPepperGeminiRecordedTests
         Assert.Equal(
             [
                 "key-1/gemini-3.7-flash", "key-1/gemini-3.7-flash", "key-1/gemini-3.7-flash",
-                "key-2/gemini-3.7-flash", "key-2/gemini-3.7-flash", "key-2/gemini-3.7-flash",
                 "key-1/gemini-3.6-flash",
             ],
             handler.Tried);
+    }
+
+    /// <summary>
+    /// The store's own busy-model retry is one more go, not two. A second quick retry mostly spent
+    /// a request out of the day's 20: Google's "spikes in demand are usually temporary" is minutes,
+    /// not the seconds these waits cover.
+    /// </summary>
+    [Fact]
+    public void ABusyModelGetsOneMoreGoInProduction()
+    {
+        var waits = (TimeSpan[])typeof(GeminiVisionReader)
+            .GetField("BusyModelWaits", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!;
+
+        var wait = Assert.Single(waits);
+        Assert.InRange(wait, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(15));
     }
 
     [Fact]
@@ -550,9 +566,113 @@ public class DrPepperGeminiRecordedTests
         DrPepperVisionReading reading = reader.ReadDrPepper(File.ReadAllBytes(Scan));
 
         // Unavailable, not Unreadable: nothing ever answered, so the legacy reader may still be
-        // offered. One opening sweep plus one retry round per configured wait.
+        // offered. Each model once plus its retries, on the first key only - a busy model is busy
+        // for every key.
         Assert.Equal(DrPepperVisionStatus.Unavailable, reading.Status);
-        Assert.Equal(6 * (1 + NoBusyWaits.Length), handler.Tried.Count);
+        Assert.Equal(
+            GeminiVisionReader.DefaultModels.Length * (1 + NoBusyWaits.Length), handler.Tried.Count);
+        Assert.DoesNotContain(handler.Tried, tried => tried.StartsWith("key-2/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The store asked for this on 2026-10-06, after three Dr Pepper attempts in four minutes were
+    /// each given up after one round of 503s on every model: when Google is busy, wait and ask
+    /// again. A later round asks each model once - no quick retry, since every busy reply is one of
+    /// the day's 20 - and still never on the other key.
+    /// </summary>
+    [Fact]
+    public void ABusyGoogleIsAskedAgainUntilItAnswers()
+    {
+        string recorded = File.ReadAllText(Recorded, Encoding.UTF8);
+        var handler = new ProgrammableStub((number, _, _) => number <= 12
+            ? Unavailable(HttpStatusCode.ServiceUnavailable)
+            : Answered(recorded));
+        var progress = new List<string>();
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff, NoBusyWaits,
+            patience: TimeSpan.FromMinutes(1), roundWaits: [TimeSpan.Zero])
+        {
+            Progress = message => { lock (progress) progress.Add(message); },
+        };
+
+        DrPepperVisionReading reading = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+
+        // Round one: each model three times (two quick retries). Round two: each model once. Round
+        // three: the first model answers.
+        Assert.Equal(DrPepperVisionStatus.Success, reading.Status);
+        Assert.Equal(
+            [
+                "key-1/gemini-3.7-flash", "key-1/gemini-3.6-flash", "key-1/gemini-3.5-flash",
+                "key-1/gemini-3.7-flash",
+            ],
+            handler.Tried.Skip(9));
+        Assert.DoesNotContain(handler.Tried, tried => tried.StartsWith("key-2/", StringComparison.Ordinal));
+        Assert.Contains(progress, message => message.Contains("keeps trying until", StringComparison.Ordinal));
+        Assert.Contains("2 more rounds while Google was busy", reading.Note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Patience is not forever. When it runs out the read is unavailable exactly as before, so the
+    /// operator is offered the legacy reader rather than left at "Converting...".
+    /// </summary>
+    [Fact]
+    public void APatientReadStillGivesUpWhenItsPatienceRunsOut()
+    {
+        var handler = new ProgrammableStub((_, _, _) => Unavailable(HttpStatusCode.ServiceUnavailable));
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff, NoBusyWaits,
+            patience: TimeSpan.FromSeconds(1), roundWaits: [TimeSpan.FromMilliseconds(300)]);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        DrPepperVisionReading reading = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+        clock.Stop();
+
+        int firstRound = GeminiVisionReader.DefaultModels.Length * (1 + NoBusyWaits.Length);
+        Assert.Equal(DrPepperVisionStatus.Unavailable, reading.Status);
+        Assert.True(handler.Tried.Count > firstRound, $"only {handler.Tried.Count} requests");
+        Assert.Equal(0, (handler.Tried.Count - firstRound) % GeminiVisionReader.DefaultModels.Length);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+        Assert.DoesNotContain(handler.Tried, tried => tried.StartsWith("key-2/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Only "busy" is waited on. An allowance used up for the day is still one sweep and done, even
+    /// with all the patience in the world - it does not come back this afternoon.
+    /// </summary>
+    [Fact]
+    public void AnExhaustedAllowanceIsNotWaitedOnEvenByAPatientRead()
+    {
+        var handler = new ProgrammableStub((_, _, _) => Unavailable(HttpStatusCode.TooManyRequests));
+        var reader = new GeminiVisionReader(
+            ["key-1", "key-2"], GeminiVisionReader.DefaultModels,
+            new HttpClient(handler), UnusedBackoff, NoBusyWaits,
+            patience: TimeSpan.FromMinutes(15), roundWaits: [TimeSpan.FromMinutes(1)]);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        DrPepperVisionReading reading = reader.ReadDrPepper(File.ReadAllBytes(Scan));
+        clock.Stop();
+
+        Assert.Equal(DrPepperVisionStatus.Unavailable, reading.Status);
+        Assert.Equal(6, handler.Tried.Count);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"slept for {clock.Elapsed}");
+    }
+
+    /// <summary>
+    /// The production schedule: minutes of patience, and pauses of at least half a minute between
+    /// rounds, so a busy morning cannot burn the day's 20 per model on one invoice.
+    /// </summary>
+    [Fact]
+    public void TheAppWaitsMinutesForABusyGoogleAndPacesItsRounds()
+    {
+        Assert.InRange(GeminiVisionReader.BusyPatience, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30));
+
+        var waits = (TimeSpan[])typeof(GeminiVisionReader)
+            .GetField("BusyRoundWaits", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!;
+        Assert.NotEmpty(waits);
+        Assert.All(waits, wait => Assert.True(wait >= TimeSpan.FromSeconds(30), $"{wait} between rounds"));
     }
 
     /// <summary>
@@ -628,12 +748,12 @@ public class DrPepperGeminiRecordedTests
     public void TheLogSaysWhichFailureEachAttemptActuallyWas()
     {
         // Keyed by rung rather than by attempt number, so the busy one answers the same way when
-        // it is asked again.
+        // it is asked again. Key 2 is never asked about the busy model, so its faults sit lower.
         var handler = new ProgrammableStub((_, key, model) => (key, model) switch
         {
             ("key-1", "gemini-3.7-flash") => Unavailable(HttpStatusCode.ServiceUnavailable),
-            ("key-2", "gemini-3.7-flash") => Unavailable(HttpStatusCode.TooManyRequests),
-            ("key-1", "gemini-3.6-flash") => Unavailable(HttpStatusCode.Forbidden),
+            ("key-1", "gemini-3.6-flash") => Unavailable(HttpStatusCode.TooManyRequests),
+            ("key-2", "gemini-3.6-flash") => Unavailable(HttpStatusCode.Forbidden),
             _ => throw new HttpRequestException("the line dropped"),
         });
         var reader = new GeminiVisionReader(
@@ -647,16 +767,17 @@ public class DrPepperGeminiRecordedTests
         // One in the opening sweep, then once per retry round - it stayed busy every time.
         Assert.Contains($"{1 + NoBusyWaits.Length} model busy (HTTP 5xx)", note, StringComparison.Ordinal);
         Assert.Contains("1 refused (other HTTP error)", note, StringComparison.Ordinal);
-        Assert.Contains("3 could not reach Google", note, StringComparison.Ordinal);
-        Assert.Contains("key 2/gemini-3.7-flash: HTTP 429", note, StringComparison.Ordinal);
+        Assert.Contains("2 could not reach Google", note, StringComparison.Ordinal);
+        Assert.Contains("key 1/gemini-3.6-flash: HTTP 429", note, StringComparison.Ordinal);
         Assert.Contains("key 1/gemini-3.7-flash: HTTP 503", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("key 2/gemini-3.7-flash", note, StringComparison.Ordinal);
         Assert.DoesNotContain("throttled", note, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
-    /// The queue is told which attempt is outstanding, and told nothing the app cannot know. A
-    /// synchronous HTTPS call does not report whether Google is working on the request, so nothing
-    /// may say it is.
+    /// The queue is told which attempt is outstanding, and told nothing the app cannot know. Google
+    /// may only be said to be answering while its reply is actually arriving; a request that has
+    /// sent nothing back is "no reply yet", never "processing".
     /// </summary>
     [Fact]
     public void ProgressNamesTheAttemptAndNeverClaimsGoogleIsWorking()

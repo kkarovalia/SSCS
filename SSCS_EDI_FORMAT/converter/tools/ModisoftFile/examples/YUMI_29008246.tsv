@@ -1,0 +1,56 @@
+upc	description	cases	units_per_case	case_cost	line_amount	note
+028000065812	NE-STRAWBERRY SHORTC	1	24	46.15	46.15	item 93; Yumi prints 24 per case
+072554000089	DR-FROLLIES ORANGE P	1	24	45.93	45.93	item 3727; Yumi prints 24 per case
+050000235001	NE-TOLL HSE ORIGINAL	1	12	35.44	35.44	item 329; Yumi prints 12 per case
+072554335358	NE-4.6 OZ OREO SANDW	1	24	70.88	70.88	item 3234; Yumi prints 24 per case
+072554110931	NE-6.0 OZ ICE CREAM	1	24	45.93	45.93	item 3866; Yumi prints 24 per case; 91.85 split over 2 lines
+072554110931	NE-6.0 OZ ICE CREAM	1	24	45.92	45.92	item 3866; Yumi prints 24 per case; 91.85 split over 2 lines
+072554001604	NE-DRUMSTICK ORIGINA	1	24	55.42	55.42	item 40; Yumi prints 24 per case
+072554218606	NE-DRUMSTICK SUPREME	1	12	35.44	35.44	item 46; Yumi prints 12 per case
+072554218903	NE-DRUMSTICK SUPREME	1	12	35.44	35.44	item 50; Yumi prints 12 per case
+041548825533	NE-4.OZ DIBS VAN CRU	1	16	47.25	47.25	item 3187; Yumi prints 16 per case
+072554811296	NE-3.5 OZ OREO BITES	1	12	35.44	35.44	item 3693; Yumi prints 12 per case
+074570016006	HD-BAR VAN MILK CHOC	1	12	35.44	35.44	item 1975; Yumi prints 12 per case
+074570036004	HD-BAR VAN MILK ALMO	1	12	35.44	35.44	item 1976; Yumi prints 12 per case
+074570597987	HD-BAR GLT CARAMEL C	1	12	35.44	35.44	item 2052; Yumi prints 12 per case
+074570004003	HD-14.OZ-VANILLA	1	8	39.08	39.08	item 136; Yumi prints 8 per case
+074570014002	HD-14.OZ-CHOCOLATE	1	8	39.08	39.08	item 142; Yumi prints 8 per case
+074570024001	HD-14.OZ-STRAWBERRY	1	8	39.08	39.08	item 143; Yumi prints 8 per case
+041548287454	DR-14.OZ GRAND NE DR	1	8	30.84	30.84	item 1781; Yumi prints 8 per case
+041548898469	DR-14.OZ KIT KAT	1	8	30.84	30.84	item 2560; Yumi prints 8 per case
+041548308388	DR-14.OZ OREO	1	8	30.84	30.84	item 3235; Yumi prints 8 per case
+077567002846	GH-FACE SPIDERMAN 20	1	20	55.80	55.80	item 3477; Yumi prints 20 per case
+076840101320	BJ-PT-HALF BAKED	1	8	44.72	44.72	item 208; Yumi prints 8 per case
+076840100583	BJ-PT-CHOC CHIP COOK	1	8	44.72	44.72	item 211; Yumi prints 8 per case
+076840100477	BJ-PT-CHOC FUDGE BRO	1	8	44.72	44.72	item 212; Yumi prints 8 per case
+077567275066	BR-PT-REESE'S PEANUT	1	8	33.52	33.52	item 1157; Yumi prints 8 per case
+077567004178	BR-PT-SMORES	1	8	33.52	33.52	item 3748; Yumi prints 8 per case
+077567004796	BR-PT-STRAWBERRY SHO	1	8	33.52	33.52	item 3911; Yumi prints 8 per case
+682082100511	HM-3.75OZ BARS ST-N-	1	24	50.16	50.16	item 1443; Yumi prints 24 per case
+682082100528	HM-3.75OZ BARS COCON	1	24	50.16	50.16	item 1444; Yumi prints 24 per case
+047677482487	MM-2.8OZ SNICKER BAR	1	24	45.12	45.12	item 2162; Yumi prints 24 per case
+6943090420430	LLB-MANGO SINGLE 3D	1	24	96.72	96.72	item 3988; Yumi prints 24 per case
+6943090420065	LLB-PEACH SINGLE 3D	1	24	96.72	96.72	item 3990; Yumi prints 24 per case
+6911308117885	LLB-GRAPE SINGLE 3D	1	24	96.72	96.72	item 3991; Yumi prints 24 per case
+6911308117861	LLB-STRAWBERRY SINGL	1	24	96.72	96.72	item 3992; Yumi prints 24 per case
+6911308119452	LLB-LYCHEE SINGLE 3D	1	24	96.72	96.72	item 4007; Yumi prints 24 per case
+6911308119469	LLB-MELON SINGLE 3D	1	24	96.72	96.72	item 4008; Yumi prints 24 per case
+041433001240	EA-DELI EXP HAM CHSE	5	1	3.82	19.10	item 3834; Yumi prints 10 per case; partial case 0/5, booked as 5 singles
+041433001202	EA-DELI EXP CKN SALA	5	1	3.82	19.10	item 3835; Yumi prints 10 per case; partial case 0/5, booked as 5 singles
+041433001219	EA-DELI EXP TRKY CHS	5	1	3.82	19.10	item 3836; Yumi prints 10 per case; partial case 0/5, booked as 5 singles
+041433001233	EA-DELI EXP TUNA SAL	5	1	3.82	19.10	item 3837; Yumi prints 10 per case; partial case 0/5, booked as 5 singles
+041433023624	EA-DELI EXP XXL CHAR	3	1	4.45	13.35	item 3839; Yumi prints 6 per case; partial case 0/3, booked as 3 singles
+041433023631	EA-DELI EXP XXL CKN	3	1	4.45	13.35	item 3840; Yumi prints 6 per case; partial case 0/3, booked as 3 singles
+043695231533	NE-HP SKNY HAM & CHE	1	8	31.92	31.92	item 3256; Yumi prints 8 per case
+071921016661	NE-DIGI SM STCR 3 ME	1	10	46.00	46.00	item 3164; Yumi prints 10 per case
+013800103406	DT-ST MAC AND CHEESE	1	12	46.92	46.92	item 381; Yumi prints 12 per case
+013800103215	DT-ST MEAT LASAGNA	1	12	54.36	54.36	item 382; Yumi prints 12 per case
+082988037162	DT-WC 4 PK SLIDER CH	1	6	24.78	24.78	item 3147; Yumi prints 6 per case
+043695796100	DT-HP SKNY PEPPERONI	1	8	31.92	31.92	item 3257; Yumi prints 8 per case
+071007031694	DT-EM XXL SPICY RED	1	12	23.64	23.64	item 3325; Yumi prints 12 per case
+071007015823	DT-EM XXL BEEF & BEA	1	12	23.64	23.64	item 3326; Yumi prints 12 per case
+051000138033	CAMP-12.0 OZ V8 VEG	1	12	18.60	18.60	item 1741; Yumi prints 12 per case
+051000138019	CAMP-12.0 OZ V8 SPIC	1	12	18.60	18.60	item 1742; Yumi prints 12 per case
+025000000249	CC-11.5 OZ SMPLY ORA	1	12	24.00	24.00	item 2543; Yumi prints 12 per case
+025000000188	CC-11.5 OZ SIMPLY RA	1	12	24.00	24.00	item 2747; Yumi prints 12 per case
+025000000324	CC-11.5 OZ SIMPLY OJ	1	12	24.00	24.00	item 2867; Yumi prints 12 per case

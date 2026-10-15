@@ -22,7 +22,7 @@ namespace EdiToSscs.Core;
 /// </summary>
 public sealed class GeminiVisionReader
     : IInvoiceVisionReader, IBimboVisionReader, IDrPepperVisionReader, IRedBullVisionReader,
-      IBlueBellVisionReader, IChubiwinosVisionReader, IVisionProgressReporter
+      IBlueBellVisionReader, IChubiwinosVisionReader, IAnyInvoiceVisionReader, IVisionProgressReporter
 {
     /// <summary>
     /// What the operator is told is happening, in the words of the job rather than the protocol.
@@ -89,10 +89,29 @@ public sealed class GeminiVisionReader
     /// </summary>
     private const int OutputRoom = 65536;
 
-    // Invoice reads have no client-side deadline. If Gemini accepted a request and is still working,
-    // let it finish. Explicit HTTP quota/overload responses still advance to the next key/model at
-    // once; only the optional settings-page key check has a short diagnostic timeout.
+    // Invoice reads have no client-side deadline. If Gemini is still working, let it finish. What
+    // ends a read early is Google going quiet - see Silence - never the clock running out on a read
+    // that is still talking. Only the optional settings-page key check has a short timeout.
     private static readonly HttpClient Shared = new() { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>
+    /// How long Google may send nothing at all before a read is given up as dead.
+    ///
+    /// Invoice reads stream (see <see cref="TryOnce{T}"/>) with thought summaries switched on, so a
+    /// healthy read says something every second or two while it thinks and then writes its answer
+    /// in a steady trickle. The longest silence measured inside a healthy read was 32 seconds: a
+    /// Dr Pepper ticket on gemini-3.5-flash on 2026-10-05 that then finished, exact to the cent,
+    /// after 124 seconds. This is about four of those.
+    ///
+    /// It is **not** a deadline on the read. A read that keeps talking takes as long as it takes,
+    /// and Google's own output limit is what ends one that never stops - that rule is why the old
+    /// 90-second deadline went, because it cut off slow reads that would have finished. What this
+    /// catches is the read nobody is working on any more. On 2026-10-05, with 3.7 and 3.8 Flash
+    /// both answering "high demand", two Dr Pepper conversions sat at "Converting..." for over
+    /// five minutes each on a request Google had stopped working on. The request they used, which
+    /// says nothing until the whole answer is ready, could not tell that apart from a slow read.
+    /// </summary>
+    private static readonly TimeSpan Silence = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// How long to wait after being throttled, per attempt.
@@ -116,6 +135,18 @@ public sealed class GeminiVisionReader
     /// prove the behaviour without spending two real minutes doing it.
     /// </summary>
     private readonly TimeSpan[] _busyWaits;
+
+    /// <summary>How long a quiet read is waited on. Injectable for the same reason.</summary>
+    private readonly TimeSpan _silence;
+
+    /// <summary>
+    /// How long to keep asking again while Google says it is busy. Zero, the default, gives up after
+    /// one round, which is what the suite wants; the app passes <see cref="BusyPatience"/>.
+    /// </summary>
+    private readonly TimeSpan _patience;
+
+    /// <summary>The pauses between those rounds. Injectable so the suite need not sit through them.</summary>
+    private readonly TimeSpan[] _roundWaits;
 
     /// <summary>
     /// Where the last successful request came from, so the next page starts there instead of
@@ -142,9 +173,16 @@ public sealed class GeminiVisionReader
     /// Waits between retries of a model that answered 503; null for <see cref="BusyModelWaits"/>.
     /// An empty array retries without waiting, which is only ever what a test wants.
     /// </param>
+    /// <param name="silence">How long a read may go without a word from Google; null for <see cref="Silence"/>.</param>
+    /// <param name="patience">
+    /// How long to keep going back while every model says it is busy; null for none. The app passes
+    /// <see cref="BusyPatience"/>.
+    /// </param>
+    /// <param name="roundWaits">Pauses between those rounds; null for <see cref="BusyRoundWaits"/>.</param>
     public GeminiVisionReader(
         IReadOnlyList<string>? apiKeys, IReadOnlyList<string>? models = null,
-        HttpClient? http = null, TimeSpan[]? backoff = null, TimeSpan[]? busyWaits = null)
+        HttpClient? http = null, TimeSpan[]? backoff = null, TimeSpan[]? busyWaits = null,
+        TimeSpan? silence = null, TimeSpan? patience = null, TimeSpan[]? roundWaits = null)
     {
         _keys = [.. (apiKeys ?? []).Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim())];
         _models = [.. (models ?? []).Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m.Trim())];
@@ -152,6 +190,9 @@ public sealed class GeminiVisionReader
         _http = http ?? Shared;
         _backoff = backoff ?? Backoff;
         _busyWaits = busyWaits ?? BusyModelWaits;
+        _silence = silence ?? Silence;
+        _patience = patience ?? TimeSpan.Zero;
+        _roundWaits = roundWaits ?? BusyRoundWaits;
     }
 
     /// <summary>True when a key is configured at all. No key is not an error, just no second reader.</summary>
@@ -198,7 +239,17 @@ public sealed class GeminiVisionReader
         /// by a worse model than the store had available, which is where bad barcodes come from.
         /// </summary>
         TooFast,
-        Overloaded, Refused, Network, Canceled,
+        /// <summary>
+        /// HTTP 5xx - or an HTTP 200 whose stream Google closed before the answer was finished,
+        /// which is the same fault arriving after the status line instead of in it.
+        /// </summary>
+        Overloaded,
+        Refused, Network, Canceled,
+        /// <summary>
+        /// Google sent nothing for <see cref="Silence"/>. The request was out and accepted, and
+        /// nobody was working on it any more.
+        /// </summary>
+        Stalled,
     }
 
     /// <summary>
@@ -210,6 +261,8 @@ public sealed class GeminiVisionReader
         public int Pages;
         public int Requests { get; private set; }
         public double Waited;
+        /// <summary>Extra rounds asked while Google was busy, beyond the first.</summary>
+        public int Rounds;
         private readonly Dictionary<AttemptOutcome, int> _counts = [];
         public List<string> Failures { get; } = [];
 
@@ -236,8 +289,10 @@ public sealed class GeminiVisionReader
             Add(AttemptOutcome.Refused, "refused (other HTTP error)");
             Add(AttemptOutcome.Network, "could not reach Google");
             Add(AttemptOutcome.Canceled, "no reply came back");
+            Add(AttemptOutcome.Stalled, "went quiet and was given up on");
             Add(AttemptOutcome.Incomplete, "answered but incomplete (HTTP 200)");
-            if (Waited > 0) parts.Add($"waited {Waited:0}s on the free allowance");
+            if (Rounds > 0) parts.Add($"{Rounds} more round{(Rounds == 1 ? "" : "s")} while Google was busy");
+            if (Waited > 0) parts.Add($"waited {Waited:0}s before asking again");
             if (Failures.Count > 0) parts.Add($"failures [{string.Join("; ", Failures)}]");
             parts.Add($"{ms / 1000.0:0.0}s total");
             return string.Join(", ", parts);
@@ -255,9 +310,9 @@ public sealed class GeminiVisionReader
     /// null is the silence this had before 2026-08-13, when a conversion that spent minutes inside
     /// one HTTPS call was indistinguishable from a hung application.
     ///
-    /// **Only what is actually known is said.** A synchronous HTTPS call either returns or it does
-    /// not; nothing in it reports whether the far end is working. So this says which try is out and
-    /// what the finished ones came back as, and never that Google is "processing".
+    /// **Only what is actually known is said.** This says which try is out, what the finished ones
+    /// came back as, and - because reads stream - that Google is answering, but only while its
+    /// reply is actually arriving. It never says Google is "processing" a request that is silent.
     /// </summary>
     public Action<string>? Progress { get; set; }
 
@@ -281,6 +336,7 @@ public sealed class GeminiVisionReader
         AttemptOutcome.Refused => "Google refused the request",
         AttemptOutcome.Network => "could not reach Google",
         AttemptOutcome.Canceled => "no reply came back",
+        AttemptOutcome.Stalled => "Google stopped answering",
         AttemptOutcome.Incomplete => "the reply was incomplete",
         _ => "read",
     };
@@ -538,6 +594,45 @@ public sealed class GeminiVisionReader
     }
 
     /// <summary>
+    /// Reads one invoice from any vendor in one request: a scan, a PDF with real text, or a photo
+    /// (see <see cref="InvoicePictures"/>). Its own prompt and schema, so it cannot change a byte of
+    /// the five tuned vendors' requests. No invoice number or date field, like theirs.
+    /// </summary>
+    public AnyInvoiceVisionReading ReadAnyInvoice(byte[] fileBytes)
+    {
+        if (!IsConfigured) return AnyInvoiceVisionReading.Off("AI reading is not configured.");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var tally = new Tally();
+        bool reachedApi = false;
+        try
+        {
+            var parts = InvoicePictures.Prepare(fileBytes ?? []);
+            if (parts.Count == 0)
+                return AnyInvoiceVisionReading.Unreadable("The file had no page or picture to read.");
+            tally.Pages = parts.Count;
+
+            string body = BuildAnyInvoiceBody(parts);
+            var reading = ReadSpecialPage(
+                body, tally, ParseAnyInvoiceReply, out reachedApi, ReadingPhase);
+            string note = tally.Describe(clock.ElapsedMilliseconds, reading?.Rows.Count ?? 0);
+            if (reading is null)
+                return reachedApi
+                    ? AnyInvoiceVisionReading.Unreadable(note)
+                    : AnyInvoiceVisionReading.Unavailable(note);
+
+            return reading with { Status = AnyInvoiceVisionStatus.Success, Note = note };
+        }
+        catch
+        {
+            string note = tally.Describe(clock.ElapsedMilliseconds, 0);
+            return reachedApi
+                ? AnyInvoiceVisionReading.Unreadable(note)
+                : AnyInvoiceVisionReading.Unavailable(note);
+        }
+    }
+
+    /// <summary>
     /// Checks that the key works, and says so in words an operator can act on.
     ///
     /// The alternative is finding out on a live delivery, which is the same argument the Test Email
@@ -650,7 +745,8 @@ public sealed class GeminiVisionReader
                 anythingWorthWaitingFor |= outcome
                     is AttemptOutcome.RateLimited or AttemptOutcome.TooFast
                     or AttemptOutcome.Overloaded
-                    or AttemptOutcome.Network or AttemptOutcome.Canceled;
+                    or AttemptOutcome.Network or AttemptOutcome.Canceled
+                    or AttemptOutcome.Stalled;
             }
 
             // Every key on every model is empty. Waiting is the only thing left, and only for as
@@ -680,8 +776,25 @@ public sealed class GeminiVisionReader
     /// So the cost is bounded and knowable: at most one request per combination, plus one. It used
     /// to be three full sweeps with 20- and 50-second sleeps between them, which on 2026-08-13 took
     /// a single Dr Pepper invoice past four minutes with the window saying only "Converting...".
-    /// There is no sleep on this path at all, and no client-side deadline that would guess at
-    /// whether Google is still working — see <see cref="Shared"/>.
+    /// There is no sleep on this path apart from a busy model's one short retry, and no
+    /// client-side deadline that would guess at whether Google is still working: a read is given
+    /// up only once Google has gone quiet - see <see cref="Silence"/>.
+    ///
+    /// **A busy model is busy for every key.** "This model is currently experiencing high demand"
+    /// is about the model, so once a model has come back busy (or cut a reply off, or gone quiet)
+    /// the other keys are not asked about it during this read. Asking them only spent requests:
+    /// the store's dashboard on 2026-10-05 counted 6 of the day's 20 against gemini-3.7-flash for
+    /// two Dr Pepper conversions it never once answered.
+    ///
+    /// **When Google is busy, the app keeps asking** (2026-10-06). A round that ends with nothing
+    /// read, where at least one model said it was busy, is followed by another round after a pause
+    /// (<see cref="BusyRoundWaits"/>), for as long as the reader's patience lasts. That is
+    /// <see cref="BusyPatience"/> in the app and nothing in the suite. A later round asks each model
+    /// once, with no quick retry, because every busy reply is one of the day's 20. It keeps to the
+    /// same rule about keys: a busy model is not asked on the other keys. Two reasons: busy is per
+    /// model, and spreading one workload over several accounts to get past a limit is what Google
+    /// calls circumvention. A round where nothing was busy - the day's allowance gone everywhere,
+    /// refused, unreachable - is not waited on.
     ///
     /// <paramref name="apiAnswered"/> is the whole of the unavailable/unreadable distinction. True
     /// means some combination returned HTTP 200, so the service reached the invoice and the page
@@ -697,24 +810,54 @@ public sealed class GeminiVisionReader
 
         int startingAt = Math.Abs(Volatile.Read(ref _at) % Combinations);
         int answeredAt = -1;
+        var patience = System.Diagnostics.Stopwatch.StartNew();
 
-        for (int tried = 0; tried < Combinations; tried++)
+        for (int round = 0; ; round++)
         {
-            int index = (startingAt + tried) % Combinations;
-            var reading = AttemptRung(
-                index, body, tally, parse, phase, tried + 1, Combinations,
-                ref apiAnswered, ref answeredAt);
-            if (reading is not null)
-            {
-                Interlocked.Exchange(ref _at, index);
-                return reading;
-            }
-        }
+            var busyModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool busy = false;
+            // Only the first round gets a busy model's quick second go. A later round already comes
+            // minutes after the last busy reply.
+            TimeSpan[] quickRetries = round == 0 ? _busyWaits : [];
+            string roundPhase = round == 0 || phase.Length == 0 ? phase : $"{phase}, round {round + 1}";
 
-        // Nothing answered at all. Every rung has now had its say, including the extra goes a busy
-        // one gets, so asking the ladder again would only make the operator wait a second time for
-        // the same silence.
-        if (answeredAt < 0) return null;
+            for (int tried = 0; tried < Combinations; tried++)
+            {
+                int index = (startingAt + tried) % Combinations;
+                string model = Pair(index).Model;
+                if (busyModels.Contains(model)) continue;
+
+                var reading = AttemptRung(
+                    index, body, tally, parse, roundPhase, tried + 1, Combinations, quickRetries,
+                    ref apiAnswered, ref answeredAt, out bool modelBusy, out AttemptOutcome last);
+                if (reading is not null)
+                {
+                    Interlocked.Exchange(ref _at, index);
+                    return reading;
+                }
+                if (modelBusy) busyModels.Add(model);
+                if (last is AttemptOutcome.Overloaded or AttemptOutcome.Stalled or AttemptOutcome.TooFast)
+                    busy = true;
+            }
+
+            // Something answered, badly: that is the fresh attempt below, not another round.
+            if (answeredAt >= 0) break;
+
+            // Nothing answered. Unless Google said it was busy, asking again later changes nothing:
+            // an allowance used up today does not come back this afternoon.
+            if (!busy) return null;
+
+            TimeSpan wait = _roundWaits.Length == 0
+                ? TimeSpan.Zero
+                : _roundWaits[Math.Min(round, _roundWaits.Length - 1)];
+            if (patience.Elapsed + wait >= _patience) return null;
+
+            DateTime until = DateTime.Now + (_patience - patience.Elapsed);
+            Report(phase, $"Google's AI is busy right now. Trying again in {Spoken(wait)} - the "
+                          + $"converter keeps trying until {until:h:mm tt}.");
+            if (wait > TimeSpan.Zero) { Thread.Sleep(wait); tally.Waited += wait.TotalSeconds; }
+            tally.Rounds++;
+        }
 
         // Something answered, and answered badly. One fresh attempt, at the combination that proved
         // it can reply — not another sweep.
@@ -727,14 +870,19 @@ public sealed class GeminiVisionReader
 
     /// <summary>
     /// How long to wait before giving a busy model another go, and — by its length — how many extra
-    /// goes it gets. Two, a few seconds apart.
+    /// goes it gets. One, five seconds later.
     ///
-    /// A 503 says Google's own server is busy, which is nobody's allowance and clears on its own,
-    /// so the rung that is worth insisting on is the one already in hand: the best model the ladder
-    /// has reached. Dropping to a worse model over a blip that lasts seconds is how an invoice ends
-    /// up read by something that transposes digits — and dropping off the ladder entirely is how a
+    /// The rung worth insisting on is the one already in hand: the best model the ladder has
+    /// reached. Dropping to a worse model over a blip that lasts seconds is how an invoice ends up
+    /// read by something that transposes digits — and dropping off the ladder entirely is how a
     /// readable invoice gets refused, which is what happened to the store at 17:20 on 2026-08-13
     /// while the same file went through in one request two minutes later.
+    ///
+    /// It used to be two extra goes, on the belief that a 503 is nobody's allowance. It is not
+    /// free: on 2026-10-05 the store's dashboard counted every busy reply against the day's 20, so
+    /// gemini-3.7-flash showed 6 used for two conversions it never answered. "Spikes in demand are
+    /// usually temporary" means minutes, not the seconds these waits cover, so one quick retry
+    /// catches a blip and a second one mostly spent a request.
     ///
     /// The same waits serve a **per-minute** 429, which is the other fault that clears on its own.
     /// **A per-day 429 is still never retried.** An exhausted allowance does not come back before
@@ -742,27 +890,62 @@ public sealed class GeminiVisionReader
     /// for minutes; <see cref="IsAPerMinuteLimit"/> is what keeps the two apart, and an unclassified
     /// 429 counts as the per-day one.
     /// </summary>
-    private static readonly TimeSpan[] BusyModelWaits =
-        [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6)];
+    private static readonly TimeSpan[] BusyModelWaits = [TimeSpan.FromSeconds(5)];
 
     /// <summary>
-    /// One rung of the ladder, including the extra goes it gets if it comes back busy.
+    /// How long the app keeps asking while Google says every model is busy, before it gives up and
+    /// offers the legacy reader.
+    ///
+    /// Until 2026-10-06 a busy Google was given about a minute. That morning the store's three Dr
+    /// Pepper attempts between 10:20 and 10:24 were each given up that way, six requests and six
+    /// 503s on every model. An hour later a one-word probe still got 503 from every Flash model on
+    /// both keys. Asking faster or from another account would not have helped; asking again a few
+    /// minutes later is what Google's "spikes in demand are usually temporary" means. The user asked
+    /// for it to keep retrying until it works.
+    ///
+    /// Fifteen minutes is a long time at a counter, but the row says what it is waiting for and
+    /// until when. Closing the app still stops it. During a busy spell that outlasts this, the paid
+    /// tier is the real answer, not a longer wait.
+    /// </summary>
+    public static readonly TimeSpan BusyPatience = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The pauses between rounds while Google is busy; the last one repeats. They grow because every
+    /// busy reply counts against the day's 20 per model, so a round costs up to one request per
+    /// model. Over <see cref="BusyPatience"/> this is about six more rounds - roughly eight requests
+    /// per model per invoice in the worst case - rather than one every few seconds.
+    /// </summary>
+    private static readonly TimeSpan[] BusyRoundWaits =
+    [
+        TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(3),
+    ];
+
+    private static string Spoken(TimeSpan wait) => wait.TotalSeconds < 90
+        ? $"{wait.TotalSeconds:0} seconds"
+        : $"{wait.TotalMinutes:0} minutes";
+
+    /// <summary>
+    /// One rung of the ladder, including the extra go it gets if it comes back busy.
     ///
     /// The retry happens **here**, while this key and model are still the current rung, rather than
-    /// after the whole ladder has been walked. That is what "try the best model a couple of times
-    /// before dropping" means: 3.7 on key 1 three times over nine seconds, then 3.7 on key 2, then
-    /// 3.6 on key 1, and so on down. Any number of keys works — the ladder is every configured key
-    /// on one model before the next model, whether that is one key or six.
+    /// after the whole ladder has been walked: 3.7 on key 1, again five seconds later, then 3.6 on
+    /// key 1, and so on down. Any number of keys works — the ladder is every configured key on one
+    /// model before the next model — except that a model which stayed busy is reported through
+    /// <paramref name="modelBusy"/> and the other keys are not asked about it.
     /// </summary>
     private T? AttemptRung<T>(
         int index, string body, Tally tally, Func<Stream, T?> parse, string phase,
-        int number, int of, ref bool apiAnswered, ref int answeredAt) where T : class
+        int number, int of, TimeSpan[] retries, ref bool apiAnswered, ref int answeredAt,
+        out bool modelBusy, out AttemptOutcome last)
+        where T : class
     {
+        modelBusy = false;
         for (int go = 0; ; go++)
         {
             var reading = Attempt(
                 index, body, tally, parse, phase, number, of,
                 out bool answered, out AttemptOutcome outcome, out TimeSpan? askedToWait);
+            last = outcome;
             if (answered)
             {
                 apiAnswered = true;
@@ -770,20 +953,32 @@ public sealed class GeminiVisionReader
             }
             if (reading is not null) return reading;
 
+            // A read that went quiet has already cost the operator two minutes; it is not asked
+            // again this round, on this key or any other.
+            if (outcome == AttemptOutcome.Stalled)
+            {
+                modelBusy = true;
+                return null;
+            }
+
             // Two faults earn another go on this rung, and only while there are goes left: Google's
             // server being busy, and this key having sent too many requests this minute. Both clear
             // on their own. Anything else - the day's allowance gone, refused, unreachable, or
             // answering badly - is not fixed by waiting.
             bool worthWaitingFor = outcome is AttemptOutcome.Overloaded or AttemptOutcome.TooFast;
-            if (!worthWaitingFor || go >= _busyWaits.Length) return null;
+            if (!worthWaitingFor || go >= retries.Length)
+            {
+                modelBusy = outcome == AttemptOutcome.Overloaded;
+                return null;
+            }
 
             // Google's own retryDelay when it gave one, since it knows when the window reopens.
-            TimeSpan wait = askedToWait ?? _busyWaits[go];
+            TimeSpan wait = askedToWait ?? retries[go];
             Report(phase, outcome == AttemptOutcome.TooFast
                 ? "That key has sent too many requests this minute - not your daily allowance. "
                   + $"Trying the same model again in {wait.TotalSeconds:0} seconds."
-                : "Google's AI is busy - their server, not your allowance. Trying the same "
-                  + $"model again in {wait.TotalSeconds:0} seconds.");
+                : "Google's AI is busy right now. Trying the same model again in "
+                  + $"{wait.TotalSeconds:0} seconds.");
             if (wait > TimeSpan.Zero) { Thread.Sleep(wait); tally.Waited += wait.TotalSeconds; }
         }
     }
@@ -799,22 +994,40 @@ public sealed class GeminiVisionReader
 
         Report(phase, $"try {number} of {of} sent (key {keyNumber}, {model}). No reply yet.");
         var reading = TryOnce(
-            body, key, model, parse, out apiAnswered, out outcome, out string? failure,
+            body, key, model, parse, phase, out apiAnswered, out outcome, out string? failure,
             out askedToWait);
         tally.Record(outcome, keyNumber, model, failure);
         if (reading is null) Report(phase, $"try {number} of {of}: {Describe(outcome)}.");
         return reading;
     }
 
+    /// <summary>How often a read that is still coming in says so.</summary>
+    private static readonly TimeSpan ProgressEvery = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// One request against one key and model, classified by what actually came back.
     ///
-    /// There is no way from here to tell a request Google is working on from one it has quietly
-    /// stopped working on: a synchronous call either returns or it does not, and nothing in the
-    /// protocol reports progress. Nothing in this class claims otherwise.
+    /// The request **streams** (`streamGenerateContent` as server-sent events) and asks for thought
+    /// summaries, and both exist for one reason: so a read Google is working on can be told apart
+    /// from one it has stopped working on. The one-shot request this replaced says nothing until
+    /// the whole answer is ready, so a dead request and a slow one looked identical and the only
+    /// choices were a deadline that cut off slow reads or no deadline at all - and on 2026-10-05 no
+    /// deadline at all left two Dr Pepper conversions at "Converting..." for over five minutes each.
+    ///
+    /// The answer is still the answer: the thought summaries are dropped, the answer's text is put
+    /// back together and handed to the same parser in the same envelope as before. Nothing about how
+    /// an invoice is read has changed - only how a dead request is noticed:
+    ///
+    /// - a stream that closes before Google says it has finished was cut off on Google's side, which
+    ///   is a busy model whose fault arrived after the status line instead of in it (3.6 Flash did
+    ///   that the same night, four seconds in);
+    /// - an error event after the 200 is the same fault as the matching status code;
+    /// - nothing at all for <see cref="Silence"/> means nobody is working on it.
+    ///
+    /// A reply that is not an event stream is read whole, the way every reply used to be.
     /// </summary>
     private T? TryOnce<T>(
-        string body, string key, string model, Func<Stream, T?> parse,
+        string body, string key, string model, Func<Stream, T?> parse, string phase,
         out bool apiAnswered, out AttemptOutcome outcome, out string? failure,
         out TimeSpan? askedToWait) where T : class
     {
@@ -822,24 +1035,50 @@ public sealed class GeminiVisionReader
         outcome = AttemptOutcome.Read;
         failure = null;
         askedToWait = null;
+        using var quiet = new CancellationTokenSource(_silence);
         try
         {
             using var request = new HttpRequestMessage(
-                HttpMethod.Post, $"{Endpoint}/{model}:generateContent");
+                HttpMethod.Post, $"{Endpoint}/{model}:streamGenerateContent?alt=sse");
             request.Headers.TryAddWithoutValidation("x-goog-api-key", key);
             request.Content = new StringContent(
                 body, Encoding.UTF8, new MediaTypeHeaderValue("application/json"));
 
-            using var response = _http.Send(request, CancellationToken.None);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            using var response = _http.Send(
+                request, HttpCompletionOption.ResponseHeadersRead, quiet.Token);
             if (response.IsSuccessStatusCode)
             {
-                apiAnswered = true;
-
                 // Buffered so that a reply which failed to parse can still be asked *why*. One page
                 // of JSON; the copy costs nothing next to the request that fetched it.
                 using var buffer = new MemoryStream();
-                using (var stream = response.Content.ReadAsStream(CancellationToken.None))
+                if (IsEventStream(response))
+                {
+                    var streamed = ReadEvents(response, quiet, phase, model, clock);
+                    if (streamed.ErrorCode is int code)
+                    {
+                        using var late = new MemoryStream(Encoding.UTF8.GetBytes(streamed.ErrorJson ?? ""));
+                        Classify(code, late, out outcome, out failure, out askedToWait);
+                        failure += " after the reply had started";
+                        return null;
+                    }
+                    if (!streamed.Finished)
+                    {
+                        outcome = AttemptOutcome.Overloaded;
+                        failure = "HTTP 200 reply cut off by Google before the answer";
+                        return null;
+                    }
+                    streamed.WriteEnvelope(buffer);
+                }
+                else
+                {
+                    using var stream = response.Content.ReadAsStream(quiet.Token);
                     stream.CopyTo(buffer);
+                }
+
+                // The whole reply is in; nothing from here on is waiting on Google.
+                quiet.CancelAfter(Timeout.InfiniteTimeSpan);
+                apiAnswered = true;
                 buffer.Position = 0;
                 var reading = parse(buffer);
                 if (reading is null)
@@ -854,31 +1093,29 @@ public sealed class GeminiVisionReader
             }
 
             int status = (int)response.StatusCode;
+            using var refusal = new MemoryStream();
             if (status == 429)
             {
-                // Ask Google *which* 429 this is before deciding it is hopeless. A per-day quota is
-                // gone until tomorrow and waiting on it is the bug that used to leave an invoice at
-                // "Converting..." for minutes; a per-minute quota clears on its own and dropping the
-                // best model over one is how nine invoices in a row got read by a worse one.
-                using var refusal = new MemoryStream();
-                using (var stream = response.Content.ReadAsStream(CancellationToken.None))
-                    stream.CopyTo(refusal);
+                using var stream = response.Content.ReadAsStream(quiet.Token);
+                stream.CopyTo(refusal);
                 refusal.Position = 0;
-                bool perMinute = IsAPerMinuteLimit(refusal, out askedToWait);
-                outcome = perMinute ? AttemptOutcome.TooFast : AttemptOutcome.RateLimited;
-                failure = perMinute ? "HTTP 429 (per-minute limit)" : "HTTP 429 (daily allowance)";
-                return null;
             }
-
-            outcome = status >= 500 ? AttemptOutcome.Overloaded : AttemptOutcome.Refused;
-            failure = $"HTTP {status}";
+            Classify(status, refusal, out outcome, out failure, out askedToWait);
+            return null;
+        }
+        catch when (quiet.IsCancellationRequested)
+        {
+            // Whatever was in flight when the silence ran out - the status line, the next event -
+            // threw because of it. Google had stopped working on this request.
+            outcome = AttemptOutcome.Stalled;
+            failure = $"nothing from Google for {_silence.TotalSeconds:0}s";
             return null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
         {
-            // Production invoice reads have no client deadline, so a cancellation here is the
-            // connection or the caller, never a timer this class set. It is counted apart from a
-            // real 429: "throttled" was the wrong word for it and sent people to the wrong fix.
+            // Not the silence (that is caught above), so a cancellation here is the connection or
+            // the caller. It is counted apart from a real 429: "throttled" was the wrong word for it
+            // and sent people to the wrong fix.
             bool canceled = ex is TaskCanceledException or OperationCanceledException;
             outcome = canceled ? AttemptOutcome.Canceled : AttemptOutcome.Network;
             failure = ex is HttpRequestException http && http.StatusCode is not null
@@ -895,6 +1132,167 @@ public sealed class GeminiVisionReader
             return null;
         }
     }
+
+    /// <summary>
+    /// What a refusal means, whether it came as the status line or as an error event after a 200.
+    ///
+    /// A 429 asks Google *which* 429 it is before deciding it is hopeless. A per-day quota is gone
+    /// until tomorrow and waiting on it is the bug that used to leave an invoice at "Converting..."
+    /// for minutes; a per-minute quota clears on its own and dropping the best model over one is how
+    /// nine invoices in a row got read by a worse one.
+    /// </summary>
+    private static void Classify(
+        int status, Stream body, out AttemptOutcome outcome, out string failure,
+        out TimeSpan? askedToWait)
+    {
+        askedToWait = null;
+        if (status == 429)
+        {
+            bool perMinute = IsAPerMinuteLimit(body, out askedToWait);
+            outcome = perMinute ? AttemptOutcome.TooFast : AttemptOutcome.RateLimited;
+            failure = perMinute ? "HTTP 429 (per-minute limit)" : "HTTP 429 (daily allowance)";
+            return;
+        }
+        outcome = status >= 500 ? AttemptOutcome.Overloaded : AttemptOutcome.Refused;
+        failure = $"HTTP {status}";
+    }
+
+    /// <summary>
+    /// Asks for thought summaries. Nothing reads them - <see cref="IsThought"/> drops them from the
+    /// answer - but they arrive every second or two while the model works, and that steady trickle
+    /// is what lets a quiet request be told apart from a busy one (<see cref="Silence"/>).
+    /// </summary>
+    private static void WriteHeartbeat(Utf8JsonWriter w)
+    {
+        w.WriteStartObject("thinkingConfig");
+        w.WriteBoolean("includeThoughts", true);
+        w.WriteEndObject();
+    }
+
+    private static bool IsEventStream(HttpResponseMessage response) => string.Equals(
+        response.Content.Headers.ContentType?.MediaType, "text/event-stream",
+        StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What an event-stream reply came to.</summary>
+    private sealed class StreamedReply
+    {
+        /// <summary>The answer's own text, thought summaries left out.</summary>
+        public StringBuilder Answer { get; } = new();
+        public string? FinishReason { get; set; }
+
+        /// <summary>Google refused the request outright; it answered, with nothing.</summary>
+        public bool Blocked { get; set; }
+
+        public int? ErrorCode { get; set; }
+        public string? ErrorJson { get; set; }
+
+        /// <summary>Google said it was done. A stream that simply stops was cut off.</summary>
+        public bool Finished => FinishReason is not null || Blocked;
+
+        /// <summary>The reply as the one-shot request would have returned it, for the same parsers.</summary>
+        public void WriteEnvelope(Stream to)
+        {
+            using var w = new Utf8JsonWriter(to);
+            w.WriteStartObject();
+            w.WriteStartArray("candidates");
+            w.WriteStartObject();
+            w.WriteStartObject("content");
+            w.WriteStartArray("parts");
+            if (Answer.Length > 0)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", Answer.ToString());
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteEndObject();
+            if (FinishReason is not null) w.WriteString("finishReason", FinishReason);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+    }
+
+    /// <summary>
+    /// Reads the reply's events until Google finishes, fails or closes the stream. Every line that
+    /// arrives restarts the silence clock, because a line is proof somebody is still working on it.
+    /// </summary>
+    private StreamedReply ReadEvents(
+        HttpResponseMessage response, CancellationTokenSource quiet, string phase, string model,
+        System.Diagnostics.Stopwatch clock)
+    {
+        var reply = new StreamedReply();
+        var data = new StringBuilder();
+        TimeSpan nextWord = TimeSpan.Zero;
+        using var reader = new StreamReader(response.Content.ReadAsStream(quiet.Token), Encoding.UTF8);
+        while (reader.ReadLineAsync(quiet.Token).AsTask().GetAwaiter().GetResult() is string line)
+        {
+            quiet.CancelAfter(_silence);
+            if (line.StartsWith("data:", StringComparison.Ordinal))
+            {
+                if (data.Length > 0) data.Append('\n');
+                data.Append(line.AsSpan(5).TrimStart(' '));
+                continue;
+            }
+            if (line.Length > 0 || data.Length == 0) continue;
+
+            bool goOn = Take(reply, data.ToString());
+            data.Clear();
+            if (!goOn) return reply;
+
+            if (clock.Elapsed >= nextWord)
+            {
+                Report(phase, $"Google is answering ({model}) - {clock.Elapsed.TotalSeconds:0} "
+                              + "seconds so far.");
+                nextWord = clock.Elapsed + ProgressEvery;
+            }
+        }
+        if (data.Length > 0) Take(reply, data.ToString());
+        return reply;
+    }
+
+    /// <summary>Folds one event into the reply. False when it was an error, which ends the stream.</summary>
+    private static bool Take(StreamedReply reply, string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.TryGetProperty("error", out var error))
+        {
+            reply.ErrorCode = error.ValueKind == JsonValueKind.Object
+                              && error.TryGetProperty("code", out var code)
+                              && code.TryGetInt32(out int number) ? number : 500;
+            reply.ErrorJson = json;
+            return false;
+        }
+
+        if (root.TryGetProperty("promptFeedback", out var feedback)
+            && feedback.ValueKind == JsonValueKind.Object
+            && feedback.TryGetProperty("blockReason", out _))
+            reply.Blocked = true;
+
+        if (!root.TryGetProperty("candidates", out var candidates)
+            || candidates.ValueKind != JsonValueKind.Array
+            || candidates.GetArrayLength() == 0) return true;
+
+        var candidate = candidates[0];
+        if (candidate.TryGetProperty("content", out var content)
+            && content.ValueKind == JsonValueKind.Object
+            && content.TryGetProperty("parts", out var parts)
+            && parts.ValueKind == JsonValueKind.Array)
+            foreach (var part in parts.EnumerateArray())
+                if (!IsThought(part) && part.TryGetProperty("text", out var text)
+                    && text.ValueKind == JsonValueKind.String)
+                    reply.Answer.Append(text.GetString());
+
+        if (candidate.TryGetProperty("finishReason", out var reason)
+            && reason.ValueKind == JsonValueKind.String)
+            reply.FinishReason = reason.GetString();
+        return true;
+    }
+
+    /// <summary>A thought summary is Google showing its working. It is never part of the answer.</summary>
+    private static bool IsThought(JsonElement part) =>
+        part.TryGetProperty("thought", out var thought) && thought.ValueKind == JsonValueKind.True;
 
     private static string BuildBody(byte[] png, VisionVendor vendor)
     {
@@ -926,6 +1324,7 @@ public sealed class GeminiVisionReader
             // Reading printed digits is not a creative task; nothing here should vary run to run.
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteSchema(w, vendor);
             w.WriteEndObject();
@@ -965,6 +1364,7 @@ public sealed class GeminiVisionReader
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteDrPepperPrimarySchema(w);
             w.WriteEndObject();
@@ -1071,6 +1471,7 @@ public sealed class GeminiVisionReader
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteBimboPrimarySchema(w);
             w.WriteEndObject();
@@ -1166,6 +1567,7 @@ public sealed class GeminiVisionReader
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteBlueBellPrimarySchema(w);
             w.WriteEndObject();
@@ -1274,6 +1676,7 @@ public sealed class GeminiVisionReader
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteChubiwinosPrimarySchema(w);
             w.WriteEndObject();
@@ -1408,6 +1811,7 @@ public sealed class GeminiVisionReader
             w.WriteStartObject("generationConfig");
             w.WriteNumber("temperature", 0);
             w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
             w.WriteString("responseMimeType", "application/json");
             WriteRedBullPrimarySchema(w);
             w.WriteEndObject();
@@ -1511,6 +1915,228 @@ public sealed class GeminiVisionReader
         looking again, return null. For a barcode, return legible digits as read even when the check
         still fails; return null only when the printed digit cell is genuinely illegible.
         """;
+
+    /// <summary>
+    /// Any vendor's invoice: every picture (or the whole PDF) in one request, then the prompt.
+    /// </summary>
+    private static string BuildAnyInvoiceBody(IReadOnlyList<InvoicePicture> parts)
+    {
+        var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteStartArray("contents");
+            w.WriteStartObject();
+            w.WriteStartArray("parts");
+            for (int index = 0; index < parts.Count; index++)
+            {
+                w.WriteStartObject();
+                w.WriteString("text", parts[index].MimeType == "application/pdf"
+                    ? "The invoice, as a PDF:"
+                    : $"Invoice picture {index + 1} of {parts.Count}:");
+                w.WriteEndObject();
+                w.WriteStartObject();
+                w.WriteStartObject("inline_data");
+                w.WriteString("mime_type", parts[index].MimeType);
+                w.WriteBase64String("data", parts[index].Bytes);
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+            w.WriteStartObject();
+            w.WriteString("text", AnyInvoicePrompt);
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteStartObject("generationConfig");
+            w.WriteNumber("temperature", 0);
+            w.WriteNumber("maxOutputTokens", OutputRoom);
+            WriteHeartbeat(w);
+            w.WriteString("responseMimeType", "application/json");
+            WriteAnyInvoiceSchema(w);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// The one prompt for every vendor the converter has no reader of its own for. It is the
+    /// procedure in analysis/INVOICE_TO_MODISOFT.md, which turned Silver Eagle, Faust, Yumi, Pepsi,
+    /// Frito-Lay and Mini Melts invoices into files that imported exactly.
+    ///
+    /// The barcode rule is the opposite of Dr Pepper's and Red Bull's on purpose: those vendors
+    /// print a whole UPC-A, so the model may count to twelve. An unknown vendor may print a body
+    /// with no check digit (Bimbo, Chubiwinos) or a padded one (Blue Bell), and a model told to
+    /// reach twelve digits pads one into a plausible wrong code. So it copies what is printed, and
+    /// Core completes a code only where the arithmetic is exact (<see cref="AnyInvoiceParser.Barcode"/>).
+    /// </summary>
+    private const string AnyInvoicePrompt = """
+        You are reading one supplier invoice, delivery ticket or receipt for a convenience store.
+        It can come from any supplier. It may be a scan, a PDF or phone photos, and one invoice can
+        run over several pages or several overlapping photos of one long receipt. Nothing downstream
+        re-reads the paper, so your answer is what goes into the store's back office. Read only
+        what is physically printed. Never use a product catalogue, a remembered product, a
+        remembered barcode or manufacturer prefix, or a plausible repair. Inspect every printed
+        character twice.
+
+        vendorName is the supplier's company name as printed at the top of the invoice: not the
+        store's name, not the driver, and not a brand of a product on it.
+
+        Return every product line exactly once, in printed order. Where photos or pages overlap, a
+        line that appears twice in the pictures is still one line. Leave out headings, subtotals,
+        totals, taxes, deposits, fees, surcharges, invoice-level discounts, payments, balances,
+        notes, and any line that delivered nothing (a quantity of 0 and no money). Equipment and
+        display material that is not for sale (baskets, racks, signs, stickers) is not a product
+        line even when it prints a code.
+
+        For each product line:
+
+        description: the product description as printed.
+
+        itemNumber: the supplier's own item or product number, when one is printed.
+
+        barcode: the product's UPC or EAN digits exactly as printed, without spaces or dashes. Copy
+        every printed digit in order. Do not add, drop, pad or compute any digit: no leading zero
+        and no check digit, even when the code looks short, because the store's system completes
+        a short code itself and a digit you add would put the delivery on the wrong product. A
+        code can be printed above or below the description, or wrap onto the next printed line;
+        join the pieces. When a line prints more than one code (a case or shipper code and a unit,
+        pack or retail code), return the one for what the store sells (the unit, pack or retail
+        code), never the case code. When only part of a code is printed (for example its last
+        five digits), return just those digits. Return null when the line prints no code.
+        For a 12-digit code, check the last digit against the other eleven with the UPC-A rule;
+        for a 13-digit code use the EAN-13 rule. If it fails, look at each printed digit again.
+        Change a digit only when the second look at the printed shape shows a different
+        character, never to make the check digit come out. Return the digits as read even if the
+        check still fails.
+
+        quantity: the count the line is billed by - the number the price is multiplied by to make
+        the line's amount - whether that counts cases, boxes, packs or single items. Copy it as
+        printed, including a fraction or decimal. When a line prints a case count and a separate
+        count of single items, quantity is the case count.
+
+        billedBy: decide it from what the price buys. "case" when the price is for a case, box,
+        carton, dozen or pack holding several sellable items; "item" when the price is what one
+        sellable item (one each, can, cup, bar, loaf, pint) costs.
+
+        unitsPerCase: how many sellable items ONE billed quantity holds, so that quantity x
+        unitsPerCase is the number of sellable items on the line. A sellable item is whatever the
+        barcode you returned is printed on: if the code belongs to a 6-pack, a case of four
+        6-packs is 4, not 24; if it belongs to a single can, a case of 24 cans is 24. DZ (a
+        dozen) is 12. For an "item" line it is 1. A column counting how many boxes, totes or
+        cartons the line was packed into (BX CNT, BOXES) is not unitsPerCase.
+
+        unitsSource: where unitsPerCase came from. "printed" when the invoice states it for this
+        line: a pack, case pack, U/C, PPC or units-per-case column, or a separate count of single
+        items that divides by the quantity. "description" when it only comes from wording in the
+        description (DZ, 2/12, 4/6PK, 24/16OZ, 12PK, 18CT). "unknown" when nothing on the paper
+        says; give your best estimate in unitsPerCase anyway.
+
+        totalUnits: the line's own printed count of single sellable items (a UNITS or EACHES
+        column), only when one is printed. Otherwise null.
+
+        price: the price per billed quantity, as printed.
+
+        amount: the line's extended amount - the money this line adds to the invoice - as
+        printed. It is normally the rightmost money figure on the line, after any discount
+        printed on that line.
+
+        isCredit: true for a returned, credited, damaged, out-of-date or picked-up line (anything
+        that takes money off the invoice), false for a delivery. Return quantities and money as
+        magnitudes without signs; isCredit carries the direction.
+
+        For the whole invoice:
+
+        invoiceTotal: the final amount the invoice says is owed for this delivery (TOTAL, INVOICE
+        TOTAL, AMOUNT DUE, NET DUE, TOTAL DUE, BALANCE DUE), after any returns or credits printed on
+        it are taken off. Not a previous balance, an account balance or a payment. Copy it as
+        printed, with a minus sign or brackets if it is a credit.
+
+        totalQuantity: the invoice's own printed count of what it delivered (total cases, total
+        units, total pieces), only when one is printed.
+
+        charges: every figure that is part of invoiceTotal but is not a product line: sales tax,
+        deposits, CRV, fuel or delivery surcharges, invoice-level discounts or allowances,
+        rounding. label as printed; amount as printed, negative for a discount or allowance.
+
+        Ignore the printed invoice number and date completely. They are typed in separately, and
+        the response has no field for either.
+
+        Before you answer, work through every one of these checks and go back to the pictures for
+        any line that fails one:
+
+        1. Each delivery line: quantity x price, less any discount printed on the line, equals
+           amount.
+        2. The line amounts, with credits taken off, plus the charges, equal invoiceTotal. If not,
+           look for a line you missed or read twice, especially where photos overlap or a page
+           breaks.
+        3. If the invoice prints a total count, the lines add up to it.
+        4. Every 12- and 13-digit barcode passes its check digit.
+
+        These checks tell you where to look again. They never tell you what to write: never change
+        a printed figure to make a check pass. If a figure is still unreadable after looking again,
+        return null for it.
+        """;
+
+    private static void WriteAnyInvoiceSchema(Utf8JsonWriter w)
+    {
+        string[] rowFields =
+        [
+            "itemNumber", "description", "barcode", "quantity", "billedBy", "unitsPerCase",
+            "unitsSource", "totalUnits", "price", "amount",
+        ];
+
+        w.WriteStartObject("responseSchema");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+
+        WriteField(w, "vendorName", "string");
+
+        w.WriteStartObject("rows");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        foreach (string name in rowFields) WriteField(w, name, "string");
+        WriteField(w, "isCredit", "boolean");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        foreach (string name in rowFields) w.WriteStringValue(name);
+        w.WriteStringValue("isCredit");
+        w.WriteEndArray();
+        w.WriteStartArray("required");
+        w.WriteStringValue("description");
+        w.WriteStringValue("isCredit");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        w.WriteStartObject("charges");
+        w.WriteString("type", "array");
+        w.WriteStartObject("items");
+        w.WriteString("type", "object");
+        w.WriteStartObject("properties");
+        WriteField(w, "label", "string");
+        WriteField(w, "amount", "string");
+        w.WriteEndObject();
+        w.WriteStartArray("propertyOrdering");
+        w.WriteStringValue("label");
+        w.WriteStringValue("amount");
+        w.WriteEndArray();
+        w.WriteEndObject();
+        w.WriteEndObject();
+
+        WriteField(w, "invoiceTotal", "string");
+        WriteField(w, "totalQuantity", "string");
+
+        w.WriteEndObject();
+        w.WriteStartArray("required");
+        w.WriteStringValue("vendorName");
+        w.WriteStringValue("rows");
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
 
     private static void WriteDrPepperPrimarySchema(Utf8JsonWriter w)
     {
@@ -2664,6 +3290,71 @@ public sealed class GeminiVisionReader
     }
 
     /// <summary>
+    /// Any vendor's reply. The gate is only that something was read: one line with a description
+    /// and an amount. Whether a line has a barcode Modisoft can use is Core's call, so an invoice
+    /// that prints no barcodes is refused once with that reason, not read twice and called
+    /// unreadable.
+    /// </summary>
+    private static AnyInvoiceVisionReading? ParseAnyInvoiceReply(Stream stream)
+    {
+        string? json = ReplyPayload(stream);
+        if (json is null) return null;
+        using var payload = JsonDocument.Parse(json);
+        var root = payload.RootElement;
+        if (!root.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var read = new List<AnyInvoiceVisionRow>();
+        foreach (var row in rows.EnumerateArray())
+        {
+            var item = new AnyInvoiceVisionRow
+            {
+                ItemNumber = Text(row, "itemNumber") ?? "",
+                Description = Text(row, "description") ?? "",
+                Barcode = Text(row, "barcode"),
+                Quantity = Text(row, "quantity"),
+                BilledBy = Text(row, "billedBy"),
+                UnitsPerCase = Text(row, "unitsPerCase"),
+                UnitsSource = Text(row, "unitsSource"),
+                TotalUnits = Text(row, "totalUnits"),
+                Price = Text(row, "price"),
+                Amount = Text(row, "amount"),
+                IsCredit = NullableFlag(row, "isCredit"),
+            };
+            if (item.Description.Length == 0 && item.ItemNumber.Length == 0 && item.Barcode is null
+                && item.Quantity is null && item.Amount is null)
+                continue;
+            read.Add(item);
+        }
+
+        if (!read.Any(row => row.Description.Length > 0 && Money(row.Amount) is not null))
+            return null;
+
+        var charges = new List<AnyInvoiceCharge>();
+        if (root.TryGetProperty("charges", out var chargeValues)
+            && chargeValues.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var charge in chargeValues.EnumerateArray())
+            {
+                string label = Text(charge, "label") ?? "";
+                string? amount = Text(charge, "amount");
+                if (label.Length == 0 && amount is null) continue;
+                charges.Add(new AnyInvoiceCharge(label, amount));
+            }
+        }
+
+        return new AnyInvoiceVisionReading
+        {
+            Status = AnyInvoiceVisionStatus.Success,
+            VendorName = Text(root, "vendorName") ?? "",
+            Rows = read,
+            Charges = charges,
+            InvoiceTotal = Text(root, "invoiceTotal"),
+            TotalQuantity = Text(root, "totalQuantity"),
+        };
+    }
+
+    /// <summary>
     /// The JSON the model actually wrote, or null if it did not write usable JSON.
     ///
     /// A reply that ran out of room comes back as a 200 with `finishReason` MAX_TOKENS and either a
@@ -2691,7 +3382,8 @@ public sealed class GeminiVisionReader
 
         var text = new StringBuilder();
         foreach (var part in parts.EnumerateArray())
-            if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+            if (!IsThought(part) && part.TryGetProperty("text", out var t)
+                && t.ValueKind == JsonValueKind.String)
                 text.Append(t.GetString());
         return text.Length == 0 ? null : text.ToString();
     }
