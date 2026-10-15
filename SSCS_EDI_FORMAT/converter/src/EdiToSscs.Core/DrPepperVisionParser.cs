@@ -113,9 +113,6 @@ public static class DrPepperVisionParser
                 RetailPrice = !credit && wholesale > 0m && cases > 0
                     ? decimal.Round(wholesale * cases / count, 2, MidpointRounding.AwayFromZero)
                     : RetailSeed.FromCost(unitCost),
-                // Dr Pepper bills by the case (CASES x NET), which is how Modisoft counts. A credit
-                // prints CASES 0 and goes to Modisoft one unit at a time instead.
-                Cases = cases > 0 ? cases : null,
             });
         }
 

@@ -49,9 +49,7 @@ public sealed record AnyInvoiceVisionRow
 public sealed record AnyInvoiceCharge(string Label, string? Amount);
 
 /// <summary>
-/// One invoice from a vendor the converter has no reader of its own for, read off the pictures in a
-/// single request. It carries no invoice number and no date, for the same reason no vendor's does:
-/// those are typed off the paper into empty boxes.
+/// One invoice from any vendor, read off the pictures in a single request, for Modisoft only.
 /// </summary>
 public sealed record AnyInvoiceVisionReading
 {
@@ -59,6 +57,15 @@ public sealed record AnyInvoiceVisionReading
 
     /// <summary>The supplier's name as printed at the top of the invoice. Names the file, nothing more.</summary>
     public string VendorName { get; init; } = "";
+
+    /// <summary>
+    /// The printed invoice number. Unlike every SSCS vendor's, it is read rather than typed: Modisoft
+    /// never takes it from the file, so it only names the file and fills the header.
+    /// </summary>
+    public string? InvoiceNumber { get; init; }
+
+    /// <summary>The printed invoice date as YYYY-MM-DD. Header only, like the number.</summary>
+    public string? InvoiceDate { get; init; }
 
     public IReadOnlyList<AnyInvoiceVisionRow> Rows { get; init; } = [];
     public IReadOnlyList<AnyInvoiceCharge> Charges { get; init; } = [];

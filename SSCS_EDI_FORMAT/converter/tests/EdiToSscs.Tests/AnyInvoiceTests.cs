@@ -34,6 +34,8 @@ public class AnyInvoiceTests
         ],
         InvoiceTotal = "517.94",
         TotalQuantity = "16",
+        InvoiceNumber = "424753",
+        InvoiceDate = "2026-10-06",
     };
 
     // ------------------------------------------------------------------ barcodes
@@ -165,7 +167,7 @@ public class AnyInvoiceTests
         var warnings = new List<ConversionWarning>();
 
         var ticket = AnyInvoiceParser.Parse(SilverEagle(), warnings);
-        var records = ModisoftEdiBuilder.Lines(ticket.ToInvoice("424753", new DateOnly(2026, 10, 6)), warnings);
+        var records = ModisoftEdiBuilder.Lines(ticket.ToInvoice(new DateOnly(2026, 10, 6)), warnings);
 
         Assert.Equal(new GhraLine("080660957579", "MOD ESP 2/12 LNNR", "", 35.60m, 2, 7, 0m), records[0]);
         Assert.Equal(new GhraLine("080660957104", "MOD ESP 24/12 SUITCASE", "", 29.86m, 1, 9, 0m), records[1]);
@@ -190,7 +192,7 @@ public class AnyInvoiceTests
         var warnings = new List<ConversionWarning>();
 
         var ticket = AnyInvoiceParser.Parse(reading, warnings);
-        var record = Assert.Single(ModisoftEdiBuilder.Lines(ticket.ToInvoice("1", new DateOnly(2026, 10, 15)), warnings));
+        var record = Assert.Single(ModisoftEdiBuilder.Lines(ticket.ToInvoice(new DateOnly(2026, 10, 15)), warnings));
 
         Assert.Equal(100.25m, ticket.Lines[0].ExtendedCost);
         Assert.Equal(4.01m, record.CaseCost);
@@ -214,7 +216,7 @@ public class AnyInvoiceTests
         var warnings = new List<ConversionWarning>();
 
         var ticket = AnyInvoiceParser.Parse(reading, warnings);
-        var records = ModisoftEdiBuilder.Lines(ticket.ToInvoice("1", new DateOnly(2026, 10, 15)), warnings);
+        var records = ModisoftEdiBuilder.Lines(ticket.ToInvoice(new DateOnly(2026, 10, 15)), warnings);
 
         Assert.Equal(new GhraLine("078000082401", "12Z12P AW ROOT BEER", "", 6.37m, 1, -1, 0m), records[2]);
         Assert.All(warnings, warning => Assert.True(warning.Routine, warning.Message));
@@ -403,8 +405,12 @@ public class AnyInvoiceTests
         }, tmp.Sub("out"));
     }
 
+    /// <summary>
+    /// Nothing is typed (2026-10-15): Modisoft takes the number and date from the purchase, never the
+    /// file, so the ones read off the paper only name the file and fill the header.
+    /// </summary>
     [Fact]
-    public void AnyVendorsPdfBecomesAModisoftFileNamedAfterTheVendor()
+    public void AnyVendorsPdfBecomesAModisoftFileWithoutAskingAnything()
     {
         using var tmp = new TempDir();
         var prompt = new Prompt();
@@ -415,9 +421,7 @@ public class AnyInvoiceTests
 
         Assert.True(outcome.Success, outcome.UserMessage);
         Assert.Single(vision.Read);
-        var request = Assert.Single(prompt.Details);
-        Assert.Equal("Silver Eagle Beverages, LLC", request.Vendor);
-        Assert.Equal(517.94m, request.Total);
+        Assert.Empty(prompt.Details);
 
         var doc = Assert.Single(outcome.Documents);
         Assert.Equal("MODISOFT_SILVEREAGLE_424753.txt", doc.FileName);
@@ -425,6 +429,49 @@ public class AnyInvoiceTests
         Assert.Equal("GHRA   00004247531006260000051794", records[0]);
         Assert.StartsWith("B080660957579 MOD ESP 2/12 LNNR", records[1], StringComparison.Ordinal);
         Assert.Equal(ModisoftEdiBuilder.ChargeRecord, records[^1]);
+    }
+
+    [Fact]
+    public void WithNoNumberOrDateReadTheFileIsNamedForTheVendorAndDatedToday()
+    {
+        using var tmp = new TempDir();
+        var vision = new Vision(SilverEagle() with { InvoiceNumber = null, InvoiceDate = "10/06/26" });
+
+        var outcome = Convert(tmp, "invoice.pdf", File.ReadAllBytes(@"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf"),
+            vision, new Prompt());
+
+        Assert.True(outcome.Success, outcome.UserMessage);
+        var doc = Assert.Single(outcome.Documents);
+        Assert.Equal("MODISOFT_SILVEREAGLE.txt", doc.FileName);
+        string header = Encoding.ASCII.GetString(doc.Bytes).Split("\r\n")[0];
+        Assert.Equal("GHRA   0000000000" + DateTime.Today.ToString("MMddyy"), header[..23]);
+    }
+
+    /// <summary>
+    /// The read invoice number may only ever reach a Modisoft file, and a Modisoft file may only
+    /// come from this reader. SSCS books by the typed number.
+    /// </summary>
+    [Fact]
+    public void TheAnyInvoiceReaderAndModisoftOnlyGoTogether()
+    {
+        using var tmp = new TempDir();
+        string input = Path.Combine(tmp.Path, "invoice.pdf");
+        File.WriteAllBytes(input, File.ReadAllBytes(@"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf"));
+        var vision = new Vision(SilverEagle());
+        var service = new ConversionService(new ConversionLogger(tmp.Sub("logs")), "test", new Prompt(), vision);
+
+        var toSscs = service.ConvertFile(new QueuedFile
+        {
+            InputPath = input, Kind = ConversionKind.Pdf, Vendor = PdfVendor.Any, Target = OutputTarget.Sscs,
+        }, tmp.Sub("out"));
+        var redBullToModisoft = service.ConvertFile(new QueuedFile
+        {
+            InputPath = input, Kind = ConversionKind.Pdf, Vendor = PdfVendor.RedBull, Target = OutputTarget.Modisoft,
+        }, tmp.Sub("out"));
+
+        Assert.False(toSscs.Success);
+        Assert.False(redBullToModisoft.Success);
+        Assert.Empty(vision.Read);
     }
 
     [Fact]
@@ -509,7 +556,8 @@ public class AnyInvoiceTests
                    "quantity": "7", "billedBy": "case", "unitsPerCase": "2", "unitsSource": "printed",
                    "totalUnits": null, "price": "35.60", "amount": "249.20", "isCredit": false}],
          "charges": [{"label": "SALES TAX", "amount": "0.00"}],
-         "invoiceTotal": "249.20", "totalQuantity": "7"}
+         "invoiceTotal": "249.20", "totalQuantity": "7",
+         "invoiceNumber": "428556", "invoiceDate": "2026-10-05"}
         """;
 
     private static (AnyInvoiceVisionReading Reading, JsonDocument Request) ReadThroughGemini(byte[] file)
@@ -582,20 +630,24 @@ public class AnyInvoiceTests
         Assert.Equal(["image/jpeg"], MimeTypes(request));
     }
 
-    /// <summary>The invoice number and date are typed, never read: the reply has no room for either.</summary>
+    /// <summary>
+    /// Unlike the SSCS vendors', this reply carries the invoice number and date, because they only
+    /// name the Modisoft file: <see cref="TheAnyInvoiceReaderAndModisoftOnlyGoTogether"/>.
+    /// </summary>
     [Fact]
-    public void TheReplyHasNoFieldForAnInvoiceNumberOrDate()
+    public void TheReplyCarriesTheNumberAndDateThatNameTheFile()
     {
-        var (_, request) = ReadThroughGemini(File.ReadAllBytes(@"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf"));
+        var (reading, request) = ReadThroughGemini(File.ReadAllBytes(@"Fixtures\PDF\REDBULL_2030211863_sscs_verified.pdf"));
         var schema = request.RootElement.GetProperty("generationConfig").GetProperty("responseSchema");
 
         var names = new List<string>();
         Collect(schema, names);
 
-        Assert.Contains("invoiceTotal", names);
-        Assert.DoesNotContain(names, name =>
-            name.Contains("date", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("number", StringComparison.OrdinalIgnoreCase) && !name.Equals("itemNumber", StringComparison.Ordinal));
+        Assert.Contains("invoiceNumber", names);
+        Assert.Contains("invoiceDate", names);
+        var ticket = AnyInvoiceParser.Parse(reading, []);
+        Assert.Equal("428556", ticket.InvoiceNumber);
+        Assert.Equal(new DateOnly(2026, 10, 5), ticket.Date);
 
         static void Collect(JsonElement element, List<string> into)
         {

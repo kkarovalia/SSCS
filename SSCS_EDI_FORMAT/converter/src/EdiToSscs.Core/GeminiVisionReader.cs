@@ -596,7 +596,8 @@ public sealed class GeminiVisionReader
     /// <summary>
     /// Reads one invoice from any vendor in one request: a scan, a PDF with real text, or a photo
     /// (see <see cref="InvoicePictures"/>). Its own prompt and schema, so it cannot change a byte of
-    /// the five tuned vendors' requests. No invoice number or date field, like theirs.
+    /// the five tuned vendors' requests. Unlike theirs it reads the invoice number and date, which
+    /// only name the Modisoft file: Modisoft never takes them from it.
     /// </summary>
     public AnyInvoiceVisionReading ReadAnyInvoice(byte[] fileBytes)
     {
@@ -2060,8 +2061,9 @@ public sealed class GeminiVisionReader
         deposits, CRV, fuel or delivery surcharges, invoice-level discounts or allowances,
         rounding. label as printed; amount as printed, negative for a discount or allowance.
 
-        Ignore the printed invoice number and date completely. They are typed in separately, and
-        the response has no field for either.
+        invoiceNumber: the invoice or ticket number as printed. invoiceDate: the invoice or
+        delivery date, written as YYYY-MM-DD. Both are only used to name the file; return null for
+        either one you cannot read.
 
         Before you answer, work through every one of these checks and go back to the pictures for
         any line that fails one:
@@ -2129,6 +2131,8 @@ public sealed class GeminiVisionReader
 
         WriteField(w, "invoiceTotal", "string");
         WriteField(w, "totalQuantity", "string");
+        WriteField(w, "invoiceNumber", "string");
+        WriteField(w, "invoiceDate", "string");
 
         w.WriteEndObject();
         w.WriteStartArray("required");
@@ -3351,6 +3355,8 @@ public sealed class GeminiVisionReader
             Charges = charges,
             InvoiceTotal = Text(root, "invoiceTotal"),
             TotalQuantity = Text(root, "totalQuantity"),
+            InvoiceNumber = Text(root, "invoiceNumber"),
+            InvoiceDate = Text(root, "invoiceDate"),
         };
     }
 

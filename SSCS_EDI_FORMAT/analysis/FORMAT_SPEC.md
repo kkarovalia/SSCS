@@ -703,6 +703,12 @@ Wholesale was the user's own pick on 2026-10-09, to fix the clash.
 
 ### Verifying the other four vendors — the checklist
 
+> **Superseded 2026-10-15.** The Modisoft tab no longer runs these vendors' own readers, and the
+> `HandReading` tool and the vendor parsers' `InvoiceLine.Cases` were removed with that change.
+> This section is kept because its per-vendor expectations are what the any-invoice reader should
+> still produce (the live reads of Chubiwinos 6V9389 and Blue Bell 033100786112 matched these test
+> files line for line). To check a vendor now, convert its invoice on the tab and import that file.
+
 The test invoices, one per vendor and each with returns, are copies in the user's
 `Downloads\Modisoft test invoices` (originals untouched in the store's test folders):
 

@@ -21,9 +21,11 @@ SSCS, and, for Modisoft stores, PDF invoices into plain GHRA EDI files. Three co
   dropdown** (the user: Modisoft only needs the lines, the vendor is picked on the purchase). A PDF
   (scan or real text) or a photo goes to Gemini in one generic request
   (`GeminiVisionReader.ReadAnyInvoice`, `AnyInvoicePrompt`), and `AnyInvoiceParser` turns the
-  reading into lines; `PdfVendor.Any` routes it. The five tuned vendor readers now serve only PDF to
-  SSCS XML, which keeps its dropdown. Until 2026-10-15 this tab used those same five readers, and the
-  notes below on verifying them describe that time. `ModisoftEdiBuilder` writes a GHRA-style file with a **13-character
+  reading into lines; `PdfVendor.Any` routes it, and only it reaches Modisoft (`ConvertPdf` refuses
+  any other pairing). **Nothing is typed**: the AI reads the invoice number and date too, and they
+  only name the file and fill its header, because Modisoft takes both from the purchase typed in
+  Modisoft and never from the file. The five tuned vendor readers now serve only PDF to SSCS XML,
+  which keeps its dropdown and its typed number and date. `ModisoftEdiBuilder` writes a GHRA-style file with a **13-character
   barcode field** (78-byte records since 2026-10-09: UPC-A + a blank, EAN-13 whole) and it is
   emailed to the separate **Modisoft address**. Somebody imports it into a purchase they create in
   Modisoft: **Import Invoice → EDI → "Xpress Wholesale", for every vendor** (Texas Wholesale with
@@ -31,12 +33,10 @@ SSCS, and, for Modisoft stores, PDF invoices into plain GHRA EDI files. Three co
   whichever vendor layout is picked in that dropdown, not the vendor on the purchase; GHRA's own
   11-character layout came in ×10 under Texas Wholesale. Rules and the verified imports are in
   [analysis/FORMAT_SPEC.md](./analysis/FORMAT_SPEC.md) Part 3. **Modisoft's Qty is the file's case
-  count**, so a line goes in the vendor's billing unit (`InvoiceLine.Cases`). The new Best Stop 16
-  store is the one that uses it. **Status:** Dr Pepper verified end to end (2026-10-06, $1,468.73 to
-  the cent, credits included). **Bimbo, Blue Bell, Chubiwinos and Red Bull are next.** The
-  checklist, the test invoices and what each should look like are in Part 3, "Verifying the other
-  four vendors". Their four test files were made on 2026-10-06 and sit beside the PDFs in
-  `Downloads\Modisoft test invoices`. The import results are awaited.
+  count**, so a line goes in the vendor's billing unit (`InvoiceLine.Cases`, set only by
+  `AnyInvoiceParser`). The new Best Stop 16 store is the one that uses it. Imports verified exact
+  before the switch: Dr Pepper (2026-10-06, credits included), Blue Bell, and hand-made files for
+  Silver Eagle, Faust, Yumi, Pepsi, Frito-Lay and Mini Melts.
 - **Any other invoice → Modisoft, by hand** (2026-10-06; since 2026-10-15 only when the tab
   cannot do it — Gemini down, or no whole barcodes printed): follow
   [analysis/INVOICE_TO_MODISOFT.md](./analysis/INVOICE_TO_MODISOFT.md). Read every line and prove
@@ -55,9 +55,6 @@ SSCS, and, for Modisoft stores, PDF invoices into plain GHRA EDI files. Three co
   Xpress, so **the converter and ModisoftFile now write that layout for every invoice**. Left over:
   a store item saved with a shortened EAN-13 is not found, and becomes a duplicate until its scan
   code is set to the real 13 digits.
-- **A converter vendor while Gemini is down:** read the pictures by hand into the vendor's
-  `XxxVisionReading` and run `converter/tools/HandReading`. It drives the real `ConversionService`
-  with that reading, so the file is exactly what the app would write.
 
 Output is a portable single-file `win-x64` EXE under `converter/publish/`.
 
@@ -451,7 +448,7 @@ duplicate item, so no verification or suspicious-code net may be added back.
   Chubiwinos gets the 50% that reproduces the Ea List 5.59 SSCS shows against a 2.79 cost
 - `ConversionService.cs` — read / convert / atomic write (**writes N files for N invoices**);
   `ConversionCoordinator.cs` — queue; `IInvoiceDetailsPrompt` — asks for the invoice number and
-  **the date on every PDF invoice**. Chubiwinos' AI path asks nothing about a product row; its old
+  **the date on every SSCS PDF invoice** (the Modisoft tab asks nothing). Chubiwinos' AI path asks nothing about a product row; its old
   barcode prompt exists only inside the explicitly approved legacy OCR fallback. **The date box is
   empty, exactly like the invoice number**
   (2026-08-12): same weakness — no check digit, printed once — and a wrong year is the one thing
@@ -481,7 +478,8 @@ duplicate item, so no verification or suspicious-code net may be added back.
   record's cases, pack and case cost. A line goes in cases only when `InvoiceLine.Cases` is set
   and divides its items evenly, and in single items otherwise, so Modisoft's own units-per-case
   always gets a true count. `ConversionService.Document` picks this or `NaxmlBuilder` from
-  `QueuedFile.Target`. Every PDF vendor's output, legacy fallbacks included, goes through it.
+  `QueuedFile.Target`. Only the any-invoice reader reaches it; the five vendor readers no longer
+  set `InvoiceLine.Cases`.
 - `AnyInvoiceParser.cs`, `AnyInvoiceVisionReader.cs`, `InvoicePictures.cs` — the Modisoft tab's
   only reader (2026-10-15). `InvoicePictures.Prepare` sends a scanned PDF's page pictures (a photo's
   JPEG as it is), any other PDF whole as `application/pdf` (Silver Eagle's emailed report has no
@@ -502,7 +500,8 @@ duplicate item, so no verification or suspicious-code net may be added back.
   line with no usable barcode is left out and named with its money. Tax, deposits and fees are
   named (`PDF_OTHER_CHARGES`), not written. No line questions, no refusals but "no line Modisoft
   could match"; AI off, Google unavailable and unreadable each say what to do. Invoice number and
-  date are still typed. `AnyInvoiceTests` pins it, including the request's picture types.
+  date are read too, for the file name and header only. `AnyInvoiceTests` pins it, including the
+  request's picture types and that this reader and Modisoft only go together.
 - `EmailSender.cs` — SMTP send of the converted XML to the store, which is what actually routes an
   invoice (fact 3). One `SmtpEmailSender` per target: the Modisoft tab's sender reads
   `EmailSettings.ModisoftToAddress`, so neither tab can reach the other system's address. A store

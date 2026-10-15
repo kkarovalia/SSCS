@@ -135,13 +135,11 @@ public sealed class InvoiceLine
 
     /// <summary>
     /// How many of the vendor's own cases this line is, as printed, when the vendor bills by the
-    /// case: Dr Pepper's CASES, Red Bull's QTY, a Blue Bell dozen carton. Null when it bills the
-    /// single unit. Always positive; the sign lives on <see cref="Units"/>.
+    /// case. Null when it bills the single unit. Always positive; the sign lives on
+    /// <see cref="Units"/>. Set only by <see cref="AnyInvoiceParser"/>, the Modisoft tab's reader.
     ///
     /// SSCS never reads it. Only the Modisoft EDI file does, because Modisoft counts what arrived
-    /// in **cases** and divides the case cost by its own units-per-case to cost one item. Verified
-    /// 2026-10-05 against a 2021 GHRA import: Modisoft's Qty was the file's case count every time,
-    /// and its Units came from Modisoft's own item list, not from the file. See
+    /// in **cases** and divides the case cost by the file's units-per-case to cost one item. See
     /// <see cref="ModisoftEdiBuilder"/>.
     /// </summary>
     public int? Cases { get; init; }

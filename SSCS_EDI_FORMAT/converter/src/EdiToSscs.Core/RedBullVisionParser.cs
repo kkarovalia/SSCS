@@ -86,10 +86,6 @@ public static class RedBullVisionParser
                 Units = credit ? -units : units,
                 UnitCost = unitCost,
                 RetailPrice = RetailSeed.FromCost(unitCost, RedBullPdfParser.RetailMargin),
-                // QTY is cases, which is how Modisoft counts. A credit priced off a fractional QTY
-                // (0.08 of a case) has no whole case to give and goes in one unit at a time.
-                Cases = cases > 0m && cases == decimal.Truncate(cases) && cases <= int.MaxValue
-                    ? (int)cases : null,
             });
         }
 

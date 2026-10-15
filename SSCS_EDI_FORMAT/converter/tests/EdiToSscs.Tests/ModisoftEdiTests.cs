@@ -318,38 +318,6 @@ public class ModisoftEdiTests
 
     // ---------------------------------------------------------------- whole pipeline ----
 
-    /// <summary>
-    /// The Modisoft tab reads the PDF exactly like the SSCS tab and writes the EDI file instead of
-    /// the XML: named for its vendor and invoice, sale rows in cases, the credit unit by unit.
-    /// </summary>
-    [Fact]
-    public void TheModisoftTabWritesAGhraFileFromTheSameAiReading()
-    {
-        using var temp = new TempDir();
-        var service = new ConversionService(
-            new ConversionLogger(Path.Combine(temp.Path, "logs")), "test", new Prompt(), new DrPepperAi());
-        string input = Path.Combine(temp.Path, "dp.pdf");
-        File.Copy(TestUtil.FixturePath(@"PDF\DRPEPPER_4643519283_with_credits.pdf"), input);
-
-        var result = service.ConvertFile(new QueuedFile
-        {
-            InputPath = input, Kind = ConversionKind.Pdf, Vendor = PdfVendor.DrPepper,
-            Target = OutputTarget.Modisoft,
-        }, temp.Sub("out"));
-
-        Assert.True(result.Success, result.UserMessage);
-        string path = Assert.Single(result.FinalOutputPaths);
-        Assert.Equal("MODISOFT_DRPEPPER_4646106112.txt", Path.GetFileName(path));
-        var lines = Text(File.ReadAllBytes(path)).Split("\r\n");
-        Assert.Equal("GHRA   4646106112100226", lines[0][..23]);
-        Assert.Equal(4, lines.Length);
-        Assert.Equal("842595121766 ", lines[1][1..14]);  // the whole UPC-A and a blank
-        Assert.Equal("00002", lines[1][59..64]);   // 2 cases...
-        Assert.Equal("000012", lines[1][53..59]);  // ...of 12
-        Assert.Equal("002066", lines[1][45..51]);  // ...at $20.66
-        Assert.Equal("000-1", lines[2][59..64]);   // the credit, one unit back
-    }
-
     /// <summary>The SSCS tab is untouched: the same reading still makes XML.</summary>
     [Fact]
     public void TheSscsTabStillWritesXml()
@@ -367,81 +335,6 @@ public class ModisoftEdiTests
 
         Assert.True(result.Success, result.UserMessage);
         Assert.EndsWith(".xml", Assert.Single(result.FinalOutputPaths), StringComparison.Ordinal);
-    }
-
-    // ------------------------------------------------- the readers pass their cases on ----
-
-    [Fact]
-    public void DrPepperPassesOnItsCasesButNotACreditsZero()
-    {
-        var ticket = DrPepperVisionParser.Parse(DrPepperAi.Reading, []);
-
-        Assert.Equal(2, ticket.Lines[0].Cases);
-        Assert.Null(ticket.Lines[1].Cases);
-    }
-
-    [Fact]
-    public void RedBullPassesOnWholeCasesButNotAFractionOfOne()
-    {
-        var ticket = RedBullVisionParser.Parse(new RedBullVisionReading
-        {
-            Status = RedBullVisionStatus.Success,
-            Rows =
-            [
-                new RedBullVisionRow
-                {
-                    Description = "RED BULL 16OZ LS", Barcode = "611269546019", Cases = "2",
-                    Units = "24", Price = "35.11", Deposit = "0.00", Discount = "0.00",
-                    Sugar = "0.00", Amount = "70.22", IsCredit = false,
-                },
-                new RedBullVisionRow
-                {
-                    Description = "RED BULL 12OZ STRAWBE", Barcode = "611269321210", Cases = "0.25",
-                    Units = "(6)", Price = "2.23", Amount = "(13.36)", IsCredit = true,
-                },
-            ],
-        }, []);
-
-        Assert.Equal(2, ticket.Lines[0].Cases);
-        Assert.Null(ticket.Lines[1].Cases);
-    }
-
-    [Fact]
-    public void BlueBellPassesOnWholeDozenCartonsOnly()
-    {
-        var ticket = BlueBellVisionParser.Parse(new BlueBellVisionReading
-        {
-            Status = BlueBellVisionStatus.Success,
-            Rows =
-            [
-                new BlueBellVisionRow
-                {
-                    Page = "1", Description = "PT GR SUPREME", Upc = "007189905101",
-                    Quantity = "10.00", Price = "2.98", Extended = "29.80", PackSize = "1",
-                    IsCredit = false,
-                },
-                new BlueBellVisionRow
-                {
-                    Page = "1", Description = "DZ VANILLA SAND", Upc = "007189921122",
-                    Quantity = "2.00", Price = "6.48", Extended = "12.96", PackSize = "12",
-                    IsCredit = false,
-                },
-                new BlueBellVisionRow
-                {
-                    Page = "2", Description = "DZ VANILLA SAND", Upc = "007189921122",
-                    Quantity = "-11/12", Price = "6.48", Extended = "5.94", PackSize = "12",
-                    IsCredit = true,
-                },
-            ],
-        }, []);
-
-        Assert.Equal(new int?[] { null, 2, null }, ticket.Lines.Select(l => l.Cases));
-
-        // The cartons go to Modisoft as 2 at $6.48, and the returned bars one by one at $0.54.
-        var lines = Lines(ticket.ToInvoice("746064", new DateOnly(2026, 10, 1)), out var warnings);
-        Assert.Equal((2, 12, 6.48m), (lines[1].Cases, lines[1].Pack, lines[1].CaseCost));
-        Assert.Equal((-11, 1, 0.54m), (lines[2].Cases, lines[2].Pack, lines[2].CaseCost));
-        Assert.DoesNotContain(warnings, w => w.ReasonCode == ModisoftReasonCodes.CentsRounded);
     }
 
     // ---------------------------------------------------------------------- settings ----

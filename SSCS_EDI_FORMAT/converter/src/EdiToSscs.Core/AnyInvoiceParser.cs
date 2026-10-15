@@ -2,22 +2,32 @@ using System.Globalization;
 
 namespace EdiToSscs.Core;
 
-/// <summary>Any vendor's invoice read off the pictures, awaiting the typed invoice number and date.</summary>
+/// <summary>Any vendor's invoice read off the pictures, ready for the Modisoft file.</summary>
 public sealed class AnyInvoiceTicket
 {
     /// <summary>The supplier's name as the AI read it. It only names the file.</summary>
     public required string VendorName { get; init; }
+
+    /// <summary>The invoice number as the AI read it, or empty. It only names the file and fills the header.</summary>
+    public string InvoiceNumber { get; init; } = "";
+
+    /// <summary>The invoice date as the AI read it. Header only.</summary>
+    public DateOnly? Date { get; init; }
 
     /// <summary>The printed invoice total where one was read, otherwise what the lines come to.</summary>
     public required decimal Total { get; init; }
 
     public required IReadOnlyList<InvoiceLine> Lines { get; init; }
 
-    public Invoice ToInvoice(string invoiceNumber, DateOnly date) => new()
+    /// <summary>
+    /// The invoice, dated <paramref name="whenUnread"/> if no date was read. The header is never
+    /// left at 000000: Modisoft has only ever been sent real dates.
+    /// </summary>
+    public Invoice ToInvoice(DateOnly whenUnread) => new()
     {
         SupplierName = AnyInvoiceParser.SupplierToken(VendorName),
-        InvoiceNumber = invoiceNumber,
-        Date = date,
+        InvoiceNumber = InvoiceNumber,
+        Date = Date ?? whenUnread,
         Total = Total,
         Lines = Lines,
     };
@@ -138,9 +148,23 @@ public static class AnyInvoiceParser
         return new AnyInvoiceTicket
         {
             VendorName = vendor,
+            InvoiceNumber = InvoiceNumberOf(reading.InvoiceNumber),
+            Date = DateOnly.TryParseExact((reading.InvoiceDate ?? "").Trim(), "yyyy-MM-dd",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly date) ? date : null,
             Total = printedTotal ?? booked,
             Lines = lines,
         };
+    }
+
+    /// <summary>
+    /// The read invoice number as a file-name part: letters, digits and dashes, at most 20.
+    /// Chubiwinos' <c>6V9389</c> keeps its letter, so the file name matches the paper.
+    /// </summary>
+    private static string InvoiceNumberOf(string? read)
+    {
+        string kept = new((read ?? "").Where(c => char.IsAsciiLetterOrDigit(c) || c == '-').ToArray());
+        kept = kept.Trim('-');
+        return kept.Length > 20 ? kept[..20] : kept;
     }
 
     /// <summary>

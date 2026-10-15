@@ -339,6 +339,15 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
 
     private Converted ConvertPdf(byte[] inputBytes, string inputFileName, PdfVendor vendor)
     {
+        // Each reader goes to one place. The any-invoice reader takes its invoice number and date off
+        // the paper, which is harmless only because Modisoft never reads them; SSCS books by them.
+        // And the five vendor readers no longer pass on cases, which only Modisoft needs.
+        if ((vendor == PdfVendor.Any) != (_target == OutputTarget.Modisoft))
+            throw new EdiConversionException(PdfReasonCodes.VendorNoParser,
+                vendor == PdfVendor.Any
+                    ? "Reading any vendor's invoice only makes Modisoft files. Use the PDF to Modisoft EDI tab."
+                    : "Modisoft files are made on the PDF to Modisoft EDI tab, which reads any vendor's invoice.");
+
         // Any vendor takes photos as well as PDFs, so it is sorted out before the PDF check.
         if (vendor == PdfVendor.Any)
             return ConvertAnyInvoice(inputBytes, inputFileName, new List<ConversionWarning>());
@@ -502,9 +511,13 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
     /// There is no OCR fallback, because there is no vendor parser to fall back to. So the three
     /// ways it can stop each say what to do: AI is switched off (switch it on), Google could not be
     /// reached or was busy for its whole patience (try again later), or Google answered and found
-    /// no product line (a clearer picture). The invoice number and date are typed, as on every
-    /// vendor, and the AI-read supplier name is shown in that box's title so the clerk knows which
-    /// paper it wants.
+    /// no product line (a clearer picture).
+    ///
+    /// **Nothing is asked** (2026-10-15, the user: the invoice number and date box is "useless for
+    /// modisoft"). Modisoft takes the purchase's number and date from what is typed in Modisoft and
+    /// never from the file's header (the 2021 GHRA import: file 07/11/21 and 0000687105, purchase
+    /// 7/12/2021 and IN#687105). So what the AI reads off the paper only fills the header and names
+    /// the file, where a misread digit costs nothing. Every SSCS vendor still types both.
     /// </summary>
     private Converted ConvertAnyInvoice(byte[] inputBytes, string inputFileName, List<ConversionWarning> warnings)
     {
@@ -545,9 +558,7 @@ public sealed class ConversionService : IFileConverter, IBatchFileConverter, IPr
         }
 
         AnyInvoiceTicket ticket = AnyInvoiceParser.Parse(reading, warnings);
-        var details = AskInvoiceDetails(new InvoiceDetailsRequest(
-            inputFileName, ticket.VendorName, ticket.Total, ticket.Lines.Count, 1, 1, ticket.VendorName));
-        Invoice invoice = ticket.ToInvoice(details.InvoiceNumber, details.Date);
+        Invoice invoice = ticket.ToInvoice(DateOnly.FromDateTime(DateTime.Today));
         var doc = Document(invoice, OutputNaming.BuildOutputFileName(inputFileName), warnings);
         return new Converted([doc], "Any invoice AI", invoice.Lines.Count,
             warnings, 0, null, Headline(invoice));

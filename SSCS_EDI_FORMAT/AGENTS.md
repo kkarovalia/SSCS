@@ -16,8 +16,8 @@ lines and the vendor is picked on the purchase. The PDF to SSCS XML tab keeps it
 their tuned readers. When the tab cannot do an invoice (Gemini down, no barcodes printed), do it by
 hand with `analysis/INVOICE_TO_MODISOFT.md` and `converter/tools/ModisoftFile`. The old Texas Wholesale
 option matched barcodes on 11 digits and merged EAN-13s (Yumi, 2026-10-09). That is why the field
-is 13 and the option is Xpress Wholesale. For one of the five
-converter vendors while Gemini is unavailable, use `converter/tools/HandReading`. Deliverable is a
+is 13 and the option is Xpress Wholesale. The Modisoft tab asks for no invoice number or date: the
+AI reads them, and they only name the file, because Modisoft never reads them from it. Deliverable is a
 **self-contained portable win-x64 EXE** (no install, no admin, no separate runtime, no internet,
 no console window).
 

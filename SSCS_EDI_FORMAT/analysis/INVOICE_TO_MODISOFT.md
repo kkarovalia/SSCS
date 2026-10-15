@@ -11,13 +11,8 @@ digits, Mini Melts cut off at "…"), or a file the tab made needs fixing. The t
 could not write, every barcode it completed and every units-per-case it took from the description,
 so the notes on the converted row say what to check.
 
-**For one of those five vendors when Google's AI is busy,** don't use this guide's table. Read
-the page pictures into that vendor's `XxxVisionReading` (the same fields Gemini returns, following
-that vendor's prompt in `GeminiVisionReader`). Then run `converter/tools/HandReading`, which hands
-the reading to the real `ConversionService`. The parser, warnings and writer are the app's own, so
-the file is the one the tab would have made. The four Modisoft test invoices are in it as
-examples. Dr Pepper 4646601504 was done this way on 2026-10-06 and imported with every line
-matched.
+This guide's table is for every vendor, the five SSCS ones included. (A `HandReading` tool that fed
+those five vendors' own readers was removed on 2026-10-15, once the tab stopped using them.)
 
 It was worked out on **Silver Eagle invoice 424753** (2026-10-06, Best Stop 16's opening beer order:
 173 lines, 327 cases, $9,357.09). The file this procedure produced went into Modisoft with every
